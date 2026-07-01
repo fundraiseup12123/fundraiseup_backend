@@ -35,6 +35,7 @@ app = FastAPI(title="Sudan Donation API", version="1.0.0")
 cors_origins = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
+    "https://sudanneedsyou-production.up.railway.app",
 ]
 extra_origins = os.getenv("CORS_ORIGINS", "")
 if extra_origins:
