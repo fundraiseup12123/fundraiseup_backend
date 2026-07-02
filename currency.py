@@ -66,6 +66,25 @@ def supports_paypal(currency: str) -> bool:
     return currency.lower() in PAYPAL_CURRENCIES
 
 
+_EU_PAYPAL_COUNTRIES = {
+    "AT", "BE", "BG", "HR", "CY", "CZ", "DK", "EE", "FI", "FR", "DE", "GR", "IE", "IT",
+    "LV", "LT", "LU", "MT", "NL", "PL", "PT", "RO", "SK", "SI", "ES", "SE",
+}
+
+
+def merchant_supports_stripe_paypal() -> bool:
+    country = (
+        os.getenv("STRIPE_MERCHANT_COUNTRY")
+        or os.getenv("NEXT_PUBLIC_STRIPE_MERCHANT_COUNTRY")
+        or "US"
+    ).upper()
+    return country in _EU_PAYPAL_COUNTRIES or country in {"GB", "UK", "CH", "LI", "NO"}
+
+
+def paypal_available(display_currency: str) -> bool:
+    return merchant_supports_stripe_paypal() and supports_paypal(display_currency)
+
+
 def pkr_to_usd(amount_pkr: float) -> float:
     return round(amount_pkr / PKR_USD_RATE, 2)
 

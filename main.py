@@ -23,6 +23,7 @@ from currency import (
     format_display_amount,
     from_stripe_amount,
     supports_paypal,
+    paypal_available,
     to_stripe_amount,
 )
 from supabase_client import get_donation_by_payment_intent, insert_donation, list_donations, supabase_enabled
@@ -195,9 +196,9 @@ def _resolve_amounts(amount: float, currency: str, cover_fees: bool) -> tuple[fl
     return base, total
 
 
-def _payment_method_types(charge_curr: str, _payment_method: PaymentMethodType) -> list[str]:
+def _payment_method_types(charge_curr: str, payment_method: PaymentMethodType) -> list[str]:
     methods: list[str] = ["card"]
-    if supports_paypal(charge_curr):
+    if payment_method == "paypal" and supports_paypal(charge_curr):
         methods.append("paypal")
     return methods
 
@@ -319,7 +320,7 @@ def _build_checkout_response(
         charge_amount=charge_total,
         conversion_note=conversion_note(display_currency, payment_method, total_display),
         frequency=frequency,
-        paypal_available=supports_paypal(display_currency),
+        paypal_available=paypal_available(display_currency),
         google_pay_available=True,
     )
 
