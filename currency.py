@@ -15,7 +15,7 @@ PAYPAL_CURRENCIES = {"usd", "eur", "gbp", "aud", "cad", "chf", "nzd", "sek", "dk
 # 1 USD = X PKR (override via PKR_USD_RATE in backend/.env)
 PKR_USD_RATE = float(os.getenv("PKR_USD_RATE", "278"))
 
-PaymentMethodType = Literal["card", "google_pay", "paypal"]
+PaymentMethodType = Literal["card", "google_pay", "apple_pay", "paypal"]
 
 
 def to_stripe_amount(amount: float, currency: str) -> int:
@@ -84,3 +84,67 @@ def convert_for_charge(total_amount: float, display_currency: str, payment_metho
 def conversion_note(display_currency: str, payment_method: PaymentMethodType, total_display: float) -> str | None:
     _ = display_currency, payment_method, total_display
     return None
+
+
+# 1 USD expressed in local currency (approximate rates for admin reporting).
+USD_TO_LOCAL: dict[str, float] = {
+    "USD": 1.0,
+    "GBP": 0.79,
+    "EUR": 0.92,
+    "PKR": PKR_USD_RATE,
+    "INR": 83.5,
+    "AED": 3.67,
+    "AUD": 1.55,
+    "CAD": 1.36,
+    "CHF": 0.88,
+    "CNY": 7.25,
+    "JPY": 150.0,
+    "SAR": 3.75,
+    "SGD": 1.34,
+    "TWD": 32.0,
+    "ZAR": 18.5,
+    "NGN": 1550.0,
+    "KES": 129.0,
+    "BRL": 5.0,
+    "MXN": 17.0,
+    "TRY": 32.0,
+    "PLN": 4.0,
+    "SEK": 10.5,
+    "NOK": 10.8,
+    "DKK": 6.9,
+    "NZD": 1.65,
+    "HKD": 7.8,
+    "THB": 36.0,
+    "IDR": 15800.0,
+    "PHP": 56.0,
+    "MYR": 4.7,
+    "EGP": 49.0,
+    "ILS": 3.7,
+    "KRW": 1340.0,
+}
+
+
+def usd_rate(currency: str) -> float:
+    return USD_TO_LOCAL.get(currency.upper(), 1.0)
+
+
+def convert_to_reporting(amount: float, from_currency: str, reporting_currency: str) -> float:
+    from_code = from_currency.upper()
+    to_code = reporting_currency.upper()
+    if from_code == to_code:
+        return round(amount, 2)
+    usd_equivalent = amount / usd_rate(from_code)
+    converted = usd_equivalent * usd_rate(to_code)
+    if to_code in {c.upper() for c in ZERO_DECIMAL}:
+        return float(round(converted))
+    return round(converted, 2)
+
+
+def estimate_processing_fee(amount: float, currency: str) -> float:
+    """Estimated Stripe fee for a gift amount (before gross-up)."""
+    code = currency.lower()
+    if code == "pkr":
+        gross = math.ceil(amount / (1 - 0.035))
+        return float(round(gross - amount))
+    gross = round((amount + 0.30) / (1 - 0.029), 2)
+    return round(gross - amount, 2)

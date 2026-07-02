@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -8,6 +9,8 @@ import httpx
 from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).resolve().parent / ".env")
+
+_MISSING_COLUMN_RE = re.compile(r"Could not find the '([^']+)' column")
 
 
 def _supabase_url() -> str:
@@ -34,25 +37,72 @@ def _headers(*, prefer: str | None = None) -> dict[str, str]:
     return headers
 
 
+def _parse_insert_error(response: httpx.Response) -> str | None:
+    try:
+        body = response.json()
+        if isinstance(body, dict):
+            return body.get("message") or body.get("hint") or body.get("details") or response.text
+    except Exception:
+        pass
+    return response.text or None
+
+
+def _missing_column_from_error(error: str | None) -> str | None:
+    if not error:
+        return None
+    match = _MISSING_COLUMN_RE.search(error)
+    return match.group(1) if match else None
+
+
 def insert_donation(row: dict[str, Any]) -> dict[str, Any] | None:
     if not supabase_enabled():
         return None
 
-    try:
-        response = httpx.post(
-            f"{_supabase_url()}/rest/v1/donations",
-            headers=_headers(prefer="return=representation,resolution=ignore-duplicates"),
-            json=row,
-            timeout=15.0,
-        )
+    payload = {k: v for k, v in row.items() if v is not None}
+    optional_columns = (
+        "base_amount",
+        "platform_fee",
+        "processing_fee",
+        "payout_amount",
+        "fee_covered",
+        "utm",
+        "device",
+        "stripe_account_id",
+        "organization_id",
+        "campaign_id",
+        "status",
+        "payment_method",
+        "honoree_name",
+        "comment",
+        "email",
+    )
+
+    for _ in range(len(optional_columns) + 1):
+        try:
+            response = httpx.post(
+                f"{_supabase_url()}/rest/v1/donations",
+                headers=_headers(prefer="return=representation,resolution=ignore-duplicates"),
+                json=payload,
+                timeout=15.0,
+            )
+        except httpx.HTTPError:
+            return None
+
         if response.status_code in {200, 201}:
             data = response.json()
             return data[0] if isinstance(data, list) and data else data
+
         if response.status_code in {404, 409}:
             return None
-        response.raise_for_status()
-    except httpx.HTTPError:
+
+        error = _parse_insert_error(response)
+        missing_column = _missing_column_from_error(error)
+        if missing_column and missing_column in payload:
+            payload = {k: v for k, v in payload.items() if k != missing_column}
+            continue
+
         return None
+
     return None
 
 

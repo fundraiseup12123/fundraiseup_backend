@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 load_dotenv(Path(__file__).resolve().parent / ".env")
 
 import stripe
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -19,6 +19,7 @@ from currency import (
     charge_currency,
     conversion_note,
     convert_for_charge,
+    estimate_processing_fee,
     format_display_amount,
     from_stripe_amount,
     supports_paypal,
@@ -32,9 +33,16 @@ if not stripe.api_key:
 
 app = FastAPI(title="Sudan Donation API", version="1.0.0")
 
+
+@app.get("/health")
+def health() -> dict[str, str]:
+    return {"status": "ok"}
+
 cors_origins = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
+    "http://localhost:8000",
+    "http://127.0.0.1:8000",
     "https://sudanneedsyou-production.up.railway.app",
 ]
 extra_origins = os.getenv("CORS_ORIGINS", "")
@@ -58,6 +66,14 @@ class DonorDetails(BaseModel):
     phone: str | None = None
 
 
+class UtmParams(BaseModel):
+    source: str | None = None
+    medium: str | None = None
+    campaign: str | None = None
+    term: str | None = None
+    content: str | None = None
+
+
 class CreateCheckoutRequest(BaseModel):
     amount: float = Field(gt=0)
     currency: str = Field(min_length=3, max_length=3)
@@ -68,6 +84,8 @@ class CreateCheckoutRequest(BaseModel):
     comment: str | None = None
     donor: DonorDetails
     payment_method: PaymentMethodType = "card"
+    campaign_id: str | None = None
+    utm: UtmParams | None = None
 
 
 class SwitchPaymentMethodRequest(BaseModel):
@@ -128,9 +146,9 @@ class CheckoutResponse(BaseModel):
     google_pay_available: bool
 
 
-@app.get("/health")
-def health() -> dict[str, str]:
-    return {"status": "ok"}
+def _is_uuid(value: str) -> bool:
+    import re
+    return bool(re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", value, re.I))
 
 
 @app.get("/config")
@@ -177,9 +195,9 @@ def _resolve_amounts(amount: float, currency: str, cover_fees: bool) -> tuple[fl
     return base, total
 
 
-def _payment_method_types(charge_curr: str, payment_method: PaymentMethodType) -> list[str]:
-    methods = ["card"]
-    if payment_method == "paypal" and supports_paypal(charge_curr):
+def _payment_method_types(charge_curr: str, _payment_method: PaymentMethodType) -> list[str]:
+    methods: list[str] = ["card"]
+    if supports_paypal(charge_curr):
         methods.append("paypal")
     return methods
 
@@ -188,8 +206,12 @@ def _checkout_metadata(
     payload: CreateCheckoutRequest,
     base_amount: float,
     payment_method: PaymentMethodType,
+    *,
+    organization_id: str | None = None,
+    campaign_id: str | None = None,
+    campaign_slug: str | None = None,
 ) -> dict[str, str]:
-    return {
+    meta = {
         "first_name": payload.donor.first_name,
         "last_name": payload.donor.last_name,
         "email": payload.donor.email,
@@ -200,10 +222,38 @@ def _checkout_metadata(
         "comment": (payload.comment or "")[:500],
         "base_amount": str(base_amount),
         "cover_fees": str(payload.cover_fees).lower(),
-        "campaign": "sdnemergency",
+        "campaign": campaign_slug or "sdnemergency",
         "display_currency": payload.currency.upper(),
         "payment_method": payment_method,
     }
+    if organization_id:
+        meta["organization_id"] = organization_id
+    if campaign_id:
+        meta["campaign_id"] = campaign_id
+    if payload.utm:
+        utm_fields = {
+            "utm_source": payload.utm.source,
+            "utm_medium": payload.utm.medium,
+            "utm_campaign": payload.utm.campaign,
+            "utm_term": payload.utm.term,
+            "utm_content": payload.utm.content,
+        }
+        for key, value in utm_fields.items():
+            if value:
+                meta[key] = value[:500]
+    return meta
+
+
+def _utm_from_meta(meta: dict[str, str]) -> dict[str, str] | None:
+    fields = {
+        "source": meta.get("utm_source"),
+        "medium": meta.get("utm_medium"),
+        "campaign": meta.get("utm_campaign"),
+        "term": meta.get("utm_term"),
+        "content": meta.get("utm_content"),
+    }
+    cleaned = {key: value for key, value in fields.items() if value}
+    return cleaned or None
 
 
 def _create_once_payment_intent(
@@ -216,6 +266,7 @@ def _create_once_payment_intent(
     customer_id: str,
     receipt_email: str,
     metadata: dict[str, str],
+    stripe_account: str | None = None,
 ) -> stripe.PaymentIntent:
     charge_curr = charge_currency(display_currency, payment_method)
     charge_total = convert_for_charge(total_display, display_currency, payment_method)
@@ -229,14 +280,17 @@ def _create_once_payment_intent(
         "cover_fees": str(cover_fees).lower(),
     }
 
-    return stripe.PaymentIntent.create(
-        amount=stripe_amount,
-        currency=charge_curr,
-        customer=customer_id,
-        receipt_email=receipt_email,
-        metadata=full_metadata,
-        automatic_payment_methods={"enabled": True, "allow_redirects": "always"},
-    )
+    create_kwargs: dict = {
+        "amount": stripe_amount,
+        "currency": charge_curr,
+        "customer": customer_id,
+        "receipt_email": receipt_email,
+        "metadata": full_metadata,
+        "payment_method_types": _payment_method_types(charge_curr, payment_method),
+    }
+    if stripe_account:
+        create_kwargs["stripe_account"] = stripe_account
+    return stripe.PaymentIntent.create(**create_kwargs)
 
 
 def _build_checkout_response(
@@ -302,46 +356,82 @@ def _payload_from_intent(existing: stripe.PaymentIntent, payment_method: Payment
 
 @app.post("/checkout/create", response_model=CheckoutResponse)
 def create_checkout(payload: CreateCheckoutRequest) -> CheckoutResponse:
+    from db import rest_get_one
+    from routers.stripe_connect import resolve_stripe_account_for_checkout
+
     display_currency = payload.currency.lower()
     payment_method = payload.payment_method
+    organization_id: str | None = None
+    campaign_slug: str | None = None
+    stripe_account: str | None = None
+
+    if payload.campaign_id and _is_uuid(payload.campaign_id):
+        campaign = rest_get_one(
+            "campaigns",
+            params={"id": f"eq.{payload.campaign_id}", "select": "id,organization_id,slug,status"},
+        )
+        if not campaign or campaign.get("status") != "live":
+            raise HTTPException(status_code=400, detail="Campaign is not available for checkout")
+        organization_id = campaign["organization_id"]
+        campaign_slug = campaign["slug"]
+        stripe_account, _ = resolve_stripe_account_for_checkout(organization_id, payload.campaign_id)
 
     if payment_method == "paypal" and not supports_paypal(display_currency):
         raise HTTPException(status_code=400, detail="PayPal is only available for USD donations.")
 
     base_amount, total_display = _resolve_amounts(payload.amount, display_currency, payload.cover_fees)
-    metadata = _checkout_metadata(payload, base_amount, payment_method)
+    metadata = _checkout_metadata(
+        payload,
+        base_amount,
+        payment_method,
+        organization_id=organization_id,
+        campaign_id=payload.campaign_id,
+        campaign_slug=campaign_slug,
+    )
 
     try:
-        customer = stripe.Customer.create(
-            email=payload.donor.email,
-            name=f"{payload.donor.first_name} {payload.donor.last_name}",
-            phone=payload.donor.phone,
-            metadata=metadata,
-        )
+        customer_kwargs: dict = {
+            "email": payload.donor.email,
+            "name": f"{payload.donor.first_name} {payload.donor.last_name}",
+            "phone": payload.donor.phone,
+            "metadata": metadata,
+        }
+        if stripe_account:
+            customer_kwargs["stripe_account"] = stripe_account
+        customer = stripe.Customer.create(**customer_kwargs)
 
         if payload.frequency == "monthly":
             charge_curr = charge_currency(display_currency, payment_method)
             charge_total = convert_for_charge(total_display, display_currency, payment_method)
             stripe_amount = to_stripe_amount(charge_total, charge_curr)
 
-            product = stripe.Product.create(name="Sudan Emergency Monthly Donation")
-            price = stripe.Price.create(
-                unit_amount=stripe_amount,
-                currency=charge_curr,
-                recurring={"interval": "month"},
-                product=product.id,
-            )
-            subscription = stripe.Subscription.create(
-                customer=customer.id,
-                items=[{"price": price.id}],
-                payment_behavior="default_incomplete",
-                payment_settings={
+            product_kwargs: dict = {"name": "Monthly Donation"}
+            if stripe_account:
+                product_kwargs["stripe_account"] = stripe_account
+            product = stripe.Product.create(**product_kwargs)
+            price_kwargs: dict = {
+                "unit_amount": stripe_amount,
+                "currency": charge_curr,
+                "recurring": {"interval": "month"},
+                "product": product.id,
+            }
+            if stripe_account:
+                price_kwargs["stripe_account"] = stripe_account
+            price = stripe.Price.create(**price_kwargs)
+            sub_kwargs: dict = {
+                "customer": customer.id,
+                "items": [{"price": price.id}],
+                "payment_behavior": "default_incomplete",
+                "payment_settings": {
                     "payment_method_types": _payment_method_types(charge_curr, payment_method),
                     "save_default_payment_method": "on_subscription",
                 },
-                expand=["latest_invoice.payment_intent"],
-                metadata=metadata,
-            )
+                "expand": ["latest_invoice.payment_intent"],
+                "metadata": metadata,
+            }
+            if stripe_account:
+                sub_kwargs["stripe_account"] = stripe_account
+            subscription = stripe.Subscription.create(**sub_kwargs)
             invoice = subscription.latest_invoice
             payment_intent = None
             if invoice and getattr(invoice, "payment_intent", None):
@@ -370,6 +460,7 @@ def create_checkout(payload: CreateCheckoutRequest) -> CheckoutResponse:
             customer_id=customer.id,
             receipt_email=payload.donor.email,
             metadata=metadata,
+            stripe_account=stripe_account,
         )
 
         return _build_checkout_response(
@@ -421,6 +512,8 @@ def switch_payment_method(payment_intent_id: str, payload: SwitchPaymentMethodRe
         payment_intent = stripe.PaymentIntent.modify(
             payment_intent_id,
             amount=stripe_amount,
+            currency=charge_curr,
+            payment_method_types=_payment_method_types(charge_curr, payment_method),
             metadata={
                 **meta,
                 **metadata,
@@ -503,7 +596,7 @@ def _metadata_from_payment_intent(payment_intent: stripe.PaymentIntent) -> dict[
     return meta
 
 
-def _donation_row_from_intent(payment_intent: stripe.PaymentIntent) -> dict[str, str | float | None]:
+def _donation_row_from_intent(payment_intent: stripe.PaymentIntent) -> dict[str, str | float | None | dict[str, str]]:
     meta = _metadata_from_payment_intent(payment_intent)
     display_currency = meta.get("display_currency", payment_intent.currency.upper()).upper()
     total_display = float(meta.get("total_display", from_stripe_amount(payment_intent.amount, payment_intent.currency)))
@@ -511,22 +604,134 @@ def _donation_row_from_intent(payment_intent: stripe.PaymentIntent) -> dict[str,
     if frequency not in {"once", "monthly"}:
         frequency = "once"
 
-    return {
+    base_amount = float(meta.get("base_amount", total_display))
+    cover_fees = meta.get("cover_fees", "false").lower() == "true"
+    if cover_fees:
+        processing_fee = max(0.0, round(total_display - base_amount, 2))
+        payout_amount = base_amount
+    else:
+        processing_fee = estimate_processing_fee(base_amount, display_currency)
+        payout_amount = max(0.0, round(base_amount - processing_fee, 2))
+
+    row: dict[str, str | float | None | dict[str, str] | bool] = {
         "stripe_payment_intent_id": payment_intent.id,
         "first_name": meta.get("first_name", "Anonymous"),
         "last_name": meta.get("last_name", ""),
         "email": meta.get("email") or None,
         "amount": total_display,
+        "base_amount": base_amount,
         "currency": display_currency,
         "frequency": frequency,
         "payment_method": meta.get("payment_method"),
         "honoree_name": meta.get("honoree_name") or None,
         "comment": meta.get("comment") or None,
+        "organization_id": meta.get("organization_id"),
+        "campaign_id": meta.get("campaign_id"),
+        "status": "succeeded",
+        "fee_covered": cover_fees,
+        "platform_fee": 0,
+        "processing_fee": processing_fee,
+        "payout_amount": payout_amount,
     }
+    utm = _utm_from_meta(meta)
+    if utm:
+        row["utm"] = utm
+    return row
+
+
+from routers.super_admin import router as super_admin_router
+from routers.organizations import router as organizations_router
+from routers.public import router as public_router
+from routers.stripe_connect import router as stripe_router
+from routers.invites import router as invites_router
+from routers.admin_data import router as admin_data_router
+
+app.include_router(super_admin_router)
+app.include_router(organizations_router)
+app.include_router(public_router)
+app.include_router(stripe_router)
+app.include_router(invites_router)
+app.include_router(admin_data_router)
+
+
+@app.post("/webhooks/stripe")
+async def stripe_webhook(request: Request) -> dict[str, str]:
+    import json
+
+    payload = await request.body()
+    sig = request.headers.get("stripe-signature", "")
+    secret = os.getenv("STRIPE_WEBHOOK_SECRET", "")
+    try:
+        if secret:
+            event = stripe.Webhook.construct_event(payload, sig, secret)
+        else:
+            event = stripe.Event.construct_from(json.loads(payload), stripe.api_key)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    if event["type"] == "payment_intent.succeeded":
+        pi = event["data"]["object"]
+        meta = pi.get("metadata", {})
+        display_currency = meta.get("display_currency", pi["currency"]).upper()
+        total_display = float(meta.get("total_display", pi["amount"] / 100))
+        base_amount = float(meta.get("base_amount", total_display))
+        cover_fees = meta.get("cover_fees", "false").lower() == "true"
+        if cover_fees:
+            processing_fee = max(0.0, round(total_display - base_amount, 2))
+            payout_amount = base_amount
+        else:
+            processing_fee = estimate_processing_fee(base_amount, display_currency)
+            payout_amount = max(0.0, round(base_amount - processing_fee, 2))
+
+        row = {
+            "stripe_payment_intent_id": pi["id"],
+            "first_name": meta.get("first_name", "Anonymous"),
+            "last_name": meta.get("last_name", ""),
+            "email": meta.get("email"),
+            "amount": total_display,
+            "base_amount": base_amount,
+            "currency": display_currency,
+            "frequency": meta.get("frequency", "once"),
+            "payment_method": meta.get("payment_method"),
+            "honoree_name": meta.get("honoree_name"),
+            "comment": meta.get("comment"),
+            "status": "succeeded",
+            "organization_id": meta.get("organization_id"),
+            "campaign_id": meta.get("campaign_id"),
+            "stripe_account_id": pi.get("on_behalf_of") or (pi.get("transfer_data") or {}).get("destination"),
+            "fee_covered": cover_fees,
+            "platform_fee": 0,
+            "processing_fee": processing_fee,
+            "payout_amount": payout_amount,
+        }
+        utm = _utm_from_meta(meta)
+        if utm:
+            row["utm"] = utm
+        insert_donation({k: v for k, v in row.items() if v is not None})
+
+    if event["type"] == "account.updated":
+        from db import rest_patch
+
+        acct = event["data"]["object"]
+        rest_patch(
+            "stripe_accounts",
+            {
+                "connection_status": "active" if acct.get("charges_enabled") else "pending",
+                "charges_enabled": bool(acct.get("charges_enabled")),
+                "payouts_enabled": bool(acct.get("payouts_enabled")),
+            },
+            match={"stripe_account_id": acct["id"]},
+        )
+
+    return {"status": "ok"}
 
 
 @app.get("/donations", response_model=DonationFeedResponse)
-def get_donations(limit: int = 20, offset: int = 0) -> DonationFeedResponse:
+def get_donations(
+    limit: int = 20,
+    offset: int = 0,
+    campaign_id: str | None = None,
+) -> DonationFeedResponse:
     if limit < 1 or limit > 50:
         raise HTTPException(status_code=400, detail="limit must be between 1 and 50")
     if offset < 0:
@@ -535,7 +740,19 @@ def get_donations(limit: int = 20, offset: int = 0) -> DonationFeedResponse:
     if not supabase_enabled():
         return DonationFeedResponse(donations=[], has_more=False)
 
-    rows = list_donations(limit=limit + 1, offset=offset)
+    from db import rest_get as db_rest_get
+
+    if campaign_id and _is_uuid(campaign_id) and supabase_enabled():
+        params = {
+            "campaign_id": f"eq.{campaign_id}",
+            "select": "id,first_name,last_name,amount,currency,frequency,honoree_name,created_at",
+            "order": "created_at.desc",
+            "limit": str(limit + 1),
+            "offset": str(offset),
+        }
+        rows = db_rest_get("donations", params=params)
+    else:
+        rows = list_donations(limit=limit + 1, offset=offset)
     has_more = len(rows) > limit
     visible = rows[:limit]
 
@@ -582,7 +799,6 @@ def record_donation(payload: RecordDonationRequest) -> DonationFeedItem:
             created_at=saved["created_at"],
         )
 
-    rows = list_donations(limit=100, offset=0)
     existing = get_donation_by_payment_intent(payment_intent.id)
     if existing:
         return DonationFeedItem(
@@ -596,4 +812,7 @@ def record_donation(payload: RecordDonationRequest) -> DonationFeedItem:
             created_at=existing["created_at"],
         )
 
-    raise HTTPException(status_code=500, detail="Unable to save donation")
+    raise HTTPException(
+        status_code=500,
+        detail="Unable to save donation. Run backend/sql/004_add_base_amount.sql in Supabase, then retry.",
+    )
