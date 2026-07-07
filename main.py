@@ -294,9 +294,67 @@ def _create_once_payment_intent(
     return stripe.PaymentIntent.create(**create_kwargs)
 
 
+def _payment_intent_id_from_invoice(invoice: stripe.Invoice) -> str | None:
+    payments = getattr(invoice, "payments", None)
+    if payments and getattr(payments, "data", None):
+        for entry in payments.data:
+            payment = getattr(entry, "payment", None)
+            if not payment:
+                continue
+            payment_intent = getattr(payment, "payment_intent", None)
+            if isinstance(payment_intent, str):
+                return payment_intent
+            if payment_intent and getattr(payment_intent, "id", None):
+                return payment_intent.id
+
+    payment_intent = getattr(invoice, "payment_intent", None)
+    if isinstance(payment_intent, str):
+        return payment_intent
+    if payment_intent and getattr(payment_intent, "id", None):
+        return payment_intent.id
+    return None
+
+
+def _subscription_payment_details(
+    subscription: stripe.Subscription,
+    *,
+    stripe_account: str | None = None,
+) -> tuple[str, str | None]:
+    """Resolve client_secret for incomplete subscriptions across Stripe API versions."""
+    retrieve_kwargs: dict = {}
+    if stripe_account:
+        retrieve_kwargs["stripe_account"] = stripe_account
+
+    invoice = subscription.latest_invoice
+    if isinstance(invoice, str):
+        invoice = stripe.Invoice.retrieve(
+            invoice,
+            expand=["confirmation_secret", "payments.data.payment.payment_intent", "payment_intent"],
+            **retrieve_kwargs,
+        )
+
+    if not invoice:
+        raise HTTPException(status_code=500, detail="Unable to create subscription payment")
+
+    confirmation = getattr(invoice, "confirmation_secret", None)
+    if confirmation and getattr(confirmation, "client_secret", None):
+        return confirmation.client_secret, _payment_intent_id_from_invoice(invoice)
+
+    payment_intent = getattr(invoice, "payment_intent", None)
+    if payment_intent:
+        if isinstance(payment_intent, str):
+            payment_intent = stripe.PaymentIntent.retrieve(payment_intent, **retrieve_kwargs)
+        if payment_intent.client_secret:
+            return payment_intent.client_secret, payment_intent.id
+
+    raise HTTPException(status_code=500, detail="Unable to create subscription payment")
+
+
 def _build_checkout_response(
     *,
-    payment_intent: stripe.PaymentIntent,
+    payment_intent: stripe.PaymentIntent | None = None,
+    client_secret: str | None = None,
+    payment_intent_id: str | None = None,
     display_currency: str,
     payment_method: PaymentMethodType,
     base_amount: float,
@@ -306,10 +364,15 @@ def _build_checkout_response(
 ) -> CheckoutResponse:
     charge_curr = charge_currency(display_currency, payment_method)
     charge_total = convert_for_charge(total_display, display_currency, payment_method)
+    resolved_secret = client_secret or (payment_intent.client_secret if payment_intent else None)
+    resolved_payment_intent_id = payment_intent_id or (payment_intent.id if payment_intent else None)
+
+    if not resolved_secret:
+        raise HTTPException(status_code=500, detail="Unable to create subscription payment")
 
     return CheckoutResponse(
-        client_secret=payment_intent.client_secret or "",
-        payment_intent_id=payment_intent.id,
+        client_secret=resolved_secret,
+        payment_intent_id=resolved_payment_intent_id,
         subscription_id=subscription_id,
         display_amount=format_display_amount(total_display, display_currency),
         base_amount=base_amount,
@@ -359,6 +422,7 @@ def _payload_from_intent(existing: stripe.PaymentIntent, payment_method: Payment
 def create_checkout(payload: CreateCheckoutRequest) -> CheckoutResponse:
     from db import rest_get_one
     from routers.stripe_connect import resolve_stripe_account_for_checkout
+    from site_constants import ROOT_CAMPAIGN_ID
 
     display_currency = payload.currency.lower()
     payment_method = payload.payment_method
@@ -371,14 +435,14 @@ def create_checkout(payload: CreateCheckoutRequest) -> CheckoutResponse:
             "campaigns",
             params={"id": f"eq.{payload.campaign_id}", "select": "id,organization_id,slug,status"},
         )
-        if not campaign or campaign.get("status") != "live":
+        if campaign:
+            if campaign.get("status") != "live":
+                raise HTTPException(status_code=400, detail="Campaign is not available for checkout")
+            organization_id = campaign["organization_id"]
+            campaign_slug = campaign["slug"]
+            stripe_account, _ = resolve_stripe_account_for_checkout(organization_id, payload.campaign_id)
+        elif payload.campaign_id != ROOT_CAMPAIGN_ID:
             raise HTTPException(status_code=400, detail="Campaign is not available for checkout")
-        organization_id = campaign["organization_id"]
-        campaign_slug = campaign["slug"]
-        stripe_account, _ = resolve_stripe_account_for_checkout(organization_id, payload.campaign_id)
-
-    if payment_method == "paypal" and not supports_paypal(display_currency):
-        raise HTTPException(status_code=400, detail="PayPal is only available for USD donations.")
 
     base_amount, total_display = _resolve_amounts(payload.amount, display_currency, payload.cover_fees)
     metadata = _checkout_metadata(
@@ -427,23 +491,20 @@ def create_checkout(payload: CreateCheckoutRequest) -> CheckoutResponse:
                     "payment_method_types": _payment_method_types(charge_curr, payment_method),
                     "save_default_payment_method": "on_subscription",
                 },
-                "expand": ["latest_invoice.payment_intent"],
+                "expand": ["latest_invoice.confirmation_secret"],
                 "metadata": metadata,
             }
             if stripe_account:
                 sub_kwargs["stripe_account"] = stripe_account
             subscription = stripe.Subscription.create(**sub_kwargs)
-            invoice = subscription.latest_invoice
-            payment_intent = None
-            if invoice and getattr(invoice, "payment_intent", None):
-                payment_intent = invoice.payment_intent
-                if isinstance(payment_intent, str):
-                    payment_intent = stripe.PaymentIntent.retrieve(payment_intent)
-            if not payment_intent or not payment_intent.client_secret:
-                raise HTTPException(status_code=500, detail="Unable to create subscription payment")
+            client_secret, payment_intent_id = _subscription_payment_details(
+                subscription,
+                stripe_account=stripe_account,
+            )
 
             return _build_checkout_response(
-                payment_intent=payment_intent,
+                client_secret=client_secret,
+                payment_intent_id=payment_intent_id,
                 display_currency=display_currency,
                 payment_method=payment_method,
                 base_amount=base_amount,
@@ -646,6 +707,7 @@ from routers.public import router as public_router
 from routers.stripe_connect import router as stripe_router
 from routers.invites import router as invites_router
 from routers.admin_data import router as admin_data_router
+from routers.paypal import router as paypal_router
 
 app.include_router(super_admin_router)
 app.include_router(organizations_router)
@@ -653,6 +715,7 @@ app.include_router(public_router)
 app.include_router(stripe_router)
 app.include_router(invites_router)
 app.include_router(admin_data_router)
+app.include_router(paypal_router)
 
 
 @app.post("/webhooks/stripe")

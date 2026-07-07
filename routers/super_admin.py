@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 import secrets
@@ -11,9 +12,26 @@ from pydantic import BaseModel, EmailStr, Field
 
 from auth import AuthUser, require_auth, require_super_admin
 from db import rest_delete, rest_get, rest_get_one, rest_insert, rest_patch, select_columns
-from routers.organizations import CampaignContentPayload
+from routers.organizations import CampaignContentPayload, PopupViewPayload
 
 router = APIRouter(prefix="/super", tags=["super-admin"])
+
+
+def _parse_popup_view(content: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not content:
+        return None
+    raw = content.get("popup_view_json")
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw) if isinstance(raw, str) else raw
+        return parsed if isinstance(parsed, dict) else None
+    except (json.JSONDecodeError, TypeError):
+        return None
+
+
+class RootBrandingPayload(CampaignContentPayload):
+    popup_view: PopupViewPayload | None = None
 
 ROOT_CAMPAIGN_ID = os.getenv("ROOT_CAMPAIGN_ID", "00000000-0000-4000-8000-000000000002")
 
@@ -136,7 +154,11 @@ def _root_campaign_bundle() -> dict[str, Any]:
     if not campaign:
         raise HTTPException(status_code=404, detail="Root campaign not found. Run sql/002_seed_sudan_campaign.sql")
     content = rest_get_one("campaign_content", params={"campaign_id": f"eq.{ROOT_CAMPAIGN_ID}", "select": "*"})
-    return {"campaign": campaign, "content": content or {}}
+    return {
+        "campaign": campaign,
+        "content": content or {},
+        "popup_view": _parse_popup_view(content),
+    }
 
 
 @router.get("/root-branding")
@@ -146,14 +168,32 @@ def get_root_branding(user: Annotated[AuthUser, Depends(require_super_admin)]) -
 
 @router.patch("/root-branding")
 def update_root_branding(
-    payload: CampaignContentPayload,
+    payload: RootBrandingPayload,
     user: Annotated[AuthUser, Depends(require_super_admin)],
 ) -> dict[str, Any]:
-    content_data = payload.model_dump()
+    content_data = payload.model_dump(
+        exclude={"popup_view", "popup_view_json"},
+        exclude_none=True,
+    )
     content_data["updated_at"] = datetime.now(timezone.utc).isoformat()
+    if payload.popup_view is not None:
+        existing = rest_get_one(
+            "campaign_content",
+            params={"campaign_id": f"eq.{ROOT_CAMPAIGN_ID}", "select": "popup_view_json"},
+        )
+        merged = {**(_parse_popup_view(existing) or {}), **payload.popup_view.model_dump(exclude_none=True)}
+        content_data["popup_view_json"] = json.dumps(merged)
     existing = rest_get_one("campaign_content", params={"campaign_id": f"eq.{ROOT_CAMPAIGN_ID}", "select": "campaign_id"})
     if existing:
         updated = rest_patch("campaign_content", content_data, match={"campaign_id": ROOT_CAMPAIGN_ID})
+        if not updated and "popup_view_json" in content_data:
+            fallback = {k: v for k, v in content_data.items() if k != "popup_view_json"}
+            updated = rest_patch("campaign_content", fallback, match={"campaign_id": ROOT_CAMPAIGN_ID})
+            if updated:
+                raise HTTPException(
+                    status_code=503,
+                    detail="Homepage saved but pop-up view failed: run backend/sql/005_popup_view_json.sql on Supabase.",
+                )
         if not updated:
             raise HTTPException(status_code=500, detail="Failed to update root branding")
     else:

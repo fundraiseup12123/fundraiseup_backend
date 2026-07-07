@@ -82,7 +82,15 @@ def merchant_supports_stripe_paypal() -> bool:
 
 
 def paypal_available(display_currency: str) -> bool:
+    from paypal_client import paypal_configured
+
+    if paypal_configured():
+        return True
     return merchant_supports_stripe_paypal() and supports_paypal(display_currency)
+
+
+def paypal_checkout_currency() -> str:
+    return os.getenv("PAYPAL_CURRENCY", "GBP").upper()
 
 
 def pkr_to_usd(amount_pkr: float) -> float:
@@ -90,18 +98,41 @@ def pkr_to_usd(amount_pkr: float) -> float:
 
 
 def charge_currency(display_currency: str, payment_method: PaymentMethodType) -> str:
-    """Charge in the donor's selected currency for all payment methods."""
-    _ = payment_method
+    """PayPal via Stripe charges in USD when the display currency is not PayPal-supported."""
+    if payment_method == "paypal" and not supports_paypal(display_currency):
+        return "usd"
     return display_currency.lower()
 
 
 def convert_for_charge(total_amount: float, display_currency: str, payment_method: PaymentMethodType) -> float:
-    _ = display_currency, payment_method
+    if payment_method == "paypal" and not supports_paypal(display_currency):
+        code = display_currency.lower()
+        if code == "pkr":
+            return pkr_to_usd(total_amount)
+        usd_equivalent = total_amount / usd_rate(display_currency)
+        return round(usd_equivalent, 2)
     return total_amount
 
 
 def conversion_note(display_currency: str, payment_method: PaymentMethodType, total_display: float) -> str | None:
-    _ = display_currency, payment_method, total_display
+    from paypal_client import paypal_configured
+
+    if payment_method == "paypal" and paypal_configured():
+        charge_currency_code, charge_total = convert_for_paypal(total_display, display_currency)
+        if charge_currency_code != display_currency.upper():
+            return (
+                f"PayPal charges in {charge_currency_code}. Your "
+                f"{format_display_amount(total_display, display_currency)} donation is approximately "
+                f"{format_display_amount(charge_total, charge_currency_code)}."
+            )
+        return None
+
+    if payment_method == "paypal" and not supports_paypal(display_currency):
+        charge_total = convert_for_charge(total_display, display_currency, payment_method)
+        return (
+            f"PayPal charges in USD. Your {format_display_amount(total_display, display_currency)} "
+            f"donation is approximately {format_display_amount(charge_total, 'usd')}."
+        )
     return None
 
 
@@ -157,6 +188,14 @@ def convert_to_reporting(amount: float, from_currency: str, reporting_currency: 
     if to_code in {c.upper() for c in ZERO_DECIMAL}:
         return float(round(converted))
     return round(converted, 2)
+
+
+def convert_for_paypal(total_amount: float, display_currency: str) -> tuple[str, float]:
+    target = paypal_checkout_currency()
+    if display_currency.upper() == target:
+        return target, round(total_amount, 2)
+    converted = convert_to_reporting(total_amount, display_currency, target)
+    return target, round(converted, 2)
 
 
 def estimate_processing_fee(amount: float, currency: str) -> float:

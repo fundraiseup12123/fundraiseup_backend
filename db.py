@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 from typing import Any
 from urllib.parse import quote
@@ -9,6 +10,8 @@ from dotenv import load_dotenv
 from pathlib import Path
 
 load_dotenv(Path(__file__).resolve().parent / ".env")
+
+logger = logging.getLogger(__name__)
 
 
 def supabase_url() -> str:
@@ -44,12 +47,16 @@ def rest_get(
 ) -> list[dict[str, Any]]:
     if not supabase_enabled():
         return []
-    response = httpx.get(
-        f"{supabase_url()}/rest/v1/{table}",
-        headers=_headers(user_jwt=user_jwt),
-        params=params or {},
-        timeout=20.0,
-    )
+    try:
+        response = httpx.get(
+            f"{supabase_url()}/rest/v1/{table}",
+            headers=_headers(user_jwt=user_jwt),
+            params=params or {},
+            timeout=20.0,
+        )
+    except httpx.HTTPError as exc:
+        logger.warning("Supabase request failed for %s: %s", table, exc)
+        return []
     if response.status_code in {400, 404}:
         return []
     if response.status_code >= 400:
@@ -76,12 +83,16 @@ def rest_insert(
 ) -> dict[str, Any] | list[dict[str, Any]] | None:
     if not supabase_enabled():
         return None
-    response = httpx.post(
-        f"{supabase_url()}/rest/v1/{table}",
-        headers=_headers(prefer="return=representation", user_jwt=user_jwt),
-        json=row,
-        timeout=20.0,
-    )
+    try:
+        response = httpx.post(
+            f"{supabase_url()}/rest/v1/{table}",
+            headers=_headers(prefer="return=representation", user_jwt=user_jwt),
+            json=row,
+            timeout=20.0,
+        )
+    except httpx.HTTPError as exc:
+        logger.warning("Supabase insert failed for %s: %s", table, exc)
+        return None
     if response.status_code not in {200, 201}:
         return None
     data = response.json()
@@ -99,12 +110,15 @@ def rest_insert_error(
     """Return error message from Supabase if insert failed."""
     if not supabase_enabled():
         return "Supabase is not configured"
-    response = httpx.post(
-        f"{supabase_url()}/rest/v1/{table}",
-        headers=_headers(prefer="return=representation", user_jwt=user_jwt),
-        json=row,
-        timeout=20.0,
-    )
+    try:
+        response = httpx.post(
+            f"{supabase_url()}/rest/v1/{table}",
+            headers=_headers(prefer="return=representation", user_jwt=user_jwt),
+            json=row,
+            timeout=20.0,
+        )
+    except httpx.HTTPError as exc:
+        return str(exc)
     if response.status_code in {200, 201}:
         return None
     try:
@@ -126,13 +140,17 @@ def rest_patch(
     if not supabase_enabled():
         return None
     params = {k: f"eq.{v}" for k, v in match.items()}
-    response = httpx.patch(
-        f"{supabase_url()}/rest/v1/{table}",
-        headers=_headers(prefer="return=representation", user_jwt=user_jwt),
-        params=params,
-        json=row,
-        timeout=20.0,
-    )
+    try:
+        response = httpx.patch(
+            f"{supabase_url()}/rest/v1/{table}",
+            headers=_headers(prefer="return=representation", user_jwt=user_jwt),
+            params=params,
+            json=row,
+            timeout=20.0,
+        )
+    except httpx.HTTPError as exc:
+        logger.warning("Supabase patch failed for %s: %s", table, exc)
+        return None
     if response.status_code not in {200, 204}:
         return None
     data = response.json()
@@ -150,12 +168,16 @@ def rest_delete(
     if not supabase_enabled():
         return False
     params = {k: f"eq.{v}" for k, v in match.items()}
-    response = httpx.delete(
-        f"{supabase_url()}/rest/v1/{table}",
-        headers=_headers(user_jwt=user_jwt),
-        params=params,
-        timeout=20.0,
-    )
+    try:
+        response = httpx.delete(
+            f"{supabase_url()}/rest/v1/{table}",
+            headers=_headers(user_jwt=user_jwt),
+            params=params,
+            timeout=20.0,
+        )
+    except httpx.HTTPError as exc:
+        logger.warning("Supabase delete failed for %s: %s", table, exc)
+        return False
     return response.status_code in {200, 204}
 
 

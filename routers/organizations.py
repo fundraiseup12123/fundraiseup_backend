@@ -112,6 +112,20 @@ def _attach_dns_instructions(domains: list[dict[str, Any]]) -> list[dict[str, An
     return enriched
 
 
+class PopupViewPayload(BaseModel):
+    logo_url: str | None = None
+    logo_width: int = 200
+    logo_height: int = 63
+    hero_url: str | None = None
+    hero_width: int = 750
+    hero_height: int = 430
+    hero_alt: str | None = None
+    landing_headline_html: str = ""
+    landing_body_html: str = ""
+    modal_title: str = ""
+    modal_body_html: str = ""
+
+
 class CampaignContentPayload(BaseModel):
     title: str = Field(min_length=1, max_length=500)
     caption: str | None = None
@@ -126,6 +140,7 @@ class CampaignContentPayload(BaseModel):
     hero_height: int = 702
     hero_alt: str | None = None
     favicon_url: str | None = None
+    popup_view_json: str | None = None
 
 
 class CreateCampaignRequest(BaseModel):
