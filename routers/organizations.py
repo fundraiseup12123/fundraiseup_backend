@@ -154,6 +154,7 @@ class UpdateCampaignRequest(BaseModel):
     status: str | None = None
     default_currency: str | None = None
     stripe_account_id: str | None = None
+    paypal_account_id: str | None = None
     content: CampaignContentPayload | None = None
 
 
@@ -274,12 +275,17 @@ def get_campaign(
         "stripe_accounts",
         params={"organization_id": f"eq.{org_id}", "select": "*"},
     )
+    paypal_accounts = rest_get(
+        "paypal_accounts",
+        params={"organization_id": f"eq.{org_id}", "select": "*"},
+    )
     return {
         "campaign": campaign,
         "content": content,
         "currencies": currencies,
         "domains": domains,
         "stripe_accounts": stripe_accounts,
+        "paypal_accounts": paypal_accounts,
     }
 
 
@@ -300,6 +306,8 @@ def update_campaign(
         updates["default_currency"] = payload.default_currency.upper()
     if payload.stripe_account_id is not None:
         updates["stripe_account_id"] = payload.stripe_account_id or None
+    if payload.paypal_account_id is not None:
+        updates["paypal_account_id"] = payload.paypal_account_id or None
 
     campaign = None
     if updates:

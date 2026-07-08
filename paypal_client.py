@@ -1,25 +1,52 @@
 from __future__ import annotations
 
 import os
-from typing import Any
+from typing import Sequence
+from urllib.parse import quote, urlencode
 
 import httpx
 
 from currency import convert_for_paypal, format_display_amount
 
-PAYPAL_CLIENT_ID = os.getenv("PAYPAL_CLIENT_ID") or os.getenv("NEXT_PUBLIC_PAYPAL_CLIENT_ID", "")
-PAYPAL_CLIENT_SECRET = os.getenv("PAYPAL_CLIENT_SECRET", "")
-PAYPAL_ENV = os.getenv("PAYPAL_ENV", "sandbox").lower()
+
+def paypal_client_id() -> str:
+    return os.getenv("PAYPAL_CLIENT_ID") or os.getenv("NEXT_PUBLIC_PAYPAL_CLIENT_ID", "")
+
+
+def paypal_client_secret() -> str:
+    return os.getenv("PAYPAL_CLIENT_SECRET", "")
+
+
+def paypal_env() -> str:
+    explicit = os.getenv("PAYPAL_ENV", "").strip().lower()
+    if explicit:
+        return explicit
+
+    frontend = os.getenv("FRONTEND_URL", "").lower()
+    if frontend and "localhost" not in frontend and "127.0.0.1" not in frontend:
+        return "live"
+
+    return "sandbox"
 
 
 def paypal_configured() -> bool:
-    return bool(PAYPAL_CLIENT_ID and PAYPAL_CLIENT_SECRET)
+    return bool(paypal_client_id() and paypal_client_secret())
+
+
+def paypal_connect_available() -> bool:
+    return bool(paypal_client_id())
 
 
 def paypal_api_base() -> str:
-    if PAYPAL_ENV == "live":
+    if paypal_env() == "live":
         return "https://api-m.paypal.com"
     return "https://api-m.sandbox.paypal.com"
+
+
+def paypal_web_base() -> str:
+    if paypal_env() == "live":
+        return "https://www.paypal.com"
+    return "https://www.sandbox.paypal.com"
 
 
 def _paypal_access_token() -> str:
@@ -29,7 +56,7 @@ def _paypal_access_token() -> str:
     response = httpx.post(
         f"{paypal_api_base()}/v1/oauth2/token",
         data={"grant_type": "client_credentials"},
-        auth=(PAYPAL_CLIENT_ID, PAYPAL_CLIENT_SECRET),
+        auth=(paypal_client_id(), paypal_client_secret()),
         headers={"Accept": "application/json"},
         timeout=30.0,
     )
@@ -40,6 +67,146 @@ def _paypal_access_token() -> str:
     return token
 
 
+def build_paypal_oauth_url(*, state: str, redirect_uri: str) -> str:
+    client_id = paypal_client_id()
+    params = {
+        "client_id": client_id,
+        "response_type": "code",
+        "scope": "openid profile email https://uri.paypal.com/services/paypalattributes",
+        "redirect_uri": redirect_uri,
+        "state": state,
+    }
+    return f"{paypal_web_base()}/signin/authorize?{urlencode(params)}"
+
+
+def create_paypal_partner_onboarding_url(*, state: str, return_url: str) -> str:
+    token = _paypal_access_token()
+    payload = {
+        "tracking_id": state[:127],
+        "operations": [
+            {
+                "operation": "API_INTEGRATION",
+                "api_integration_preference": {
+                    "rest_api_integration": {
+                        "integration_method": "PAYPAL",
+                        "integration_type": "THIRD_PARTY",
+                        "third_party_details": {
+                            "features": ["PAYMENT", "REFUND"],
+                        },
+                    }
+                },
+            }
+        ],
+        "products": ["EXPRESS_CHECKOUT"],
+        "partner_config_override": {
+            "return_url": return_url,
+            "return_url_description": "Return to your donation platform",
+        },
+        "legal_consents": [
+            {
+                "type": "SHARE_DATA_CONSENT",
+                "granted": True,
+            }
+        ],
+    }
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+    bn_code = os.getenv("PAYPAL_BN_CODE", "")
+    if bn_code:
+        headers["PayPal-Partner-Attribution-Id"] = bn_code
+
+    response = httpx.post(
+        f"{paypal_api_base()}/v2/customer/partner-referrals",
+        json=payload,
+        headers=headers,
+        timeout=30.0,
+    )
+    if response.status_code >= 400:
+        detail = response.text
+        try:
+            detail = response.json().get("message", detail)
+        except Exception:
+            pass
+        raise RuntimeError(detail or "Unable to start PayPal onboarding")
+
+    body = response.json()
+    for link in body.get("links", []):
+        if link.get("rel") == "action_url" and link.get("href"):
+            return link["href"]
+
+    raise RuntimeError("PayPal did not return an onboarding link")
+
+
+def build_paypal_connect_url(*, state: str, redirect_uri: str, frontend_url: str) -> str | None:
+    if paypal_configured():
+        try:
+            return create_paypal_partner_onboarding_url(
+                state=state,
+                return_url=f"{redirect_uri}?state={quote(state, safe='')}",
+            )
+        except RuntimeError:
+            pass
+
+    if paypal_connect_available():
+        return build_paypal_oauth_url(state=state, redirect_uri=redirect_uri)
+
+    return None
+
+
+def build_paypal_hosted_connect_url(*, state: str, frontend_url: str) -> str:
+    return f"{frontend_url.rstrip('/')}/connect/paypal?state={quote(state, safe='')}"
+
+
+def exchange_paypal_code(code: str, redirect_uri: str) -> tuple[str, str | None]:
+    client_id = paypal_client_id()
+    client_secret = paypal_client_secret()
+    if not client_id or not client_secret:
+        raise RuntimeError("PayPal is not configured")
+
+    token_response = httpx.post(
+        f"{paypal_api_base()}/v1/oauth2/token",
+        data={
+            "grant_type": "authorization_code",
+            "code": code,
+            "redirect_uri": redirect_uri,
+        },
+        auth=(client_id, client_secret),
+        headers={"Accept": "application/json"},
+        timeout=30.0,
+    )
+    if token_response.status_code >= 400:
+        raise RuntimeError("PayPal authorization failed")
+
+    token_body = token_response.json()
+    access_token = token_body.get("access_token")
+    merchant_id = token_body.get("payer_id") or token_body.get("user_id") or token_body.get("sub")
+    email: str | None = None
+
+    if access_token:
+        user_response = httpx.get(
+            f"{paypal_api_base()}/v1/identity/oauth2/userinfo?schema=paypalv1.1",
+            headers={"Authorization": f"Bearer {access_token}"},
+            timeout=30.0,
+        )
+        if user_response.status_code < 400:
+            profile = user_response.json()
+            merchant_id = profile.get("payer_id") or profile.get("user_id") or merchant_id
+            email = profile.get("email")
+            if not email and isinstance(profile.get("emails"), list) and profile["emails"]:
+                first = profile["emails"][0]
+                if isinstance(first, dict):
+                    email = first.get("value")
+
+    if not merchant_id:
+        merchant_id = "connected"
+
+    return merchant_id, email
+
+
 def create_paypal_order(
     *,
     total_display: float,
@@ -48,11 +215,12 @@ def create_paypal_order(
     return_url: str,
     cancel_url: str,
     custom_id: str | None = None,
-) -> dict[str, Any]:
+    payee_email: str | None = None,
+) -> dict[str, object]:
     charge_currency, charge_amount = convert_for_paypal(total_display, display_currency)
     amount_value = f"{charge_amount:.2f}"
 
-    purchase_unit: dict[str, Any] = {
+    purchase_unit: dict[str, object] = {
         "amount": {
             "currency_code": charge_currency,
             "value": amount_value,
@@ -61,6 +229,8 @@ def create_paypal_order(
     }
     if custom_id:
         purchase_unit["custom_id"] = custom_id[:127]
+    if payee_email:
+        purchase_unit["payee"] = {"email_address": payee_email}
 
     payload = {
         "intent": "CAPTURE",
@@ -106,7 +276,7 @@ def create_paypal_order(
     }
 
 
-def capture_paypal_order(order_id: str) -> dict[str, Any]:
+def capture_paypal_order(order_id: str) -> dict[str, object]:
     token = _paypal_access_token()
     response = httpx.post(
         f"{paypal_api_base()}/v2/checkout/orders/{order_id}/capture",

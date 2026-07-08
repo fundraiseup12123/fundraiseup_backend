@@ -6,7 +6,9 @@ from typing import Literal
 
 from dotenv import load_dotenv
 
-load_dotenv(Path(__file__).resolve().parent / ".env")
+from env_loader import load_app_env
+
+load_app_env()
 
 import stripe
 from fastapi import FastAPI, HTTPException, Request
@@ -86,6 +88,7 @@ class CreateCheckoutRequest(BaseModel):
     donor: DonorDetails
     payment_method: PaymentMethodType = "card"
     campaign_id: str | None = None
+    checkout_view: Literal["homepage", "popup"] = "homepage"
     utm: UtmParams | None = None
 
 
@@ -444,6 +447,13 @@ def create_checkout(payload: CreateCheckoutRequest) -> CheckoutResponse:
         elif payload.campaign_id != ROOT_CAMPAIGN_ID:
             raise HTTPException(status_code=400, detail="Campaign is not available for checkout")
 
+    if not stripe_account and (
+        not payload.campaign_id or payload.campaign_id == ROOT_CAMPAIGN_ID
+    ):
+        from routers.payment_accounts import resolve_root_stripe_account
+
+        stripe_account = resolve_root_stripe_account(payload.checkout_view)
+
     base_amount, total_display = _resolve_amounts(payload.amount, display_currency, payload.cover_fees)
     metadata = _checkout_metadata(
         payload,
@@ -708,14 +718,18 @@ from routers.stripe_connect import router as stripe_router
 from routers.invites import router as invites_router
 from routers.admin_data import router as admin_data_router
 from routers.paypal import router as paypal_router
+from routers.paypal_connect import router as paypal_connect_router
+from routers.payment_accounts import router as payment_accounts_router
 
 app.include_router(super_admin_router)
+app.include_router(payment_accounts_router)
 app.include_router(organizations_router)
 app.include_router(public_router)
 app.include_router(stripe_router)
 app.include_router(invites_router)
 app.include_router(admin_data_router)
 app.include_router(paypal_router)
+app.include_router(paypal_connect_router)
 
 
 @app.post("/webhooks/stripe")

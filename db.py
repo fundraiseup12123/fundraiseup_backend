@@ -6,10 +6,9 @@ from typing import Any
 from urllib.parse import quote
 
 import httpx
-from dotenv import load_dotenv
-from pathlib import Path
+from env_loader import load_app_env
 
-load_dotenv(Path(__file__).resolve().parent / ".env")
+load_app_env()
 
 logger = logging.getLogger(__name__)
 

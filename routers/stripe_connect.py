@@ -12,17 +12,18 @@ from pydantic import BaseModel
 from auth import AuthUser, require_auth, require_org_access
 from db import rest_get, rest_get_one, rest_insert, rest_patch
 
+from frontend_url import resolve_frontend_url
+
 router = APIRouter(prefix="/stripe", tags=["stripe"])
 
 STRIPE_CONNECT_CLIENT_ID = os.getenv("STRIPE_CONNECT_CLIENT_ID", "")
-FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
 
 
 @router.get("/connect/status")
 def connect_status() -> dict[str, Any]:
     return {
         "configured": bool(STRIPE_CONNECT_CLIENT_ID),
-        "redirect_uri": f"{FRONTEND_URL}/api/stripe/callback",
+        "redirect_uri": f"{resolve_frontend_url()}/api/stripe/callback",
         "platform_mode": not bool(STRIPE_CONNECT_CLIENT_ID),
     }
 
@@ -31,6 +32,7 @@ class ConnectStartRequest(BaseModel):
     organization_id: str
     campaign_id: str | None = None
     is_default: bool = True
+    frontend_origin: str | None = None
 
 
 def _resolve_stripe_account(org_id: str, campaign_id: str | None) -> str | None:
@@ -66,18 +68,61 @@ def start_connect(
     user: Annotated[AuthUser, Depends(require_auth)],
 ) -> dict[str, str]:
     require_org_access(payload.organization_id, user, min_role="admin")
-    if not STRIPE_CONNECT_CLIENT_ID:
-        raise HTTPException(status_code=503, detail="Stripe Connect is not configured")
 
-    state = f"{payload.organization_id}:{payload.campaign_id or ''}:{int(payload.is_default)}"
-    params = {
-        "response_type": "code",
-        "client_id": STRIPE_CONNECT_CLIENT_ID,
-        "scope": "read_write",
-        "redirect_uri": f"{FRONTEND_URL}/api/stripe/callback",
-        "state": state,
-    }
-    return {"url": f"https://connect.stripe.com/oauth/authorize?{urlencode(params)}"}
+    frontend_url = resolve_frontend_url(payload.frontend_origin)
+
+    return_path = "/admin/settings/payment-methods?connected=1"
+    if payload.campaign_id:
+        return_path = f"/admin/campaigns/{payload.campaign_id}/edit?step=payments&connected=1"
+
+    return_url = f"{frontend_url}{return_path}"
+    refresh_url = return_url
+
+    if STRIPE_CONNECT_CLIENT_ID:
+        state = f"{payload.organization_id}:{payload.campaign_id or ''}:{int(payload.is_default)}"
+        params = {
+            "response_type": "code",
+            "client_id": STRIPE_CONNECT_CLIENT_ID,
+            "scope": "read_write",
+            "redirect_uri": f"{frontend_url}/api/stripe/callback",
+            "state": state,
+        }
+        return {"url": f"https://connect.stripe.com/oauth/authorize?{urlencode(params)}"}
+
+    existing = rest_get_one(
+        "stripe_accounts",
+        params={
+            "organization_id": f"eq.{payload.organization_id}",
+            "campaign_id": f"eq.{payload.campaign_id}" if payload.campaign_id else "is.null",
+            "select": "stripe_account_id",
+            "order": "created_at.desc",
+        },
+    )
+    account_id = existing.get("stripe_account_id") if existing else None
+
+    if not account_id:
+        account = stripe.Account.create(type="express", capabilities={"card_payments": {"requested": True}})
+        account_id = account.id
+        rest_insert(
+            "stripe_accounts",
+            {
+                "organization_id": payload.organization_id,
+                "campaign_id": payload.campaign_id or None,
+                "stripe_account_id": account_id,
+                "is_default": payload.is_default and not payload.campaign_id,
+                "connection_status": "pending",
+                "charges_enabled": False,
+                "payouts_enabled": False,
+            },
+        )
+
+    link = stripe.AccountLink.create(
+        account=account_id,
+        refresh_url=refresh_url,
+        return_url=return_url,
+        type="account_onboarding",
+    )
+    return {"url": link.url}
 
 
 @router.get("/callback")
@@ -85,6 +130,11 @@ def stripe_callback(
     code: str = Query(...),
     state: str = Query(...),
 ) -> RedirectResponse:
+    if state.startswith("root:"):
+        from routers.payment_accounts import handle_root_stripe_oauth_callback
+
+        return handle_root_stripe_oauth_callback(code, state)
+
     if not STRIPE_CONNECT_CLIENT_ID:
         raise HTTPException(status_code=503, detail="Stripe Connect not configured")
 
@@ -124,7 +174,7 @@ def stripe_callback(
     if campaign_id:
         redirect_path = f"/admin/campaigns/{campaign_id}/edit?step=payments&connected=1"
 
-    return RedirectResponse(url=f"{FRONTEND_URL}{redirect_path}")
+    return RedirectResponse(url=f"{resolve_frontend_url()}{redirect_path}")
 
 
 @router.get("/orgs/{org_id}/accounts")
