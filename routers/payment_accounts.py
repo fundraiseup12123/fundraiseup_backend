@@ -15,6 +15,7 @@ from db import rest_get_one, rest_insert, rest_patch
 from site_constants import ROOT_CAMPAIGN_ID
 
 from frontend_url import resolve_frontend_url
+from routers.stripe_connect import use_stripe_standard_oauth
 
 router = APIRouter(prefix="/super/payment-accounts", tags=["payment-accounts"])
 
@@ -196,7 +197,7 @@ def start_root_stripe_connect(
         f"?refresh=1&provider=stripe&view={view}"
     )
 
-    if STRIPE_CONNECT_CLIENT_ID:
+    if STRIPE_CONNECT_CLIENT_ID and use_stripe_standard_oauth():
         state = f"root:{view}"
         params = {
             "response_type": "code",

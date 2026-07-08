@@ -18,6 +18,11 @@ router = APIRouter(prefix="/stripe", tags=["stripe"])
 
 STRIPE_CONNECT_CLIENT_ID = os.getenv("STRIPE_CONNECT_CLIENT_ID", "")
 
+
+def use_stripe_standard_oauth() -> bool:
+    """Standard OAuth must be enabled in Stripe Connect settings; Express is the default."""
+    return os.getenv("STRIPE_CONNECT_USE_STANDARD_OAUTH", "").lower() in ("1", "true", "yes")
+
 EXPRESS_ACCOUNT_CAPABILITIES = {
     "card_payments": {"requested": True},
     "transfers": {"requested": True},
@@ -30,6 +35,7 @@ def connect_status() -> dict[str, Any]:
         "configured": bool(STRIPE_CONNECT_CLIENT_ID),
         "redirect_uri": f"{resolve_frontend_url()}/api/stripe/callback",
         "platform_mode": not bool(STRIPE_CONNECT_CLIENT_ID),
+        "oauth_mode": bool(STRIPE_CONNECT_CLIENT_ID and use_stripe_standard_oauth()),
     }
 
 
@@ -83,7 +89,7 @@ def start_connect(
     return_url = f"{frontend_url}{return_path}"
     refresh_url = return_url
 
-    if STRIPE_CONNECT_CLIENT_ID:
+    if STRIPE_CONNECT_CLIENT_ID and use_stripe_standard_oauth():
         state = f"{payload.organization_id}:{payload.campaign_id or ''}:{int(payload.is_default)}"
         params = {
             "response_type": "code",

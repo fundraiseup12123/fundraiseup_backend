@@ -151,9 +151,6 @@ def build_paypal_connect_url(*, state: str, redirect_uri: str, frontend_url: str
         except RuntimeError:
             pass
 
-    if paypal_connect_available():
-        return build_paypal_oauth_url(state=state, redirect_uri=redirect_uri)
-
     return None
 
 
