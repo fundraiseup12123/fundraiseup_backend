@@ -156,11 +156,11 @@ def _is_uuid(value: str) -> bool:
 
 
 @app.get("/config")
-def config() -> dict[str, str | bool]:
+def config() -> dict[str, str | list[str]]:
     publishable = os.getenv("STRIPE_PUBLISHABLE_KEY", "")
     return {
         "publishable_key": publishable,
-        "paypal_currencies": list({"usd", "eur", "gbp", "aud", "cad"}),
+        "paypal_currencies": sorted({"usd", "eur", "gbp", "aud", "cad"}),
     }
 
 
