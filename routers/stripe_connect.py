@@ -10,7 +10,7 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 
 from auth import AuthUser, require_auth, require_org_access
-from db import rest_get, rest_get_one, rest_insert, rest_patch
+from db import rest_delete, rest_get, rest_get_one, rest_insert, rest_patch
 
 from frontend_url import resolve_frontend_url
 
@@ -210,6 +210,34 @@ def list_stripe_accounts(
 ) -> list[dict[str, Any]]:
     require_org_access(org_id, user, min_role="member")
     return rest_get("stripe_accounts", params={"organization_id": f"eq.{org_id}", "select": "*"})
+
+
+@router.delete("/accounts/{account_id}")
+def disconnect_stripe_account(
+    account_id: str,
+    user: Annotated[AuthUser, Depends(require_auth)],
+) -> dict[str, bool]:
+    account = rest_get_one(
+        "stripe_accounts",
+        params={"id": f"eq.{account_id}", "select": "id,organization_id,campaign_id"},
+    )
+    if not account:
+        raise HTTPException(status_code=404, detail="Stripe account not found")
+
+    require_org_access(account["organization_id"], user, min_role="admin")
+
+    if account.get("campaign_id"):
+        campaign = rest_get_one(
+            "campaigns",
+            params={"id": f"eq.{account['campaign_id']}", "select": "stripe_account_id"},
+        )
+        if campaign and campaign.get("stripe_account_id") == account_id:
+            rest_patch("campaigns", {"stripe_account_id": None}, match={"id": account["campaign_id"]})
+
+    if not rest_delete("stripe_accounts", match={"id": account_id}):
+        raise HTTPException(status_code=500, detail="Unable to remove Stripe account")
+
+    return {"removed": True}
 
 
 def resolve_stripe_account_for_checkout(org_id: str, campaign_id: str) -> tuple[str | None, dict[str, Any] | None]:

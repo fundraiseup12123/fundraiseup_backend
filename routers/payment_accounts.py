@@ -328,6 +328,23 @@ def disconnect_root_paypal(
     return {"removed": True}
 
 
+@router.post("/stripe/disconnect")
+def disconnect_root_stripe(
+    payload: PaymentViewPayload,
+    user: Annotated[AuthUser, Depends(require_super_admin)],
+) -> dict[str, bool]:
+    accounts = _load_accounts_raw()
+    view = payload.view
+    accounts[view] = {
+        **accounts[view],
+        "stripe_account_id": None,
+        "stripe_connection_status": None,
+        "stripe_charges_enabled": False,
+    }
+    _save_accounts(accounts)
+    return {"removed": True}
+
+
 def handle_root_paypal_callback(code: str, state: str) -> RedirectResponse | None:
     if not state.startswith("root:"):
         return None
