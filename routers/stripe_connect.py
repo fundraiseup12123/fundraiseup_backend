@@ -18,6 +18,11 @@ router = APIRouter(prefix="/stripe", tags=["stripe"])
 
 STRIPE_CONNECT_CLIENT_ID = os.getenv("STRIPE_CONNECT_CLIENT_ID", "")
 
+EXPRESS_ACCOUNT_CAPABILITIES = {
+    "card_payments": {"requested": True},
+    "transfers": {"requested": True},
+}
+
 
 @router.get("/connect/status")
 def connect_status() -> dict[str, Any]:
@@ -101,7 +106,16 @@ def start_connect(
     account_id = existing.get("stripe_account_id") if existing else None
 
     if not account_id:
-        account = stripe.Account.create(type="express", capabilities={"card_payments": {"requested": True}})
+        try:
+            account = stripe.Account.create(
+                type="express",
+                capabilities=EXPRESS_ACCOUNT_CAPABILITIES,
+            )
+        except stripe.error.StripeError as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=str(exc.user_message or exc),
+            ) from exc
         account_id = account.id
         rest_insert(
             "stripe_accounts",
@@ -116,12 +130,18 @@ def start_connect(
             },
         )
 
-    link = stripe.AccountLink.create(
-        account=account_id,
-        refresh_url=refresh_url,
-        return_url=return_url,
-        type="account_onboarding",
-    )
+    try:
+        link = stripe.AccountLink.create(
+            account=account_id,
+            refresh_url=refresh_url,
+            return_url=return_url,
+            type="account_onboarding",
+        )
+    except stripe.error.StripeError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=str(exc.user_message or exc),
+        ) from exc
     return {"url": link.url}
 
 

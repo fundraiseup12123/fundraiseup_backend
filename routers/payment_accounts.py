@@ -11,7 +11,7 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 
 from auth import AuthUser, require_super_admin
-from db import rest_get_one, rest_patch
+from db import rest_get_one, rest_insert, rest_patch
 from site_constants import ROOT_CAMPAIGN_ID
 
 from frontend_url import resolve_frontend_url
@@ -20,6 +20,11 @@ router = APIRouter(prefix="/super/payment-accounts", tags=["payment-accounts"])
 
 STRIPE_CONNECT_CLIENT_ID = os.getenv("STRIPE_CONNECT_CLIENT_ID", "")
 PaymentView = Literal["homepage", "popup"]
+
+EXPRESS_ACCOUNT_CAPABILITIES = {
+    "card_payments": {"requested": True},
+    "transfers": {"requested": True},
+}
 
 
 class PaymentViewPayload(BaseModel):
@@ -77,11 +82,24 @@ def _load_accounts_raw() -> dict[str, dict[str, Any]]:
 
 
 def _save_accounts(accounts: dict[str, dict[str, Any]]) -> None:
-    rest_patch(
+    payload = {"payment_accounts_json": json.dumps(accounts)}
+    result = rest_patch(
         "campaign_content",
-        {"payment_accounts_json": json.dumps(accounts)},
+        payload,
         match={"campaign_id": ROOT_CAMPAIGN_ID},
     )
+    if result is not None:
+        return
+
+    inserted = rest_insert(
+        "campaign_content",
+        {"campaign_id": ROOT_CAMPAIGN_ID, **payload},
+    )
+    if not inserted:
+        raise HTTPException(
+            status_code=503,
+            detail="Could not save payment accounts. Run backend/sql/006_payment_accounts_json.sql in Supabase.",
+        )
 
 
 def _refresh_stripe_view(view: PaymentView, accounts: dict[str, dict[str, Any]]) -> None:
@@ -190,7 +208,16 @@ def start_root_stripe_connect(
         return {"url": f"https://connect.stripe.com/oauth/authorize?{urlencode(params)}"}
 
     if not account_id:
-        account = stripe.Account.create(type="express", capabilities={"card_payments": {"requested": True}})
+        try:
+            account = stripe.Account.create(
+                type="express",
+                capabilities=EXPRESS_ACCOUNT_CAPABILITIES,
+            )
+        except stripe.error.StripeError as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=str(exc.user_message or exc),
+            ) from exc
         account_id = account.id
         entry["stripe_account_id"] = account_id
         entry["stripe_connection_status"] = "pending"
@@ -198,12 +225,18 @@ def start_root_stripe_connect(
         accounts[view] = entry
         _save_accounts(accounts)
 
-    link = stripe.AccountLink.create(
-        account=account_id,
-        refresh_url=refresh_url,
-        return_url=return_url,
-        type="account_onboarding",
-    )
+    try:
+        link = stripe.AccountLink.create(
+            account=account_id,
+            refresh_url=refresh_url,
+            return_url=return_url,
+            type="account_onboarding",
+        )
+    except stripe.error.StripeError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=str(exc.user_message or exc),
+        ) from exc
     return {"url": link.url}
 
 
