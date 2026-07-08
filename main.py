@@ -55,7 +55,7 @@ if extra_origins:
 app.add_middleware(
     CORSMiddleware,
     allow_origins=cors_origins,
-    allow_origin_regex=r"https://.*\.ngrok-free\.(app|dev)|https://.*\.ngrok\.io",
+    allow_origin_regex=r"https://.*\.(up\.railway\.app|vercel\.app)|https://.*\.ngrok-free\.(app|dev)|https://.*\.ngrok\.io",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
