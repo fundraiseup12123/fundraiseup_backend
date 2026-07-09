@@ -720,6 +720,7 @@ from routers.admin_data import router as admin_data_router
 from routers.paypal import router as paypal_router
 from routers.paypal_connect import router as paypal_connect_router
 from routers.payment_accounts import router as payment_accounts_router
+from routers.emails import router as emails_router
 
 app.include_router(super_admin_router)
 app.include_router(payment_accounts_router)
@@ -730,6 +731,7 @@ app.include_router(invites_router)
 app.include_router(admin_data_router)
 app.include_router(paypal_router)
 app.include_router(paypal_connect_router)
+app.include_router(emails_router)
 
 
 @app.post("/webhooks/stripe")
@@ -785,7 +787,11 @@ async def stripe_webhook(request: Request) -> dict[str, str]:
         utm = _utm_from_meta(meta)
         if utm:
             row["utm"] = utm
-        insert_donation({k: v for k, v in row.items() if v is not None})
+        saved = insert_donation({k: v for k, v in row.items() if v is not None})
+        if saved:
+            from emails import send_donation_confirmation_for_row
+
+            send_donation_confirmation_for_row(saved)
 
     if event["type"] == "account.updated":
         from db import rest_patch
@@ -866,6 +872,9 @@ def record_donation(payload: RecordDonationRequest) -> DonationFeedItem:
     row = _donation_row_from_intent(payment_intent)
     saved = insert_donation(row)
     if saved:
+        from emails import send_donation_confirmation_for_row
+
+        send_donation_confirmation_for_row(saved)
         return DonationFeedItem(
             id=str(saved["id"]),
             first_name=saved["first_name"],

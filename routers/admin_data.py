@@ -432,6 +432,18 @@ def list_email_logs(
     limit: int = Query(50, ge=1, le=200),
 ) -> list[dict[str, Any]]:
     require_org_access(org_id, user, min_role="member")
+    rows = rest_get(
+        "email_logs",
+        params={
+            "organization_id": f"eq.{org_id}",
+            "select": "id,recipient_email,subject,template_key,sent_at,opened_at,donation_id",
+            "order": "sent_at.desc",
+            "limit": str(limit),
+        },
+    )
+    if rows:
+        return rows
+
     donations = rest_get(
         "donations",
         params={"organization_id": f"eq.{org_id}", "select": "id", "limit": "500"},
@@ -444,7 +456,7 @@ def list_email_logs(
         "email_logs",
         params={
             "donation_id": f"in.({ids_filter})",
-            "select": "*",
+            "select": "id,recipient_email,subject,template_key,sent_at,opened_at,donation_id",
             "order": "sent_at.desc",
             "limit": str(limit),
         },

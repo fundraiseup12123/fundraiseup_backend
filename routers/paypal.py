@@ -150,7 +150,7 @@ def _record_paypal_donation(
     payload: CreatePayPalOrderRequest | CompletePayPalRedirectRequest,
     base_amount: float,
     total_display: float,
-) -> bool:
+) -> dict[str, object] | None:
     display_currency = payload.currency.upper()
     cover_fees = payload.cover_fees
     if cover_fees:
@@ -195,8 +195,8 @@ def _record_paypal_donation(
             row["utm"] = utm
 
     if not supabase_enabled():
-        return False
-    return insert_donation(row) is not None
+        return None
+    return insert_donation(row)
 
 
 @router.get("/checkout-config")
@@ -286,13 +286,17 @@ def paypal_complete_redirect(payload: CompletePayPalRedirectRequest) -> CaptureP
     display_currency = payload.currency.lower()
     base_amount, total_display = _resolve_total(payload.amount, display_currency, payload.cover_fees)
     order_id = f"paypal:{payload.paypal_txn_id}" if payload.paypal_txn_id else f"paypal:{payload.payment_ref}"
-    recorded = _record_paypal_donation(
+    saved = _record_paypal_donation(
         order_id=order_id,
         payload=payload,
         base_amount=base_amount,
         total_display=total_display,
     )
-    return CapturePayPalOrderResponse(order_id=order_id, status="COMPLETED", recorded=recorded)
+    if saved:
+        from emails import send_donation_confirmation_for_row
+
+        send_donation_confirmation_for_row(saved)
+    return CapturePayPalOrderResponse(order_id=order_id, status="COMPLETED", recorded=bool(saved))
 
 
 @router.post("/create-order", response_model=CreatePayPalOrderResponse)
@@ -366,14 +370,18 @@ def paypal_capture_order(payload: CapturePayPalOrderRequest) -> CapturePayPalOrd
     display_currency = payload.currency.upper()
     base_amount, total_display = _resolve_total(payload.amount, payload.currency.lower(), payload.cover_fees)
     order_id = f"paypal:{payload.order_id}"
-    recorded = _record_paypal_donation(
+    saved = _record_paypal_donation(
         order_id=order_id,
         payload=payload,
         base_amount=base_amount,
         total_display=total_display,
     )
+    if saved:
+        from emails import send_donation_confirmation_for_row
 
-    return CapturePayPalOrderResponse(order_id=payload.order_id, status=status, recorded=recorded)
+        send_donation_confirmation_for_row(saved)
+
+    return CapturePayPalOrderResponse(order_id=payload.order_id, status=status, recorded=bool(saved))
 
 
 @router.get("/config")

@@ -19,5 +19,6 @@
 --   005_popup_view_json.sql
 --   006_payment_accounts_json.sql
 --   007_paypal_accounts.sql
+--   009_email_reminders.sql
 --   donations.sql                        (included in 000)
 --   seed_donations.sql                   (optional sample data)
