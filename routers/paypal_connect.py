@@ -74,7 +74,16 @@ def start_paypal_connect(
 ) -> dict[str, str]:
     require_org_access(payload.organization_id, user, min_role="admin")
     state = f"org:{payload.organization_id}:{payload.campaign_id or ''}:{int(payload.is_default)}"
-    return {"url": get_paypal_connect_url(state, payload.frontend_origin)}
+    try:
+        url = get_paypal_connect_url(state, payload.frontend_origin)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Unable to start PayPal connect: {exc}",
+        ) from exc
+    return {"url": url}
 
 
 @router.post("/connect/complete")

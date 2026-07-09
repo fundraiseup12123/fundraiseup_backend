@@ -250,7 +250,16 @@ def start_root_paypal_connect(
 
     view = payload.view
     state = f"root:{view}"
-    return {"url": get_paypal_connect_url(state, resolve_frontend_url(payload.frontend_origin))}
+    try:
+        url = get_paypal_connect_url(state, resolve_frontend_url(payload.frontend_origin))
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Unable to start PayPal connect: {exc}",
+        ) from exc
+    return {"url": url}
 
 
 def handle_root_stripe_oauth_callback(code: str, state: str) -> RedirectResponse:

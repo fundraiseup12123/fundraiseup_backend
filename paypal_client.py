@@ -12,20 +12,25 @@ logger = logging.getLogger(__name__)
 from currency import convert_for_paypal, format_display_amount
 
 
+def _clean_env(name: str, fallback: str = "") -> str:
+    raw = os.getenv(name, fallback) or fallback
+    return raw.strip().strip('"').strip("'")
+
+
 def paypal_client_id() -> str:
-    return os.getenv("PAYPAL_CLIENT_ID") or os.getenv("NEXT_PUBLIC_PAYPAL_CLIENT_ID", "")
+    return _clean_env("PAYPAL_CLIENT_ID") or _clean_env("NEXT_PUBLIC_PAYPAL_CLIENT_ID")
 
 
 def paypal_client_secret() -> str:
-    return os.getenv("PAYPAL_CLIENT_SECRET", "")
+    return _clean_env("PAYPAL_CLIENT_SECRET")
 
 
 def paypal_env() -> str:
-    explicit = os.getenv("PAYPAL_ENV", "").strip().lower()
+    explicit = _clean_env("PAYPAL_ENV").lower()
     if explicit:
         return explicit
 
-    frontend = os.getenv("FRONTEND_URL", "").lower()
+    frontend = _clean_env("FRONTEND_URL").lower()
     if frontend and "localhost" not in frontend and "127.0.0.1" not in frontend:
         return "live"
 
@@ -56,14 +61,25 @@ def _paypal_access_token() -> str:
     if not paypal_configured():
         raise RuntimeError("PayPal is not configured")
 
-    response = httpx.post(
-        f"{paypal_api_base()}/v1/oauth2/token",
-        data={"grant_type": "client_credentials"},
-        auth=(paypal_client_id(), paypal_client_secret()),
-        headers={"Accept": "application/json"},
-        timeout=30.0,
-    )
-    response.raise_for_status()
+    try:
+        response = httpx.post(
+            f"{paypal_api_base()}/v1/oauth2/token",
+            data={"grant_type": "client_credentials"},
+            auth=(paypal_client_id(), paypal_client_secret()),
+            headers={"Accept": "application/json"},
+            timeout=30.0,
+        )
+        response.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        detail = exc.response.text
+        try:
+            detail = exc.response.json().get("error_description", detail)
+        except Exception:
+            pass
+        raise RuntimeError(detail or "PayPal credentials rejected") from exc
+    except httpx.HTTPError as exc:
+        raise RuntimeError("Unable to reach PayPal API") from exc
+
     token = response.json().get("access_token")
     if not token:
         raise RuntimeError("PayPal auth failed")
@@ -122,12 +138,16 @@ def create_paypal_partner_onboarding_url(*, state: str, return_url: str) -> str:
     if bn_code:
         headers["PayPal-Partner-Attribution-Id"] = bn_code
 
-    response = httpx.post(
-        f"{paypal_api_base()}/v2/customer/partner-referrals",
-        json=payload,
-        headers=headers,
-        timeout=30.0,
-    )
+    try:
+        response = httpx.post(
+            f"{paypal_api_base()}/v2/customer/partner-referrals",
+            json=payload,
+            headers=headers,
+            timeout=30.0,
+        )
+    except httpx.HTTPError as exc:
+        raise RuntimeError("Unable to reach PayPal partner API") from exc
+
     if response.status_code >= 400:
         detail = response.text
         try:
@@ -152,7 +172,7 @@ def build_paypal_connect_url(*, state: str, redirect_uri: str, frontend_url: str
                 state=state,
                 return_url=f"{redirect_uri}?state={quote(state, safe='')}",
             )
-        except RuntimeError as exc:
+        except Exception as exc:
             logger.warning("PayPal partner onboarding unavailable, using OAuth: %s", exc)
         return build_paypal_oauth_url(state=state, redirect_uri=redirect_uri)
 

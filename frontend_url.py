@@ -6,11 +6,11 @@ import os
 def resolve_frontend_url(origin: str | None = None) -> str:
     """Prefer explicit origin from the browser, then FRONTEND_URL env."""
     if origin:
-        cleaned = origin.strip().rstrip("/")
+        cleaned = origin.strip().strip('"').strip("'").rstrip("/")
         if cleaned.startswith("http://") or cleaned.startswith("https://"):
             return cleaned
 
-    env_url = os.getenv("FRONTEND_URL", "").strip().rstrip("/")
+    env_url = os.getenv("FRONTEND_URL", "").strip().strip('"').strip("'").rstrip("/")
     if env_url:
         return env_url
 
