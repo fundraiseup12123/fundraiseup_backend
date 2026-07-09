@@ -126,13 +126,21 @@ def _accounts_response(accounts: dict[str, dict[str, Any]]) -> list[dict[str, An
 def payment_accounts_status(
     user: Annotated[AuthUser, Depends(require_super_admin)],
 ) -> dict[str, Any]:
+    from paypal_client import paypal_env
+
+    paypal_return_uri = f"{resolve_frontend_url()}/api/paypal/callback"
     return {
         "stripe_configured": bool(stripe.api_key),
         "paypal_configured": bool(
             os.getenv("PAYPAL_CLIENT_ID") or os.getenv("NEXT_PUBLIC_PAYPAL_CLIENT_ID")
         ),
+        "paypal_env": paypal_env(),
         "stripe_redirect_uri": f"{resolve_frontend_url()}/api/stripe/callback",
-        "paypal_redirect_uri": f"{resolve_frontend_url()}/api/paypal/callback",
+        "paypal_redirect_uri": paypal_return_uri,
+        "paypal_setup_hint": (
+            "In PayPal Developer → Live → your REST app → Return URL, add: "
+            f"{paypal_return_uri}"
+        ),
     }
 
 

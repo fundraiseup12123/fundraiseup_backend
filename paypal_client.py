@@ -110,16 +110,21 @@ def create_paypal_partner_onboarding_url(*, state: str, return_url: str) -> str:
                         "integration_method": "PAYPAL",
                         "integration_type": "THIRD_PARTY",
                         "third_party_details": {
-                            "features": ["PAYMENT", "REFUND"],
+                            "features": [
+                                "PAYMENT",
+                                "REFUND",
+                                "PARTNER_FEE",
+                                "ACCESS_MERCHANT_INFORMATION",
+                            ],
                         },
                     }
                 },
             }
         ],
-        "products": ["EXPRESS_CHECKOUT"],
+        "products": ["PPCP"],
         "partner_config_override": {
             "return_url": return_url,
-            "return_url_description": "Return to your donation platform",
+            "return_url_description": "Return to your donation platform after PayPal onboarding",
         },
         "legal_consents": [
             {
@@ -165,19 +170,30 @@ def create_paypal_partner_onboarding_url(*, state: str, return_url: str) -> str:
 
 
 def build_paypal_connect_url(*, state: str, redirect_uri: str, frontend_url: str) -> str:
-    """Official PayPal connect: partner onboarding, then OAuth, then dev email fallback."""
+    """Official PayPal partner onboarding (preferred). OAuth is opt-in only."""
     if paypal_configured():
+        partner_error: str | None = None
+        return_url = f"{redirect_uri}?state={quote(state, safe='')}"
         try:
-            return create_paypal_partner_onboarding_url(
-                state=state,
-                return_url=f"{redirect_uri}?state={quote(state, safe='')}",
-            )
+            return create_paypal_partner_onboarding_url(state=state, return_url=return_url)
         except Exception as exc:
-            logger.warning("PayPal partner onboarding unavailable, using OAuth: %s", exc)
-        return build_paypal_oauth_url(state=state, redirect_uri=redirect_uri)
+            partner_error = str(exc).strip() or "unknown error"
+            logger.warning("PayPal partner onboarding failed: %s", partner_error)
+
+        use_oauth = os.getenv("PAYPAL_CONNECT_USE_OAUTH", "").lower() in ("1", "true", "yes")
+        if use_oauth:
+            return build_paypal_oauth_url(state=state, redirect_uri=redirect_uri)
+
+        raise RuntimeError(
+            "PayPal partner onboarding could not start. "
+            f"{partner_error}. "
+            f"Add this exact Return URL in PayPal Developer → Live → your REST app → Return URL: {redirect_uri}"
+        )
 
     if paypal_client_id():
-        return build_paypal_oauth_url(state=state, redirect_uri=redirect_uri)
+        raise RuntimeError(
+            "PayPal client secret is missing on the backend. Add PAYPAL_CLIENT_SECRET in Railway."
+        )
 
     return build_paypal_hosted_connect_url(state=state, frontend_url=frontend_url)
 
