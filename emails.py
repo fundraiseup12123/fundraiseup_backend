@@ -13,6 +13,7 @@ from email_templates import (
     popup_reminder_subscribed_email,
     weekly_reminder_email,
 )
+from email_branding import DEFAULT_BRAND_NAME, DEFAULT_EMAIL_LOGO_URL, DEFAULT_PRIMARY_COLOR
 from frontend_url import resolve_frontend_url
 from site_constants import ROOT_CAMPAIGN_ID
 
@@ -36,8 +37,10 @@ def resend_configured() -> bool:
 
 
 def _brand_logo_url() -> str:
-    base = resolve_frontend_url().rstrip("/")
-    return os.getenv("EMAIL_LOGO_URL", f"{base}/assets/logo.avif")
+    explicit = os.getenv("EMAIL_LOGO_URL", "").strip()
+    if explicit:
+        return explicit
+    return DEFAULT_EMAIL_LOGO_URL
 
 
 def _campaign_branding(campaign_id: str | None) -> dict[str, str]:
