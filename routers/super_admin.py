@@ -13,6 +13,7 @@ from pydantic import BaseModel, EmailStr, Field
 from auth import AuthUser, require_auth, require_super_admin
 from db import rest_delete, rest_get, rest_get_one, rest_insert, rest_patch, select_columns
 from routers.organizations import CampaignContentPayload, PopupViewPayload
+from invite_service import fulfill_organization_invite
 
 router = APIRouter(prefix="/super", tags=["super-admin"])
 
@@ -141,11 +142,26 @@ def create_organization(
             {"campaign_id": default_campaign["id"], **DEFAULT_CAMPAIGN_CONTENT, "title": payload.name},
         )
 
+    provisioned = None
+    if invite:
+        provisioned = fulfill_organization_invite(
+            invite,
+            organization_name=payload.name,
+            first_name=payload.admin_first_name,
+            last_name=payload.admin_last_name,
+        )
+
     return {
         "organization": org,
         "invite": invite,
         "campaign": default_campaign,
-        "invite_url": f"/invite/{invite['token']}" if invite else None,
+        "email_sent": bool(provisioned and provisioned.get("email_sent")),
+        "login_url": provisioned.get("login_url") if provisioned else None,
+        "message": (
+            f"Organization created. Login details emailed to {payload.admin_email.lower()}."
+            if provisioned and provisioned.get("email_sent")
+            else f"Organization created. Configure RESEND_API_KEY to email login details to {payload.admin_email.lower()}."
+        ),
     }
 
 
@@ -334,7 +350,7 @@ def invite_organization_admin(
     payload: OrgAdminInviteRequest,
     user: Annotated[AuthUser, Depends(require_super_admin)],
 ) -> dict[str, Any]:
-    org = rest_get_one("organizations", params={"id": f"eq.{payload.organization_id}", "select": "id"})
+    org = rest_get_one("organizations", params={"id": f"eq.{payload.organization_id}", "select": "id,name"})
     if not org:
         raise HTTPException(status_code=404, detail="Organization not found")
     invite = rest_insert(
@@ -348,7 +364,20 @@ def invite_organization_admin(
     )
     if not invite:
         raise HTTPException(status_code=400, detail="Failed to create invite")
-    return {"invite": invite, "invite_url": f"/invite/{invite['token']}"}
+    provisioned = fulfill_organization_invite(
+        invite,
+        organization_name=str(org.get("name") or "your organization"),
+    )
+    return {
+        "invite": invite,
+        "email_sent": bool(provisioned.get("email_sent")),
+        "login_url": provisioned.get("login_url"),
+        "message": (
+            f"Login details emailed to {payload.email.lower()}."
+            if provisioned.get("email_sent")
+            else f"Admin account created. Configure RESEND_API_KEY to email login details to {payload.email.lower()}."
+        ),
+    }
 
 
 @router.patch("/organization-admins/{member_id}")

@@ -181,3 +181,62 @@ def popup_reminder_subscribed_email(
         primary_color=primary_color,
     )
     return subject, html
+
+
+def org_admin_invite_email(
+    *,
+    organization_name: str,
+    role: str,
+    login_url: str,
+    email: str,
+    temporary_password: str | None,
+    existing_user: bool,
+    logo_url: str,
+    primary_color: str = "#3872DC",
+) -> tuple[str, str]:
+    subject = f"Your {escape(organization_name)} admin access"
+    role_label = escape(role.replace("_", " ").title())
+
+    if existing_user:
+        credentials = f"""
+          <p style="margin:0 0 12px;">
+            Sign in with your existing Fundraise password using <strong>{escape(email)}</strong>.
+          </p>
+        """
+        preheader = f"You now have {role_label} access to {organization_name}."
+    else:
+        credentials = f"""
+          <p style="margin:0 0 12px;">Use these credentials to sign in:</p>
+          <table role="presentation" cellspacing="0" cellpadding="0" style="margin:0 0 12px;">
+            <tr><td style="padding:4px 0;color:#64748b;">Email</td><td style="padding:4px 0 4px 16px;"><strong>{escape(email)}</strong></td></tr>
+            <tr><td style="padding:4px 0;color:#64748b;">Temporary password</td><td style="padding:4px 0 4px 16px;"><strong>{escape(temporary_password or "")}</strong></td></tr>
+          </table>
+          <p style="margin:0 0 12px;color:#64748b;font-size:14px;">
+            Change your password after signing in from Profile settings.
+          </p>
+        """
+        preheader = f"Your {organization_name} admin account is ready."
+
+    body = f"""
+      <p style="margin:0 0 12px;">Hello,</p>
+      <p style="margin:0 0 12px;">
+        You have been added as <strong>{role_label}</strong> for
+        <strong>{escape(organization_name)}</strong> on Fundraise.
+      </p>
+      {credentials}
+      <p style="margin:0;">
+        From your organization console you can manage campaigns, donations, team members, and settings
+        for <strong>{escape(organization_name)}</strong> only.
+      </p>
+    """
+
+    html = branded_email_html(
+        preheader=preheader,
+        headline=f"Welcome to {escape(organization_name)}",
+        body_html=body,
+        cta_label="Sign in to org console",
+        cta_url=login_url,
+        logo_url=logo_url,
+        primary_color=primary_color,
+    )
+    return subject, html
