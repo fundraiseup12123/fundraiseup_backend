@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 from typing import Annotated, Any
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 import stripe
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -10,7 +10,7 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 
 from auth import AuthUser, require_auth, require_org_access
-from db import rest_delete, rest_get, rest_get_one, rest_insert, rest_patch
+from db import rest_delete, rest_get, rest_get_one, rest_insert, rest_insert_result, rest_patch, rest_patch_result
 
 from frontend_url import pack_origin_token, resolve_frontend_url, unpack_origin_token
 
@@ -180,21 +180,26 @@ def stripe_callback(
     if not STRIPE_CONNECT_CLIENT_ID:
         raise HTTPException(status_code=503, detail="Stripe Connect not configured")
 
-    secret = os.getenv("STRIPE_SECRET_KEY", "")
-    try:
-        response = stripe.OAuth.token(grant_type="authorization_code", code=code)
-    except stripe.error.StripeError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    stripe_account_id = response.get("stripe_user_id")
-    if not stripe_account_id:
-        raise HTTPException(status_code=400, detail="No Stripe account returned")
-
     parts = state.split(":")
     org_id = parts[0]
     campaign_id = parts[1] if len(parts) > 1 and parts[1] else None
     is_default = len(parts) > 2 and parts[2] == "1"
     frontend_origin = unpack_origin_token(parts[3]) if len(parts) > 3 else None
+    frontend_url = resolve_frontend_url(frontend_origin)
+
+    def fail(message: str) -> RedirectResponse:
+        return RedirectResponse(
+            url=f"{frontend_url}/admin/settings/payment-methods?error={quote(message[:180], safe='')}"
+        )
+
+    try:
+        response = stripe.OAuth.token(grant_type="authorization_code", code=code)
+    except stripe.error.StripeError as exc:
+        return fail(str(exc.user_message or exc) or "Stripe authorization failed")
+
+    stripe_account_id = response.get("stripe_user_id")
+    if not stripe_account_id:
+        return fail("No Stripe account returned from OAuth")
 
     try:
         account = stripe.Account.retrieve(stripe_account_id)
@@ -205,10 +210,6 @@ def stripe_callback(
         charges_enabled = False
         payouts_enabled = False
 
-    existing = rest_get_one(
-        "stripe_accounts",
-        params={"stripe_account_id": f"eq.{stripe_account_id}", "select": "id"},
-    )
     payload = {
         "organization_id": org_id,
         "campaign_id": campaign_id or None,
@@ -218,22 +219,34 @@ def stripe_callback(
         "charges_enabled": charges_enabled,
         "payouts_enabled": payouts_enabled,
     }
+
+    existing = rest_get_one(
+        "stripe_accounts",
+        params={"stripe_account_id": f"eq.{stripe_account_id}", "select": "id"},
+    )
     if existing:
-        row = rest_patch("stripe_accounts", payload, match={"id": existing["id"]})
+        row, save_error = rest_patch_result("stripe_accounts", payload, match={"id": existing["id"]})
     else:
-        row = rest_insert("stripe_accounts", payload, on_conflict="stripe_account_id")
+        row, save_error = rest_insert_result(
+            "stripe_accounts",
+            payload,
+            on_conflict="stripe_account_id",
+        )
+        if not row and save_error:
+            row, save_error = rest_insert_result("stripe_accounts", payload)
 
     if not row:
-        raise HTTPException(status_code=500, detail="Unable to save Stripe account")
+        return fail(save_error or "Unable to save Stripe account")
 
-    if campaign_id:
-        rest_patch("campaigns", {"stripe_account_id": row["id"]}, match={"id": campaign_id})
+    row_id = row.get("id") if isinstance(row, dict) else None
+    if campaign_id and row_id:
+        rest_patch("campaigns", {"stripe_account_id": row_id}, match={"id": campaign_id})
 
     redirect_path = "/admin/settings/payment-methods?connected=1"
     if campaign_id:
         redirect_path = f"/admin/campaigns/{campaign_id}/edit?step=payments&connected=1"
 
-    return RedirectResponse(url=f"{resolve_frontend_url(frontend_origin)}{redirect_path}")
+    return RedirectResponse(url=f"{frontend_url}{redirect_path}")
 
 
 @router.get("/orgs/{org_id}/accounts")
