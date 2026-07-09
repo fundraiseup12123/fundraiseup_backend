@@ -437,6 +437,14 @@ def create_checkout(payload: CreateCheckoutRequest) -> CheckoutResponse:
     campaign_slug: str | None = None
     stripe_account: str | None = None
 
+    is_root_checkout = not payload.campaign_id or payload.campaign_id == ROOT_CAMPAIGN_ID
+
+    # Homepage / pop-up must use Super Admin → Payment accounts (Connect), not org settings.
+    if is_root_checkout:
+        from routers.payment_accounts import resolve_root_stripe_account
+
+        stripe_account = resolve_root_stripe_account(payload.checkout_view)
+
     if payload.campaign_id and _is_uuid(payload.campaign_id):
         campaign = rest_get_one(
             "campaigns",
@@ -447,16 +455,22 @@ def create_checkout(payload: CreateCheckoutRequest) -> CheckoutResponse:
                 raise HTTPException(status_code=400, detail="Campaign is not available for checkout")
             organization_id = campaign["organization_id"]
             campaign_slug = campaign["slug"]
-            stripe_account, _ = resolve_stripe_account_for_checkout(organization_id, payload.campaign_id)
+            if not is_root_checkout:
+                stripe_account, _ = resolve_stripe_account_for_checkout(
+                    organization_id, payload.campaign_id
+                )
         elif payload.campaign_id != ROOT_CAMPAIGN_ID:
             raise HTTPException(status_code=400, detail="Campaign is not available for checkout")
 
-    if not stripe_account and (
-        not payload.campaign_id or payload.campaign_id == ROOT_CAMPAIGN_ID
-    ):
-        from routers.payment_accounts import resolve_root_stripe_account
-
-        stripe_account = resolve_root_stripe_account(payload.checkout_view)
+    if not stripe_account and not is_root_checkout:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "No Stripe account is available for this campaign. "
+                "Connect Stripe in admin payment methods, or reconnect if the account "
+                "was linked under a different Stripe platform."
+            ),
+        )
 
     base_amount, total_display = _resolve_amounts(payload.amount, display_currency, payload.cover_fees)
     metadata = _checkout_metadata(

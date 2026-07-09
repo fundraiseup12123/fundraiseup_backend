@@ -168,15 +168,19 @@ def list_payment_accounts(
 
 
 def resolve_root_stripe_account(checkout_view: str | None) -> str | None:
+    from routers.stripe_connect import stripe_account_accessible
+
     view: PaymentView = "popup" if checkout_view == "popup" else "homepage"
     accounts = _load_accounts_raw()
     entry = accounts.get(view, {})
     account_id = entry.get("stripe_account_id")
     if not account_id:
         return None
-    if entry.get("stripe_connection_status") in ("active", "pending"):
-        return account_id
-    return None
+    if entry.get("stripe_connection_status") not in ("active", "pending", None):
+        return None
+    if not stripe_account_accessible(account_id):
+        return None
+    return account_id
 
 
 def resolve_root_paypal_payee(checkout_view: str | None) -> str | None:

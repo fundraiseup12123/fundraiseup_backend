@@ -291,8 +291,28 @@ def disconnect_stripe_account(
     return {"removed": True}
 
 
+def stripe_account_accessible(account_id: str | None) -> bool:
+    """True when the platform secret key can act on this connected account."""
+    if not account_id:
+        return False
+    try:
+        stripe.Account.retrieve(account_id)
+        return True
+    except stripe.error.PermissionError:
+        return False
+    except stripe.error.InvalidRequestError as exc:
+        message = str(exc).lower()
+        if "does not have access" in message or "no such account" in message:
+            return False
+        raise
+    except stripe.error.StripeError:
+        return False
+
+
 def resolve_stripe_account_for_checkout(org_id: str, campaign_id: str) -> tuple[str | None, dict[str, Any] | None]:
     account_id = _resolve_stripe_account(org_id, campaign_id)
     if not account_id:
+        return None, None
+    if not stripe_account_accessible(account_id):
         return None, None
     return account_id, {"stripe_account": account_id}
