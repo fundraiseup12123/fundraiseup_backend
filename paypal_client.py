@@ -169,8 +169,22 @@ def create_paypal_partner_onboarding_url(*, state: str, return_url: str) -> str:
     raise RuntimeError("PayPal did not return an onboarding link")
 
 
+def _partner_connect_blocked(message: str) -> bool:
+    lowered = message.lower()
+    return any(
+        phrase in lowered
+        for phrase in (
+            "insufficient permissions",
+            "not authorized",
+            "not authorised",
+            "permission denied",
+            "forbidden",
+        )
+    )
+
+
 def build_paypal_connect_url(*, state: str, redirect_uri: str, frontend_url: str) -> str:
-    """Official PayPal partner onboarding (preferred). OAuth is opt-in only."""
+    """Try PayPal partner onboarding; fall back to business-email connect for standard REST apps."""
     if paypal_configured():
         partner_error: str | None = None
         return_url = f"{redirect_uri}?state={quote(state, safe='')}"
@@ -181,14 +195,11 @@ def build_paypal_connect_url(*, state: str, redirect_uri: str, frontend_url: str
             logger.warning("PayPal partner onboarding failed: %s", partner_error)
 
         use_oauth = os.getenv("PAYPAL_CONNECT_USE_OAUTH", "").lower() in ("1", "true", "yes")
-        if use_oauth:
+        if use_oauth and not _partner_connect_blocked(partner_error or ""):
             return build_paypal_oauth_url(state=state, redirect_uri=redirect_uri)
 
-        raise RuntimeError(
-            "PayPal partner onboarding could not start. "
-            f"{partner_error}. "
-            f"Add this exact Return URL in PayPal Developer → Live → your REST app → Return URL: {redirect_uri}"
-        )
+        logger.info("Using PayPal business-email connect fallback")
+        return build_paypal_hosted_connect_url(state=state, frontend_url=frontend_url)
 
     if paypal_client_id():
         raise RuntimeError(

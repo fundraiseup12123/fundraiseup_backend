@@ -135,10 +135,13 @@ def payment_accounts_status(
             os.getenv("PAYPAL_CLIENT_ID") or os.getenv("NEXT_PUBLIC_PAYPAL_CLIENT_ID")
         ),
         "paypal_env": paypal_env(),
+        "paypal_connect_mode": "partner_or_email",
         "stripe_redirect_uri": f"{resolve_frontend_url()}/api/stripe/callback",
         "paypal_redirect_uri": paypal_return_uri,
         "paypal_setup_hint": (
-            "In PayPal Developer → Live → your REST app → Return URL, add: "
+            "PayPal Partner onboarding requires a PayPal Commerce Platform partner account. "
+            "If partner connect is unavailable, Connect PayPal will ask for the business email "
+            "that should receive donations. Optional partner Return URL: "
             f"{paypal_return_uri}"
         ),
     }
