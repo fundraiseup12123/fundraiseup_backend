@@ -13,7 +13,7 @@ from auth import AuthUser, require_super_admin
 from db import rest_get_one, rest_insert, rest_patch
 from site_constants import ROOT_CAMPAIGN_ID
 
-from frontend_url import resolve_frontend_url
+from frontend_url import pack_origin_token, resolve_frontend_url, unpack_origin_token
 from routers.stripe_connect import (
     STRIPE_CONNECT_CLIENT_ID,
     build_stripe_oauth_authorize_url,
@@ -218,7 +218,7 @@ def start_root_stripe_connect(
     )
 
     if STRIPE_CONNECT_CLIENT_ID and use_stripe_standard_oauth():
-        state = f"root:{view}"
+        state = f"root:{view}:{pack_origin_token(frontend_url)}"
         return {"url": build_stripe_oauth_authorize_url(state=state, frontend_url=frontend_url)}
 
     if not account_id:
@@ -279,7 +279,9 @@ def handle_root_stripe_oauth_callback(code: str, state: str) -> RedirectResponse
     if not state.startswith("root:"):
         raise HTTPException(status_code=400, detail="Invalid state")
 
-    view = state.split(":", 1)[1]
+    parts = state.split(":")
+    view = parts[1] if len(parts) > 1 else ""
+    frontend_origin = unpack_origin_token(parts[2]) if len(parts) > 2 else None
     if view not in ("homepage", "popup"):
         raise HTTPException(status_code=400, detail="Invalid view")
 
@@ -303,7 +305,10 @@ def handle_root_stripe_oauth_callback(code: str, state: str) -> RedirectResponse
     _save_accounts(accounts)
 
     return RedirectResponse(
-        url=f"{resolve_frontend_url()}/super-admin/payment-accounts?connected=1&provider=stripe&view={view}"
+        url=(
+            f"{resolve_frontend_url(frontend_origin)}/super-admin/payment-accounts"
+            f"?connected=1&provider=stripe&view={view}"
+        )
     )
 
 

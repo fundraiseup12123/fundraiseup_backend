@@ -12,7 +12,7 @@ from pydantic import BaseModel
 from auth import AuthUser, require_auth, require_org_access
 from db import rest_delete, rest_get, rest_get_one, rest_insert, rest_patch
 
-from frontend_url import resolve_frontend_url
+from frontend_url import pack_origin_token, resolve_frontend_url, unpack_origin_token
 
 router = APIRouter(prefix="/stripe", tags=["stripe"])
 
@@ -110,7 +110,10 @@ def start_connect(
     refresh_url = return_url
 
     if STRIPE_CONNECT_CLIENT_ID and use_stripe_standard_oauth():
-        state = f"{payload.organization_id}:{payload.campaign_id or ''}:{int(payload.is_default)}"
+        state = (
+            f"{payload.organization_id}:{payload.campaign_id or ''}:"
+            f"{int(payload.is_default)}:{pack_origin_token(frontend_url)}"
+        )
         return {"url": build_stripe_oauth_authorize_url(state=state, frontend_url=frontend_url)}
 
     existing = rest_get_one(
@@ -191,6 +194,7 @@ def stripe_callback(
     org_id = parts[0]
     campaign_id = parts[1] if len(parts) > 1 and parts[1] else None
     is_default = len(parts) > 2 and parts[2] == "1"
+    frontend_origin = unpack_origin_token(parts[3]) if len(parts) > 3 else None
 
     account = stripe.Account.retrieve(stripe_account_id)
     row = rest_insert(
@@ -213,7 +217,7 @@ def stripe_callback(
     if campaign_id:
         redirect_path = f"/admin/campaigns/{campaign_id}/edit?step=payments&connected=1"
 
-    return RedirectResponse(url=f"{resolve_frontend_url()}{redirect_path}")
+    return RedirectResponse(url=f"{resolve_frontend_url(frontend_origin)}{redirect_path}")
 
 
 @router.get("/orgs/{org_id}/accounts")
