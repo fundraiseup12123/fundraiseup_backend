@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field
 
 from auth import AuthUser, require_auth, require_org_access
 from db import rest_get, rest_get_one, rest_insert, rest_insert_error, rest_patch, select_columns
-from domain_utils import platform_root_domain, resolve_campaign_hostname
+from domain_utils import platform_domain_config, platform_root_domain, resolve_campaign_hostname
 
 router = APIRouter(prefix="/orgs", tags=["organizations"])
 
@@ -385,12 +385,12 @@ def get_domain_config(
     org_id: str,
     campaign_id: str,
     user: Annotated[AuthUser, Depends(require_auth)],
-) -> dict[str, str]:
+) -> dict[str, str | bool | None]:
     _get_org_id(user, org_id)
     _ = campaign_id
-    root = platform_root_domain()
+    config = platform_domain_config()
     return {
-        "platform_root_domain": root,
+        **config,
         "cname_target": _cname_target(),
     }
 

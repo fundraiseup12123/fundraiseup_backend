@@ -156,14 +156,15 @@ def _is_uuid(value: str) -> bool:
 
 
 @app.get("/config")
-def config() -> dict[str, str | list[str]]:
+def config() -> dict[str, str | list[str] | bool | None]:
     publishable = os.getenv("STRIPE_PUBLISHABLE_KEY", "")
-    from domain_utils import platform_root_domain
+    from domain_utils import platform_domain_config
 
+    domain_config = platform_domain_config()
     return {
         "publishable_key": publishable,
         "paypal_currencies": sorted({"usd", "eur", "gbp", "aud", "cad"}),
-        "platform_root_domain": platform_root_domain(),
+        **domain_config,
     }
 
 
