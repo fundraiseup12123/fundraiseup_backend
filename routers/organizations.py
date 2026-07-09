@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 
 from auth import AuthUser, require_auth, require_org_access
 from db import rest_get, rest_get_one, rest_insert, rest_insert_error, rest_patch, select_columns
+from domain_utils import platform_root_domain, resolve_campaign_hostname
 
 router = APIRouter(prefix="/orgs", tags=["organizations"])
 
@@ -77,7 +78,21 @@ def _dns_lookup(name: str, record_type: str) -> list[str]:
         return []
 
 
-def build_dns_instructions(hostname: str, verification_token: str) -> dict[str, str]:
+def build_dns_instructions(hostname: str, verification_token: str, *, auto_configured: bool = False) -> dict[str, str]:
+    root = platform_root_domain()
+    if auto_configured and root:
+        target = _cname_target()
+        return {
+            "type": "platform_subdomain",
+            "name": hostname,
+            "value": target,
+            "note": (
+                f"This subdomain is configured automatically as {hostname}. "
+                f"Ensure wildcard DNS *.{root} points to your hosting"
+                + (f" ({target})." if target else ".")
+            ),
+        }
+
     target = _cname_target()
     instructions: dict[str, str] = {
         "type": "CNAME",
@@ -101,13 +116,19 @@ def build_dns_instructions(hostname: str, verification_token: str) -> dict[str, 
 
 
 def _attach_dns_instructions(domains: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    root = platform_root_domain()
     enriched: list[dict[str, Any]] = []
     for domain in domains:
         row = dict(domain)
         token = str(row.get("verification_token") or "")
         hostname = str(row.get("hostname") or "")
+        is_platform = bool(root and hostname.endswith(f".{root}"))
         if hostname and token:
-            row["dns_instructions"] = build_dns_instructions(hostname, token)
+            row["dns_instructions"] = build_dns_instructions(
+                hostname,
+                token,
+                auto_configured=is_platform and bool(row.get("verified_at")),
+            )
         enriched.append(row)
     return enriched
 
@@ -167,7 +188,7 @@ class CurrencyConfig(BaseModel):
 
 
 class DomainRequest(BaseModel):
-    hostname: str = Field(min_length=4, max_length=253)
+    hostname: str = Field(min_length=1, max_length=253)
 
 
 def _slugify(name: str) -> str:
@@ -359,6 +380,21 @@ def update_currencies(
     return results
 
 
+@router.get("/{org_id}/campaigns/{campaign_id}/domains/config")
+def get_domain_config(
+    org_id: str,
+    campaign_id: str,
+    user: Annotated[AuthUser, Depends(require_auth)],
+) -> dict[str, str]:
+    _get_org_id(user, org_id)
+    _ = campaign_id
+    root = platform_root_domain()
+    return {
+        "platform_root_domain": root,
+        "cname_target": _cname_target(),
+    }
+
+
 @router.post("/{org_id}/campaigns/{campaign_id}/domains")
 def add_domain(
     org_id: str,
@@ -367,17 +403,27 @@ def add_domain(
     user: Annotated[AuthUser, Depends(require_auth)],
 ) -> dict[str, Any]:
     require_org_access(org_id, user, min_role="admin")
-    hostname = payload.hostname.strip().lower().removeprefix("https://").removeprefix("http://").split("/")[0]
-    domain = rest_insert(
-        "domains",
-        {"campaign_id": campaign_id, "hostname": hostname},
-    )
+    try:
+        hostname, is_platform_subdomain = resolve_campaign_hostname(payload.hostname)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    row: dict[str, Any] = {"campaign_id": campaign_id, "hostname": hostname}
+    if is_platform_subdomain:
+        from datetime import datetime, timezone
+
+        row["verified_at"] = datetime.now(timezone.utc).isoformat()
+        row["ssl_status"] = "active"
+
+    domain = rest_insert("domains", row)
     if not domain:
         raise HTTPException(status_code=400, detail="Domain already exists or invalid")
     token = str(domain.get("verification_token") or "")
     return {
         **domain,
-        "dns_instructions": build_dns_instructions(hostname, token),
+        "resolved_hostname": hostname,
+        "auto_configured": is_platform_subdomain,
+        "dns_instructions": build_dns_instructions(hostname, token, auto_configured=is_platform_subdomain),
     }
 
 
