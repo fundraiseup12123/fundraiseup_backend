@@ -793,9 +793,10 @@ async def stripe_webhook(request: Request) -> dict[str, str]:
             row["utm"] = utm
         saved = insert_donation({k: v for k, v in row.items() if v is not None})
         if saved:
-            from emails import send_donation_confirmation_for_row
+            from emails import send_donation_alerts_for_row, send_donation_confirmation_for_row
 
             send_donation_confirmation_for_row(saved)
+            send_donation_alerts_for_row(saved)
 
     if event["type"] == "account.updated":
         from db import rest_patch
@@ -876,9 +877,10 @@ def record_donation(payload: RecordDonationRequest) -> DonationFeedItem:
     row = _donation_row_from_intent(payment_intent)
     saved = insert_donation(row)
     if saved:
-        from emails import send_donation_confirmation_for_row
+        from emails import send_donation_alerts_for_row, send_donation_confirmation_for_row
 
         send_donation_confirmation_for_row(saved)
+        send_donation_alerts_for_row(saved)
         return DonationFeedItem(
             id=str(saved["id"]),
             first_name=saved["first_name"],

@@ -240,3 +240,84 @@ def org_admin_invite_email(
         primary_color=primary_color,
     )
     return subject, html
+
+
+def donation_alert_email(
+    *,
+    admin_name: str,
+    donor_name: str,
+    amount: float | str,
+    currency: str,
+    campaign_title: str,
+    organization_name: str,
+    admin_url: str,
+    logo_url: str,
+    primary_color: str = "#3872DC",
+) -> tuple[str, str]:
+    amount_label = _fmt_amount(amount, currency)
+    subject = f"New donation — {amount_label}"
+    preheader = f"{donor_name} donated {amount_label} to {campaign_title}."
+
+    body = f"""
+      <p style="margin:0 0 12px;">Hi {escape(admin_name or 'there')},</p>
+      <p style="margin:0 0 12px;">
+        <strong>{escape(donor_name)}</strong> just donated
+        <strong style="color:#0f172a;">{escape(amount_label)}</strong>
+        to <strong>{escape(campaign_title)}</strong> ({escape(organization_name)}).
+      </p>
+      <p style="margin:0;">Open your organization console to view the full donation record.</p>
+    """
+
+    html = branded_email_html(
+        preheader=preheader,
+        headline="New donation received",
+        body_html=body,
+        cta_label="View in admin",
+        cta_url=admin_url,
+        logo_url=logo_url,
+        primary_color=primary_color,
+    )
+    return subject, html
+
+
+def weekly_digest_email(
+    *,
+    admin_name: str,
+    organization_name: str,
+    donation_count: int,
+    total_raised: float,
+    reporting_currency: str,
+    admin_url: str,
+    logo_url: str,
+    primary_color: str = "#3872DC",
+) -> tuple[str, str]:
+    amount_label = _fmt_amount(total_raised, reporting_currency)
+    subject = f"Weekly digest — {organization_name}"
+    preheader = f"{donation_count} donations totaling {amount_label} in the last 7 days."
+
+    body = f"""
+      <p style="margin:0 0 12px;">Hi {escape(admin_name or 'there')},</p>
+      <p style="margin:0 0 12px;">Here is your weekly summary for <strong>{escape(organization_name)}</strong>:</p>
+      <table role="presentation" cellspacing="0" cellpadding="0" style="margin:0 0 12px;">
+        <tr>
+          <td style="padding:4px 0;color:#64748b;">Donations</td>
+          <td style="padding:4px 0 4px 16px;"><strong>{donation_count}</strong></td>
+        </tr>
+        <tr>
+          <td style="padding:4px 0;color:#64748b;">Total raised</td>
+          <td style="padding:4px 0 4px 16px;"><strong>{escape(amount_label)}</strong></td>
+        </tr>
+      </table>
+      <p style="margin:0;">Open insights for charts and breakdowns.</p>
+    """
+
+    html = branded_email_html(
+        preheader=preheader,
+        headline="Your weekly insights digest",
+        body_html=body,
+        cta_label="Open insights",
+        cta_url=admin_url,
+        logo_url=logo_url,
+        primary_color=primary_color,
+    )
+    return subject, html

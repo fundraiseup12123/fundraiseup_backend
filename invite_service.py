@@ -37,6 +37,24 @@ def generate_temp_password(length: int = 12) -> str:
     return "".join(secrets.choice(alphabet) for _ in range(length))
 
 
+def get_user_email_by_id(user_id: str) -> str | None:
+    url = supabase_url()
+    if not url or not _supabase_secret():
+        return None
+    try:
+        response = httpx.get(
+            f"{url}/auth/v1/admin/users/{user_id}",
+            headers=_admin_headers(),
+            timeout=20.0,
+        )
+        if response.status_code == 200:
+            email = response.json().get("email")
+            return str(email).strip().lower() if email else None
+    except httpx.HTTPError as exc:
+        logger.warning("Supabase user lookup failed for %s: %s", user_id, exc)
+    return None
+
+
 def find_user_id_by_email(email: str) -> str | None:
     url = supabase_url()
     if not url or not _supabase_secret():

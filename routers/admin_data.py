@@ -22,6 +22,8 @@ def admin_list_donations(
     limit: int = Query(50, ge=1, le=100),
     offset: int = Query(0, ge=0),
     status: str | None = Query(None),
+    frequency: str | None = Query(None),
+    date_preset: str | None = Query(None),
 ) -> dict[str, Any]:
     require_org_access(org_id, user, min_role="member")
     params: dict[str, str] = {
@@ -35,6 +37,16 @@ def admin_list_donations(
         params["campaign_id"] = f"eq.{campaign_id}"
     if status:
         params["status"] = f"eq.{status}"
+    if frequency and frequency in {"once", "monthly"}:
+        params["frequency"] = f"eq.{frequency}"
+    if date_preset and date_preset != "all":
+        date_from, date_to = _date_range(date_preset)
+        if date_from and date_to:
+            params["and"] = f"(created_at.gte.{date_from},created_at.lte.{date_to})"
+        elif date_from:
+            params["created_at"] = f"gte.{date_from}"
+        elif date_to:
+            params["created_at"] = f"lte.{date_to}"
     rows = rest_get("donations", params=params)
     has_more = len(rows) > limit
     total_amount = sum(float(r.get("amount", 0)) for r in rows[:limit])
@@ -390,13 +402,47 @@ def _build_hourly_chart(rows: list[dict[str, Any]], reporting_currency: str = "U
 def list_supporters(
     org_id: str,
     user: Annotated[AuthUser, Depends(require_auth)],
-    limit: int = 50,
+    limit: int = Query(50, ge=1, le=200),
 ) -> list[dict[str, Any]]:
     require_org_access(org_id, user, min_role="member")
-    return rest_get(
-        "supporters",
-        params={"organization_id": f"eq.{org_id}", "select": "*", "order": "created_at.desc", "limit": str(limit)},
+    rows = rest_get(
+        "donations",
+        params={
+            "organization_id": f"eq.{org_id}",
+            "status": "eq.succeeded",
+            "select": "id,first_name,last_name,email,amount",
+            "order": "created_at.desc",
+            "limit": "2000",
+        },
     )
+
+    aggregated: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        email = (row.get("email") or "").strip().lower()
+        key = email or f"{row.get('first_name', '')}_{row.get('last_name', '')}".strip().lower()
+        if not key:
+            continue
+
+        bucket = aggregated.setdefault(
+            key,
+            {
+                "id": key,
+                "first_name": row.get("first_name"),
+                "last_name": row.get("last_name"),
+                "email": email or None,
+                "total_donated": 0.0,
+                "donation_count": 0,
+            },
+        )
+        bucket["total_donated"] = float(bucket["total_donated"]) + float(row.get("amount") or 0)
+        bucket["donation_count"] = int(bucket["donation_count"]) + 1
+
+    supporters = sorted(
+        aggregated.values(),
+        key=lambda item: float(item["total_donated"]),
+        reverse=True,
+    )
+    return supporters[:limit]
 
 
 @router.get("/orgs/{org_id}/questions/{campaign_id}")
@@ -419,10 +465,28 @@ def list_tributes(
     campaign_id: str | None = Query(None),
 ) -> list[dict[str, Any]]:
     require_org_access(org_id, user, min_role="member")
-    params: dict[str, str] = {"select": "*", "order": "created_at.desc", "limit": "100"}
+    params: dict[str, str] = {
+        "organization_id": f"eq.{org_id}",
+        "honoree_name": "not.is.null",
+        "select": "id,honoree_name,comment,created_at,campaign_id,first_name,last_name",
+        "order": "created_at.desc",
+        "limit": "100",
+    }
     if campaign_id:
         params["campaign_id"] = f"eq.{campaign_id}"
-    return rest_get("tributes", params=params)
+    rows = rest_get("donations", params=params)
+    return [
+        {
+            "id": row["id"],
+            "honoree_name": row.get("honoree_name"),
+            "message": row.get("comment"),
+            "created_at": row.get("created_at"),
+            "campaign_id": row.get("campaign_id"),
+            "donor_name": f"{row.get('first_name', '')} {row.get('last_name', '')}".strip() or None,
+        }
+        for row in rows
+        if row.get("honoree_name")
+    ]
 
 
 @router.get("/orgs/{org_id}/emails")

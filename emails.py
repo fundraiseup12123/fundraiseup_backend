@@ -9,12 +9,17 @@ import httpx
 
 from db import rest_get, rest_get_one, rest_insert, rest_patch
 from email_templates import (
+    donation_alert_email,
     donation_confirmation_email,
     popup_reminder_subscribed_email,
+    weekly_digest_email,
     weekly_reminder_email,
 )
 from email_branding import DEFAULT_BRAND_NAME, DEFAULT_EMAIL_LOGO_URL, DEFAULT_PRIMARY_COLOR
 from frontend_url import resolve_frontend_url
+from currency import convert_to_reporting
+from db import supabase_url
+
 from site_constants import ROOT_CAMPAIGN_ID
 
 logger = logging.getLogger(__name__)
@@ -34,6 +39,34 @@ def resend_from_email() -> str:
 
 def resend_configured() -> bool:
     return bool(resend_api_key())
+
+
+def _supabase_admin_headers() -> dict[str, str]:
+    secret = os.getenv("SUPABASE_SECRET_KEY", "").strip()
+    return {
+        "apikey": secret,
+        "Authorization": f"Bearer {secret}",
+        "Content-Type": "application/json",
+    }
+
+
+def get_user_email_by_id(user_id: str) -> str | None:
+    url = supabase_url()
+    secret = os.getenv("SUPABASE_SECRET_KEY", "").strip()
+    if not url or not secret:
+        return None
+    try:
+        response = httpx.get(
+            f"{url}/auth/v1/admin/users/{user_id}",
+            headers=_supabase_admin_headers(),
+            timeout=20.0,
+        )
+        if response.status_code == 200:
+            email = response.json().get("email")
+            return str(email).strip().lower() if email else None
+    except httpx.HTTPError as exc:
+        logger.warning("Supabase user lookup failed for %s: %s", user_id, exc)
+    return None
 
 
 def _brand_logo_url() -> str:
@@ -356,3 +389,179 @@ def send_weekly_reminders() -> dict[str, int | str]:
             skipped += 1
 
     return {"sent": sent, "skipped": skipped}
+
+
+def _org_notification_prefs(org_id: str) -> dict[str, Any]:
+    org = rest_get_one(
+        "organizations",
+        params={"id": f"eq.{org_id}", "select": "notification_prefs"},
+    )
+    prefs = (org or {}).get("notification_prefs") or {}
+    return prefs if isinstance(prefs, dict) else {}
+
+
+def _org_notification_recipients(org_id: str) -> list[dict[str, str]]:
+    members = rest_get(
+        "organization_members",
+        params={
+            "organization_id": f"eq.{org_id}",
+            "select": "user_id,profiles(first_name,last_name)",
+        },
+    )
+    recipients: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for member in members:
+        user_id = str(member.get("user_id") or "")
+        if not user_id or user_id in seen:
+            continue
+        email = get_user_email_by_id(user_id)
+        if not email:
+            continue
+        seen.add(user_id)
+        profile = member.get("profiles") or {}
+        if isinstance(profile, list):
+            profile = profile[0] if profile else {}
+        name = f"{profile.get('first_name', '')} {profile.get('last_name', '')}".strip()
+        recipients.append({"email": email, "name": name or email})
+    return recipients
+
+
+def send_donation_alerts_for_row(row: dict[str, Any]) -> int:
+    if not resend_configured():
+        return 0
+
+    org_id = row.get("organization_id")
+    if not org_id:
+        return 0
+
+    prefs = _org_notification_prefs(str(org_id))
+    if prefs.get("donation_alerts") is False:
+        return 0
+
+    org = rest_get_one(
+        "organizations",
+        params={"id": f"eq.{org_id}", "select": "name"},
+    )
+    organization_name = str((org or {}).get("name") or "your organization")
+    campaign_title = "your campaign"
+    campaign_id = row.get("campaign_id")
+    if campaign_id:
+        content = rest_get_one(
+            "campaign_content",
+            params={"campaign_id": f"eq.{campaign_id}", "select": "title"},
+        )
+        if content and content.get("title"):
+            campaign_title = str(content["title"])
+
+    donor_name = f"{row.get('first_name', '')} {row.get('last_name', '')}".strip() or "A supporter"
+    admin_url = f"{resolve_frontend_url().rstrip('/')}/admin/donations"
+    if row.get("id"):
+        admin_url = f"{admin_url}/{row['id']}"
+    logo_url = _brand_logo_url()
+    sent = 0
+
+    for recipient in _org_notification_recipients(str(org_id)):
+        subject, html = donation_alert_email(
+            admin_name=recipient["name"],
+            donor_name=donor_name,
+            amount=row.get("amount", 0),
+            currency=str(row.get("currency", "USD")),
+            campaign_title=campaign_title,
+            organization_name=organization_name,
+            admin_url=admin_url,
+            logo_url=logo_url,
+            primary_color=DEFAULT_PRIMARY_COLOR,
+        )
+        try:
+            send_resend_email(to=recipient["email"], subject=subject, html=html)
+            log_email(
+                recipient_email=recipient["email"],
+                subject=subject,
+                template_key="donation_alert",
+                organization_id=str(org_id),
+                donation_id=str(row["id"]) if row.get("id") else None,
+            )
+            sent += 1
+        except RuntimeError as exc:
+            logger.error("Donation alert failed for %s: %s", recipient["email"], exc)
+
+    return sent
+
+
+def send_org_weekly_digests() -> dict[str, int]:
+    if not resend_configured():
+        return {"digests_sent": 0, "skipped": 0}
+
+    week_ago = datetime.now(timezone.utc) - timedelta(days=7)
+    orgs = rest_get(
+        "organizations",
+        params={"status": "eq.active", "select": "id,name,notification_prefs,reporting_currency"},
+    )
+    digests_sent = 0
+    skipped = 0
+
+    for org in orgs:
+        org_id = str(org.get("id") or "")
+        if not org_id:
+            continue
+        prefs = org.get("notification_prefs") or {}
+        if not isinstance(prefs, dict) or not prefs.get("weekly_digest"):
+            continue
+
+        recent_digest = rest_get(
+            "email_logs",
+            params={
+                "organization_id": f"eq.{org_id}",
+                "template_key": "eq.org_weekly_digest",
+                "sent_at": f"gte.{week_ago.isoformat()}",
+                "select": "id",
+                "limit": "1",
+            },
+        )
+        if recent_digest:
+            skipped += 1
+            continue
+
+        donations = rest_get(
+            "donations",
+            params={
+                "organization_id": f"eq.{org_id}",
+                "status": "eq.succeeded",
+                "created_at": f"gte.{week_ago.isoformat()}",
+                "select": "amount,currency",
+            },
+        )
+        reporting_currency = str(org.get("reporting_currency") or "USD").upper()
+        total_raised = sum(
+            convert_to_reporting(float(row.get("amount") or 0), str(row.get("currency") or "USD"), reporting_currency)
+            for row in donations
+        )
+        admin_url = f"{resolve_frontend_url().rstrip('/')}/admin/insights"
+        logo_url = _brand_logo_url()
+        organization_name = str(org.get("name") or "your organization")
+
+        for recipient in _org_notification_recipients(org_id):
+            subject, html = weekly_digest_email(
+                admin_name=recipient["name"],
+                organization_name=organization_name,
+                donation_count=len(donations),
+                total_raised=round(total_raised, 2),
+                reporting_currency=reporting_currency,
+                admin_url=admin_url,
+                logo_url=logo_url,
+                primary_color=DEFAULT_PRIMARY_COLOR,
+            )
+            try:
+                send_resend_email(to=recipient["email"], subject=subject, html=html)
+                log_email(
+                    recipient_email=recipient["email"],
+                    subject=subject,
+                    template_key="org_weekly_digest",
+                    organization_id=org_id,
+                )
+                digests_sent += 1
+            except RuntimeError as exc:
+                logger.error("Weekly digest failed for %s: %s", recipient["email"], exc)
+                skipped += 1
+
+    return {"digests_sent": digests_sent, "skipped": skipped}

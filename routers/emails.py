@@ -10,6 +10,7 @@ from auth import AuthUser, require_auth, require_org_access
 from db import rest_get
 from emails import (
     resend_configured,
+    send_org_weekly_digests,
     send_weekly_reminders,
     subscribe_weekly_reminder,
 )
@@ -48,7 +49,9 @@ def cron_weekly_reminders(
     token = (authorization or "").removeprefix("Bearer ").strip()
     if token != secret:
         raise HTTPException(status_code=401, detail="Unauthorized")
-    return send_weekly_reminders()
+    reminders = send_weekly_reminders()
+    digests = send_org_weekly_digests()
+    return {**reminders, **digests}
 
 
 @router.get("/orgs/{org_id}/logs")
