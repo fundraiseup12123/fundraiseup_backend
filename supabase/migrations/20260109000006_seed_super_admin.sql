@@ -1,0 +1,12 @@
+-- 6/7 Super admin role (run AFTER creating auth user in Supabase Dashboard)
+--
+-- Dashboard → Authentication → Users → Add user
+-- Then set email below and run:
+
+-- update public.profiles
+-- set role = 'super_admin',
+--     first_name = 'Admin',
+--     last_name = 'User'
+-- where id = (
+--   select id from auth.users where email = 'your@email.com'
+-- );

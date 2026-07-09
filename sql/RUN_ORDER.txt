@@ -1,0 +1,23 @@
+-- Supabase migration order (legacy sql/ folder)
+--
+-- For NEW databases, run ONE of:
+--   A) backend/sql/000_complete_supabase_migration.sql  (Supabase SQL editor — all-in-one)
+--   B) backend/supabase/migrations/*.sql in order       (Supabase CLI: supabase db push)
+--
+-- Incremental updates on EXISTING databases (if you already ran older scripts):
+--   004_add_base_amount.sql
+--   005_popup_view_json.sql
+--   006_payment_accounts_json.sql
+--   007_paypal_accounts.sql
+--
+-- Full ordered list:
+--   000_complete_supabase_migration.sql  ← use this for fresh setup
+--   001_platform_schema.sql            (superseded by 000)
+--   002_seed_sudan_campaign.sql
+--   003_seed_super_admin.sql
+--   004_add_base_amount.sql
+--   005_popup_view_json.sql
+--   006_payment_accounts_json.sql
+--   007_paypal_accounts.sql
+--   donations.sql                        (included in 000)
+--   seed_donations.sql                   (optional sample data)
