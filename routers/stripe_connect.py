@@ -16,12 +16,31 @@ from frontend_url import resolve_frontend_url
 
 router = APIRouter(prefix="/stripe", tags=["stripe"])
 
-STRIPE_CONNECT_CLIENT_ID = os.getenv("STRIPE_CONNECT_CLIENT_ID", "")
+STRIPE_CONNECT_CLIENT_ID = (os.getenv("STRIPE_CONNECT_CLIENT_ID", "") or "").strip().strip('"').strip("'")
 
 
 def use_stripe_standard_oauth() -> bool:
-    """Standard OAuth must be enabled in Stripe Connect settings; Express is the default."""
-    return os.getenv("STRIPE_CONNECT_USE_STANDARD_OAUTH", "").lower() in ("1", "true", "yes")
+    """Use Stripe OAuth account picker when a Connect client ID is configured."""
+    if not STRIPE_CONNECT_CLIENT_ID:
+        return False
+    if os.getenv("STRIPE_CONNECT_USE_EXPRESS", "").lower() in ("1", "true", "yes"):
+        return False
+    if os.getenv("STRIPE_CONNECT_USE_STANDARD_OAUTH", "").lower() in ("0", "false", "no"):
+        return False
+    return True
+
+
+def build_stripe_oauth_authorize_url(*, state: str, frontend_url: str) -> str:
+    """Stripe Connect OAuth v2 — pick an existing account or create one (Fundraise Up style)."""
+    params = {
+        "response_type": "code",
+        "client_id": STRIPE_CONNECT_CLIENT_ID,
+        "scope": "read_write",
+        "redirect_uri": f"{frontend_url.rstrip('/')}/api/stripe/callback",
+        "state": state,
+        "always_prompt": "true",
+    }
+    return f"https://connect.stripe.com/oauth/v2/authorize?{urlencode(params)}"
 
 EXPRESS_ACCOUNT_CAPABILITIES = {
     "card_payments": {"requested": True},
@@ -36,6 +55,7 @@ def connect_status() -> dict[str, Any]:
         "redirect_uri": f"{resolve_frontend_url()}/api/stripe/callback",
         "platform_mode": not bool(STRIPE_CONNECT_CLIENT_ID),
         "oauth_mode": bool(STRIPE_CONNECT_CLIENT_ID and use_stripe_standard_oauth()),
+        "oauth_version": "v2" if use_stripe_standard_oauth() else None,
     }
 
 
@@ -91,14 +111,7 @@ def start_connect(
 
     if STRIPE_CONNECT_CLIENT_ID and use_stripe_standard_oauth():
         state = f"{payload.organization_id}:{payload.campaign_id or ''}:{int(payload.is_default)}"
-        params = {
-            "response_type": "code",
-            "client_id": STRIPE_CONNECT_CLIENT_ID,
-            "scope": "read_write",
-            "redirect_uri": f"{frontend_url}/api/stripe/callback",
-            "state": state,
-        }
-        return {"url": f"https://connect.stripe.com/oauth/authorize?{urlencode(params)}"}
+        return {"url": build_stripe_oauth_authorize_url(state=state, frontend_url=frontend_url)}
 
     existing = rest_get_one(
         "stripe_accounts",

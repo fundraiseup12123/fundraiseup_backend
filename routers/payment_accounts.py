@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import os
 from typing import Annotated, Any, Literal
-from urllib.parse import urlencode
 
 import stripe
 from fastapi import APIRouter, Depends, HTTPException
@@ -15,11 +14,14 @@ from db import rest_get_one, rest_insert, rest_patch
 from site_constants import ROOT_CAMPAIGN_ID
 
 from frontend_url import resolve_frontend_url
-from routers.stripe_connect import use_stripe_standard_oauth
+from routers.stripe_connect import (
+    STRIPE_CONNECT_CLIENT_ID,
+    build_stripe_oauth_authorize_url,
+    use_stripe_standard_oauth,
+)
 
 router = APIRouter(prefix="/super/payment-accounts", tags=["payment-accounts"])
 
-STRIPE_CONNECT_CLIENT_ID = os.getenv("STRIPE_CONNECT_CLIENT_ID", "")
 PaymentView = Literal["homepage", "popup"]
 
 EXPRESS_ACCOUNT_CAPABILITIES = {
@@ -137,6 +139,7 @@ def payment_accounts_status(
         "paypal_env": paypal_env(),
         "paypal_connect_mode": "partner_or_email",
         "stripe_redirect_uri": f"{resolve_frontend_url()}/api/stripe/callback",
+        "stripe_connect_mode": "oauth_v2" if use_stripe_standard_oauth() else "express",
         "paypal_redirect_uri": paypal_return_uri,
         "paypal_setup_hint": (
             "PayPal Partner onboarding requires a PayPal Commerce Platform partner account. "
@@ -210,14 +213,7 @@ def start_root_stripe_connect(
 
     if STRIPE_CONNECT_CLIENT_ID and use_stripe_standard_oauth():
         state = f"root:{view}"
-        params = {
-            "response_type": "code",
-            "client_id": STRIPE_CONNECT_CLIENT_ID,
-            "scope": "read_write",
-            "redirect_uri": f"{frontend_url}/api/stripe/callback",
-            "state": state,
-        }
-        return {"url": f"https://connect.stripe.com/oauth/authorize?{urlencode(params)}"}
+        return {"url": build_stripe_oauth_authorize_url(state=state, frontend_url=frontend_url)}
 
     if not account_id:
         try:
