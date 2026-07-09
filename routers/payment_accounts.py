@@ -131,6 +131,7 @@ def payment_accounts_status(
     from paypal_client import paypal_env
 
     paypal_return_uri = f"{resolve_frontend_url()}/api/paypal/callback"
+    stripe_callback = f"{resolve_frontend_url()}/api/stripe/callback"
     return {
         "stripe_configured": bool(stripe.api_key),
         "paypal_configured": bool(
@@ -138,8 +139,13 @@ def payment_accounts_status(
         ),
         "paypal_env": paypal_env(),
         "paypal_connect_mode": "partner_or_email",
-        "stripe_redirect_uri": f"{resolve_frontend_url()}/api/stripe/callback",
+        "stripe_redirect_uri": stripe_callback,
         "stripe_connect_mode": "oauth_v2" if use_stripe_standard_oauth() else "express",
+        "stripe_setup_hint": (
+            "Stripe Dashboard (Live mode) → Settings → Connect → Onboarding options → OAuth: "
+            "enable Standard OAuth, then add this Redirect URI: "
+            f"{stripe_callback}"
+        ) if use_stripe_standard_oauth() else None,
         "paypal_redirect_uri": paypal_return_uri,
         "paypal_setup_hint": (
             "PayPal Partner onboarding requires a PayPal Commerce Platform partner account. "
