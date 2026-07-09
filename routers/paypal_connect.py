@@ -13,6 +13,8 @@ from paypal_client import (
     build_paypal_connect_url,
     build_paypal_hosted_connect_url,
     exchange_paypal_code,
+    paypal_client_id,
+    paypal_client_secret,
     paypal_configured,
 )
 
