@@ -11,8 +11,13 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from auth import AuthUser, require_auth, require_org_access
-from db import rest_get, rest_get_one, rest_insert, rest_insert_error, rest_patch, select_columns
-from domain_utils import platform_domain_config, platform_root_domain, resolve_campaign_hostname
+from db import rest_delete, rest_get, rest_get_one, rest_insert, rest_insert_error, rest_patch, select_columns
+from domain_utils import (
+    platform_domain_config,
+    platform_root_domain,
+    resolve_campaign_hostname,
+    subdomain_label_from_hostname,
+)
 
 router = APIRouter(prefix="/orgs", tags=["organizations"])
 
@@ -115,22 +120,35 @@ def build_dns_instructions(hostname: str, verification_token: str, *, auto_confi
     return instructions
 
 
+def _enrich_domain_row(domain: dict[str, Any], campaigns_by_id: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    row = dict(domain)
+    token = str(row.get("verification_token") or "")
+    hostname = str(row.get("hostname") or "")
+    campaign_id = str(row.get("campaign_id") or "")
+    campaign = campaigns_by_id.get(campaign_id) or {}
+    row["campaign_name"] = str(campaign.get("name") or "Unknown campaign")
+    row["campaign_status"] = str(campaign.get("status") or "")
+    row["subdomain_label"] = subdomain_label_from_hostname(hostname) or hostname.split(".")[0]
+    is_platform = bool(hostname and row.get("verified_at") and subdomain_label_from_hostname(hostname))
+    if hostname and token:
+        row["dns_instructions"] = build_dns_instructions(
+            hostname,
+            token,
+            auto_configured=is_platform,
+        )
+    return row
+
+
 def _attach_dns_instructions(domains: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    root = platform_root_domain()
-    enriched: list[dict[str, Any]] = []
-    for domain in domains:
-        row = dict(domain)
-        token = str(row.get("verification_token") or "")
-        hostname = str(row.get("hostname") or "")
-        is_platform = bool(root and hostname.endswith(f".{root}"))
-        if hostname and token:
-            row["dns_instructions"] = build_dns_instructions(
-                hostname,
-                token,
-                auto_configured=is_platform and bool(row.get("verified_at")),
-            )
-        enriched.append(row)
-    return enriched
+    if not domains:
+        return []
+    campaign_ids = list({str(d.get("campaign_id") or "") for d in domains if d.get("campaign_id")})
+    campaigns_by_id: dict[str, dict[str, Any]] = {}
+    for campaign_id in campaign_ids:
+        campaign = rest_get_one("campaigns", params={"id": f"eq.{campaign_id}", "select": "id,name,status"})
+        if campaign:
+            campaigns_by_id[campaign_id] = campaign
+    return [_enrich_domain_row(domain, campaigns_by_id) for domain in domains]
 
 
 class PopupViewPayload(BaseModel):
@@ -380,6 +398,37 @@ def update_currencies(
     return results
 
 
+@router.get("/{org_id}/domains")
+def list_org_domains(
+    org_id: str,
+    user: Annotated[AuthUser, Depends(require_auth)],
+) -> dict[str, Any]:
+    _get_org_id(user, org_id)
+    campaigns = rest_get(
+        "campaigns",
+        params={"organization_id": f"eq.{org_id}", "select": "id,name,status,slug"},
+    )
+    campaign_ids = [str(c["id"]) for c in campaigns]
+    if not campaign_ids:
+        return {"domains": [], **platform_domain_config(), "cname_target": _cname_target()}
+
+    domains = rest_get(
+        "domains",
+        params={
+            "campaign_id": f"in.({','.join(campaign_ids)})",
+            "select": "*",
+            "order": "created_at.desc",
+        },
+    )
+    campaigns_by_id = {str(c["id"]): c for c in campaigns}
+    return {
+        "domains": [_enrich_domain_row(domain, campaigns_by_id) for domain in domains],
+        "campaigns": campaigns,
+        **platform_domain_config(),
+        "cname_target": _cname_target(),
+    }
+
+
 @router.get("/{org_id}/campaigns/{campaign_id}/domains/config")
 def get_domain_config(
     org_id: str,
@@ -403,10 +452,49 @@ def add_domain(
     user: Annotated[AuthUser, Depends(require_auth)],
 ) -> dict[str, Any]:
     require_org_access(org_id, user, min_role="admin")
+    campaign = rest_get_one(
+        "campaigns",
+        params={"id": f"eq.{campaign_id}", "organization_id": f"eq.{org_id}", "select": "id,name,status"},
+    )
+    if not campaign:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+
     try:
         hostname, is_platform_subdomain = resolve_campaign_hostname(payload.hostname)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    root = platform_root_domain()
+    label = subdomain_label_from_hostname(hostname) or payload.hostname.strip().lower()
+
+    existing_hostname = rest_get_one("domains", params={"hostname": f"eq.{hostname}", "select": "*"})
+    if existing_hostname:
+        owner = rest_get_one(
+            "campaigns",
+            params={"id": f"eq.{existing_hostname['campaign_id']}", "select": "name,organization_id"},
+        )
+        owner_name = owner.get("name") if owner else "another campaign"
+        raise HTTPException(
+            status_code=409,
+            detail=f'Subdomain "{label}" is already taken by campaign "{owner_name}". Choose a different name.',
+        )
+
+    if is_platform_subdomain and root:
+        existing_for_campaign = rest_get(
+            "domains",
+            params={"campaign_id": f"eq.{campaign_id}", "select": "*"},
+        )
+        for existing in existing_for_campaign:
+            existing_host = str(existing.get("hostname") or "")
+            if existing_host.endswith(f".{root}"):
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f'Campaign "{campaign["name"]}" already uses subdomain '
+                        f'"{subdomain_label_from_hostname(existing_host) or existing_host}". '
+                        "Remove it first to assign a new one."
+                    ),
+                )
 
     row: dict[str, Any] = {"campaign_id": campaign_id, "hostname": hostname}
     if is_platform_subdomain:
@@ -417,14 +505,41 @@ def add_domain(
 
     domain = rest_insert("domains", row)
     if not domain:
-        raise HTTPException(status_code=400, detail="Domain already exists or invalid")
+        err = rest_insert_error("domains", row)
+        raise HTTPException(status_code=400, detail=err or "Could not add subdomain")
     token = str(domain.get("verification_token") or "")
+    enriched = _enrich_domain_row(domain, {campaign_id: campaign})
     return {
-        **domain,
+        **enriched,
         "resolved_hostname": hostname,
         "auto_configured": is_platform_subdomain,
         "dns_instructions": build_dns_instructions(hostname, token, auto_configured=is_platform_subdomain),
     }
+
+
+@router.delete("/{org_id}/campaigns/{campaign_id}/domains/{domain_id}")
+def delete_domain(
+    org_id: str,
+    campaign_id: str,
+    domain_id: str,
+    user: Annotated[AuthUser, Depends(require_auth)],
+) -> dict[str, str]:
+    require_org_access(org_id, user, min_role="admin")
+    campaign = rest_get_one(
+        "campaigns",
+        params={"id": f"eq.{campaign_id}", "organization_id": f"eq.{org_id}", "select": "id"},
+    )
+    if not campaign:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+    domain = rest_get_one(
+        "domains",
+        params={"id": f"eq.{domain_id}", "campaign_id": f"eq.{campaign_id}", "select": "id"},
+    )
+    if not domain:
+        raise HTTPException(status_code=404, detail="Subdomain not found")
+    if not rest_delete("domains", match={"id": domain_id, "campaign_id": campaign_id}):
+        raise HTTPException(status_code=500, detail="Failed to remove subdomain")
+    return {"status": "deleted"}
 
 
 @router.get("/{org_id}/campaigns/{campaign_id}/domains/{domain_id}/dns")

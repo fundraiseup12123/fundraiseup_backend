@@ -95,3 +95,11 @@ def resolve_campaign_hostname(raw: str) -> tuple[str, bool]:
         return f"{label}.{root}", True
 
     return hostname, bool(root and hostname.endswith(f".{root}"))
+
+
+def subdomain_label_from_hostname(hostname: str) -> str | None:
+    root = platform_root_domain()
+    if not root or not hostname.endswith(f".{root}"):
+        return None
+    label = hostname[: -(len(root) + 1)]
+    return label or None

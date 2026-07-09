@@ -96,7 +96,11 @@ def resolve_host(host: str = Query(...)) -> dict[str, Any]:
     domain = rest_get_one("domains", params={"hostname": f"eq.{host_clean}", "select": "campaign_id,verified_at"})
     if not domain or not domain.get("verified_at"):
         return {"campaign_id": None, "slug": None}
-    campaign = rest_get_one("campaigns", params={"id": f"eq.{domain['campaign_id']}", "select": "id,slug,status"})
+    campaign = rest_get_one("campaigns", params={"id": f"eq.{domain['campaign_id']}", "select": "id,slug,status,organization_id"})
     if not campaign or campaign.get("status") != "live":
-        return {"campaign_id": None, "slug": None}
-    return {"campaign_id": campaign["id"], "slug": campaign["slug"]}
+        return {"campaign_id": None, "organization_id": None, "slug": None}
+    return {
+        "campaign_id": campaign["id"],
+        "organization_id": campaign.get("organization_id"),
+        "slug": campaign["slug"],
+    }
