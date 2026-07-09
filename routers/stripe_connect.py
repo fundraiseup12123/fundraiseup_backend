@@ -196,21 +196,37 @@ def stripe_callback(
     is_default = len(parts) > 2 and parts[2] == "1"
     frontend_origin = unpack_origin_token(parts[3]) if len(parts) > 3 else None
 
-    account = stripe.Account.retrieve(stripe_account_id)
-    row = rest_insert(
-        "stripe_accounts",
-        {
-            "organization_id": org_id,
-            "campaign_id": campaign_id or None,
-            "stripe_account_id": stripe_account_id,
-            "is_default": is_default and not campaign_id,
-            "connection_status": "active" if account.charges_enabled else "pending",
-            "charges_enabled": bool(account.charges_enabled),
-            "payouts_enabled": bool(account.payouts_enabled),
-        },
-    )
+    try:
+        account = stripe.Account.retrieve(stripe_account_id)
+        charges_enabled = bool(getattr(account, "charges_enabled", False))
+        payouts_enabled = bool(getattr(account, "payouts_enabled", False))
+    except stripe.error.StripeError:
+        # OAuth succeeded; account details may lag — still persist the connection.
+        charges_enabled = False
+        payouts_enabled = False
 
-    if campaign_id and row:
+    existing = rest_get_one(
+        "stripe_accounts",
+        params={"stripe_account_id": f"eq.{stripe_account_id}", "select": "id"},
+    )
+    payload = {
+        "organization_id": org_id,
+        "campaign_id": campaign_id or None,
+        "stripe_account_id": stripe_account_id,
+        "is_default": is_default and not campaign_id,
+        "connection_status": "active" if charges_enabled else "pending",
+        "charges_enabled": charges_enabled,
+        "payouts_enabled": payouts_enabled,
+    }
+    if existing:
+        row = rest_patch("stripe_accounts", payload, match={"id": existing["id"]})
+    else:
+        row = rest_insert("stripe_accounts", payload, on_conflict="stripe_account_id")
+
+    if not row:
+        raise HTTPException(status_code=500, detail="Unable to save Stripe account")
+
+    if campaign_id:
         rest_patch("campaigns", {"stripe_account_id": row["id"]}, match={"id": campaign_id})
 
     redirect_path = "/admin/settings/payment-methods?connected=1"

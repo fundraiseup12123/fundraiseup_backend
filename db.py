@@ -79,13 +79,21 @@ def rest_insert(
     row: dict[str, Any] | list[dict[str, Any]],
     *,
     user_jwt: str | None = None,
+    on_conflict: str | None = None,
 ) -> dict[str, Any] | list[dict[str, Any]] | None:
     if not supabase_enabled():
         return None
+    prefer = "return=representation"
+    if on_conflict:
+        prefer = f"resolution=merge-duplicates,{prefer}"
+    params: dict[str, str] = {}
+    if on_conflict:
+        params["on_conflict"] = on_conflict
     try:
         response = httpx.post(
             f"{supabase_url()}/rest/v1/{table}",
-            headers=_headers(prefer="return=representation", user_jwt=user_jwt),
+            headers=_headers(prefer=prefer, user_jwt=user_jwt),
+            params=params or None,
             json=row,
             timeout=20.0,
         )
@@ -93,6 +101,12 @@ def rest_insert(
         logger.warning("Supabase insert failed for %s: %s", table, exc)
         return None
     if response.status_code not in {200, 201}:
+        logger.warning(
+            "Supabase insert failed for %s (%s): %s",
+            table,
+            response.status_code,
+            response.text[:500],
+        )
         return None
     data = response.json()
     if isinstance(data, list):

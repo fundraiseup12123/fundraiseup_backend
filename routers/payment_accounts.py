@@ -294,13 +294,18 @@ def handle_root_stripe_oauth_callback(code: str, state: str) -> RedirectResponse
     if not stripe_account_id:
         raise HTTPException(status_code=400, detail="No Stripe account returned")
 
-    account = stripe.Account.retrieve(stripe_account_id)
+    try:
+        account = stripe.Account.retrieve(stripe_account_id)
+        charges_enabled = bool(getattr(account, "charges_enabled", False))
+    except stripe.error.StripeError:
+        charges_enabled = False
+
     accounts = _load_accounts_raw()
     accounts[view] = {
         **accounts[view],
         "stripe_account_id": stripe_account_id,
-        "stripe_connection_status": "active" if account.charges_enabled else "pending",
-        "stripe_charges_enabled": bool(account.charges_enabled),
+        "stripe_connection_status": "active" if charges_enabled else "pending",
+        "stripe_charges_enabled": charges_enabled,
     }
     _save_accounts(accounts)
 
