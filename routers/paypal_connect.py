@@ -25,14 +25,22 @@ def paypal_redirect_uri(frontend_url: str | None = None) -> str:
 
 def get_paypal_connect_url(state: str, frontend_url: str | None = None) -> str:
     base = resolve_frontend_url(frontend_url)
-    api_url = build_paypal_connect_url(
+    redirect_uri = paypal_redirect_uri(base)
+
+    if paypal_client_id() and not paypal_client_secret():
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "PayPal Connect requires PAYPAL_CLIENT_SECRET on the backend. "
+                "Add PAYPAL_CLIENT_ID and PAYPAL_CLIENT_SECRET in Railway, then restart the API."
+            ),
+        )
+
+    return build_paypal_connect_url(
         state=state,
-        redirect_uri=paypal_redirect_uri(base),
+        redirect_uri=redirect_uri,
         frontend_url=base,
     )
-    if api_url:
-        return api_url
-    return build_paypal_hosted_connect_url(state=state, frontend_url=base)
 
 
 class PayPalConnectStartRequest(BaseModel):

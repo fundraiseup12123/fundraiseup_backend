@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import logging
 import os
 from typing import Sequence
 from urllib.parse import quote, urlencode
 
 import httpx
+
+logger = logging.getLogger(__name__)
 
 from currency import convert_for_paypal, format_display_amount
 
@@ -141,17 +144,22 @@ def create_paypal_partner_onboarding_url(*, state: str, return_url: str) -> str:
     raise RuntimeError("PayPal did not return an onboarding link")
 
 
-def build_paypal_connect_url(*, state: str, redirect_uri: str, frontend_url: str) -> str | None:
+def build_paypal_connect_url(*, state: str, redirect_uri: str, frontend_url: str) -> str:
+    """Official PayPal connect: partner onboarding, then OAuth, then dev email fallback."""
     if paypal_configured():
         try:
             return create_paypal_partner_onboarding_url(
                 state=state,
                 return_url=f"{redirect_uri}?state={quote(state, safe='')}",
             )
-        except RuntimeError:
-            pass
+        except RuntimeError as exc:
+            logger.warning("PayPal partner onboarding unavailable, using OAuth: %s", exc)
+        return build_paypal_oauth_url(state=state, redirect_uri=redirect_uri)
 
-    return None
+    if paypal_client_id():
+        return build_paypal_oauth_url(state=state, redirect_uri=redirect_uri)
+
+    return build_paypal_hosted_connect_url(state=state, frontend_url=frontend_url)
 
 
 def build_paypal_hosted_connect_url(*, state: str, frontend_url: str) -> str:

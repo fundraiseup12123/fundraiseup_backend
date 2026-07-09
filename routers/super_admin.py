@@ -143,12 +143,31 @@ def create_organization(
         )
 
     provisioned = None
+    provision_error: str | None = None
     if invite:
-        provisioned = fulfill_organization_invite(
-            invite,
-            organization_name=payload.name,
-            first_name=payload.admin_first_name,
-            last_name=payload.admin_last_name,
+        try:
+            provisioned = fulfill_organization_invite(
+                invite,
+                organization_name=payload.name,
+                first_name=payload.admin_first_name,
+                last_name=payload.admin_last_name,
+            )
+        except HTTPException as exc:
+            provision_error = str(exc.detail) if isinstance(exc.detail, str) else "Admin invite setup failed"
+        except Exception as exc:
+            provision_error = str(exc) or "Admin invite setup failed"
+
+    if provision_error:
+        message = (
+            f"Organization created, but admin setup could not finish: {provision_error}. "
+            f"You can resend an invite from the organization page."
+        )
+    elif provisioned and provisioned.get("email_sent"):
+        message = f"Organization created. Login details emailed to {payload.admin_email.lower()}."
+    else:
+        message = (
+            f"Organization created. Configure RESEND_API_KEY to email login details to "
+            f"{payload.admin_email.lower()}."
         )
 
     return {
@@ -157,11 +176,8 @@ def create_organization(
         "campaign": default_campaign,
         "email_sent": bool(provisioned and provisioned.get("email_sent")),
         "login_url": provisioned.get("login_url") if provisioned else None,
-        "message": (
-            f"Organization created. Login details emailed to {payload.admin_email.lower()}."
-            if provisioned and provisioned.get("email_sent")
-            else f"Organization created. Configure RESEND_API_KEY to email login details to {payload.admin_email.lower()}."
-        ),
+        "provision_error": provision_error,
+        "message": message,
     }
 
 
