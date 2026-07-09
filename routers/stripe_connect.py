@@ -197,7 +197,12 @@ def stripe_callback(
     except stripe.error.StripeError as exc:
         return fail(str(exc.user_message or exc) or "Stripe authorization failed")
 
-    stripe_account_id = response.get("stripe_user_id")
+    stripe_account_id = getattr(response, "stripe_user_id", None)
+    if not stripe_account_id:
+        try:
+            stripe_account_id = response["stripe_user_id"]
+        except Exception:
+            stripe_account_id = None
     if not stripe_account_id:
         return fail("No Stripe account returned from OAuth")
 

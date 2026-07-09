@@ -290,7 +290,12 @@ def handle_root_stripe_oauth_callback(code: str, state: str) -> RedirectResponse
     except stripe.error.StripeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    stripe_account_id = response.get("stripe_user_id")
+    stripe_account_id = getattr(response, "stripe_user_id", None)
+    if not stripe_account_id:
+        try:
+            stripe_account_id = response["stripe_user_id"]
+        except Exception:
+            stripe_account_id = None
     if not stripe_account_id:
         raise HTTPException(status_code=400, detail="No Stripe account returned")
 
