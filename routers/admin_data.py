@@ -192,6 +192,11 @@ def admin_donation_detail(
     return {"donation": donation, "campaign": campaign, "emails": emails}
 
 
+def _insights_countable(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Match donations list semantics: null status counts as succeeded."""
+    return [r for r in rows if r.get("status") in (None, "succeeded")]
+
+
 @router.get("/orgs/{org_id}/insights")
 def admin_insights(
     org_id: str,
@@ -218,8 +223,8 @@ def admin_insights(
     )
     params: dict[str, str] = {
         "organization_id": f"eq.{org_id}",
-        "status": "eq.succeeded",
-        "select": "amount,currency,frequency,created_at,campaign_id,payment_method,honoree_name,comment,utm",
+        "or": "(status.eq.succeeded,status.is.null)",
+        "select": "amount,currency,frequency,created_at,campaign_id,payment_method,honoree_name,comment,utm,status",
         "order": "created_at.desc",
         "limit": "1000",
     }
@@ -252,12 +257,13 @@ def admin_insights(
         campaigns,
         campaign_id=campaign_id,
         designation=designation,
-        status="succeeded",
+        status=None,
         frequency=frequency,
         date_from=date_from,
         date_to=date_to,
         select=params["select"],
     )
+    rows = _insights_countable(rows)
 
     recurring = [r for r in rows if r.get("frequency") == "monthly"]
     one_time = [r for r in rows if r.get("frequency") != "monthly"]
