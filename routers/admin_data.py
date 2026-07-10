@@ -193,8 +193,62 @@ def admin_donation_detail(
 
 
 def _insights_countable(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Match donations list semantics: null status counts as succeeded."""
-    return [r for r in rows if r.get("status") in (None, "succeeded")]
+    """Match donations list: include everything except explicitly failed/refunded rows."""
+    excluded = {"failed", "canceled", "cancelled", "refunded", "disputed"}
+    return [r for r in rows if str(r.get("status") or "").lower() not in excluded]
+
+
+def _admin_org_donation_rows(
+    org_id: str,
+    *,
+    select: str,
+    campaigns: list[dict[str, Any]],
+    campaign_id: str | None = None,
+    designation: str | None = None,
+    frequency: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    limit: int = 1000,
+) -> list[dict[str, Any]]:
+    """Shared org donation query used by insights (same inclusion rules as donations list)."""
+    params: dict[str, str] = {
+        "organization_id": f"eq.{org_id}",
+        "select": select,
+        "order": "created_at.desc",
+        "limit": str(limit),
+    }
+
+    if campaign_id:
+        params["campaign_id"] = f"eq.{campaign_id}"
+    elif designation:
+        matching = [c["id"] for c in campaigns if c.get("designation") == designation]
+        if not matching:
+            return []
+        params["campaign_id"] = f"in.({','.join(matching)})"
+
+    if frequency and frequency in {"once", "monthly"}:
+        params["frequency"] = f"eq.{frequency}"
+
+    if date_from and date_to:
+        params["and"] = f"(created_at.gte.{date_from},created_at.lte.{date_to})"
+    elif date_from:
+        params["created_at"] = f"gte.{date_from}"
+    elif date_to:
+        params["created_at"] = f"lte.{date_to}"
+
+    rows = rest_get("donations", params=params)
+    return _merge_orphan_donations(
+        org_id,
+        rows,
+        campaigns,
+        campaign_id=campaign_id,
+        designation=designation,
+        status=None,
+        frequency=frequency,
+        date_from=date_from,
+        date_to=date_to,
+        select=select,
+    )
 
 
 @router.get("/orgs/{org_id}/insights")
@@ -221,48 +275,31 @@ def admin_insights(
         "campaigns",
         params={"organization_id": f"eq.{org_id}", "select": "id,name,designation"},
     )
-    params: dict[str, str] = {
-        "organization_id": f"eq.{org_id}",
-        "or": "(status.eq.succeeded,status.is.null)",
-        "select": "amount,currency,frequency,created_at,campaign_id,payment_method,honoree_name,comment,utm,status",
-        "order": "created_at.desc",
-        "limit": "1000",
-    }
+    date_from, date_to = _date_range(date_preset)
 
-    if campaign_id:
-        params["campaign_id"] = f"eq.{campaign_id}"
-    elif designation:
+    if designation and not campaign_id:
         matching = [c["id"] for c in campaigns if c.get("designation") == designation]
         if not matching:
             return _empty_insights(reporting_currency, date_preset, campaigns)
-        params["campaign_id"] = f"in.({','.join(matching)})"
 
-    if utm_source:
-        params["utm->>source"] = f"eq.{utm_source}"
-    if frequency:
-        params["frequency"] = f"eq.{frequency}"
-
-    date_from, date_to = _date_range(date_preset)
-    if date_from and date_to:
-        params["and"] = f"(created_at.gte.{date_from},created_at.lte.{date_to})"
-    elif date_from:
-        params["created_at"] = f"gte.{date_from}"
-    elif date_to:
-        params["created_at"] = f"lte.{date_to}"
-
-    rows = rest_get("donations", params=params)
-    rows = _merge_orphan_donations(
+    rows = _admin_org_donation_rows(
         org_id,
-        rows,
-        campaigns,
+        select="amount,currency,frequency,created_at,campaign_id,payment_method,honoree_name,comment,utm,status",
+        campaigns=campaigns,
         campaign_id=campaign_id,
         designation=designation,
-        status=None,
         frequency=frequency,
         date_from=date_from,
         date_to=date_to,
-        select=params["select"],
     )
+
+    if utm_source:
+        rows = [
+            r
+            for r in rows
+            if isinstance(r.get("utm"), dict) and r["utm"].get("source") == utm_source
+        ]
+
     rows = _insights_countable(rows)
 
     recurring = [r for r in rows if r.get("frequency") == "monthly"]

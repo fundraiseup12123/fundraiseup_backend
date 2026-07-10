@@ -798,6 +798,12 @@ app.include_router(uploads_router)
 @app.on_event("startup")
 def bootstrap_platform_domains() -> None:
     try:
+        from storage_upload import ensure_campaign_assets_bucket
+
+        ensure_campaign_assets_bucket()
+    except Exception:
+        pass
+    try:
         from routers.organizations import ensure_root_campaign_subdomain
 
         ensure_root_campaign_subdomain()

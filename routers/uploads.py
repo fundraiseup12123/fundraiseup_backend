@@ -5,7 +5,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 
 from auth import AuthUser, require_auth
-from storage_upload import supabase_storage_configured, upload_campaign_asset
+from storage_upload import ensure_campaign_assets_bucket, supabase_storage_configured, upload_campaign_asset
 
 router = APIRouter(tags=["uploads"])
 
@@ -32,6 +32,8 @@ async def admin_upload_asset(
             status_code=503,
             detail="Supabase storage is not configured. Set SUPABASE_URL and SUPABASE_SECRET_KEY on the backend.",
         )
+
+    ensure_campaign_assets_bucket()
 
     content = await file.read()
     if len(content) > MAX_BYTES:
