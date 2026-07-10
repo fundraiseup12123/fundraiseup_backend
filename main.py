@@ -161,6 +161,7 @@ class CheckoutResponse(BaseModel):
     frequency: Literal["once", "monthly"]
     paypal_available: bool
     google_pay_available: bool
+    stripe_connect_account: str | None = None
 
 
 def _is_uuid(value: str) -> bool:
@@ -409,6 +410,7 @@ def _build_checkout_response(
     total_display: float,
     frequency: Literal["once", "monthly"],
     subscription_id: str | None = None,
+    stripe_connect_account: str | None = None,
 ) -> CheckoutResponse:
     charge_curr = charge_currency(display_currency, payment_method)
     charge_total = convert_for_charge(total_display, display_currency, payment_method)
@@ -433,6 +435,7 @@ def _build_checkout_response(
         frequency=frequency,
         paypal_available=paypal_available(display_currency),
         google_pay_available=True,
+        stripe_connect_account=stripe_connect_account,
     )
 
 
@@ -581,6 +584,7 @@ def create_checkout(payload: CreateCheckoutRequest) -> CheckoutResponse:
                 total_display=total_display,
                 frequency="monthly",
                 subscription_id=subscription.id,
+                stripe_connect_account=stripe_account,
             )
 
         payment_intent = _create_once_payment_intent(
@@ -602,6 +606,7 @@ def create_checkout(payload: CreateCheckoutRequest) -> CheckoutResponse:
             base_amount=base_amount,
             total_display=total_display,
             frequency="once",
+            stripe_connect_account=stripe_account,
         )
     except stripe.error.StripeError as exc:
         raise HTTPException(status_code=400, detail=str(exc.user_message or exc)) from exc
@@ -668,6 +673,7 @@ def switch_payment_method(payment_intent_id: str, payload: SwitchPaymentMethodRe
             base_amount=base_amount,
             total_display=total_display,
             frequency=frequency if frequency in {"once", "monthly"} else "once",
+            stripe_connect_account=stripe_account or meta.get("stripe_connect_account"),
         )
     except HTTPException:
         raise
@@ -713,6 +719,7 @@ def update_checkout(payment_intent_id: str, payload: UpdateCheckoutRequest) -> C
             base_amount=base_amount,
             total_display=total_display,
             frequency=frequency if frequency in {"once", "monthly"} else "once",
+            stripe_connect_account=stripe_account or meta.get("stripe_connect_account"),
         )
     except stripe.error.StripeError as exc:
         raise HTTPException(status_code=400, detail=str(exc.user_message or exc)) from exc
