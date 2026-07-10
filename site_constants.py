@@ -2,7 +2,7 @@
 
 ROOT_ORG_ID = "00000000-0000-4000-8000-000000000001"
 ROOT_CAMPAIGN_ID = "00000000-0000-4000-8000-000000000002"
-ROOT_CAMPAIGN_SLUG = "sudan"
+ROOT_CAMPAIGN_SLUG = "sudan-needs-you"
 
 ROOT_BODY_HTML = """
 <p><strong>More People Are in Famine in Sudan Than The Rest of The World Combined.</strong> 😞</p>

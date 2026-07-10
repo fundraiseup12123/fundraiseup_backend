@@ -793,6 +793,16 @@ app.include_router(paypal_connect_router)
 app.include_router(emails_router)
 
 
+@app.on_event("startup")
+def bootstrap_platform_domains() -> None:
+    try:
+        from routers.organizations import ensure_root_campaign_subdomain
+
+        ensure_root_campaign_subdomain()
+    except Exception:
+        pass
+
+
 @app.post("/webhooks/stripe")
 async def stripe_webhook(request: Request) -> dict[str, str]:
     import json

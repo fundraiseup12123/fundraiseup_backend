@@ -216,6 +216,24 @@ def _slugify(name: str) -> str:
     return slug or secrets.token_hex(4)
 
 
+def ensure_root_campaign_subdomain() -> None:
+    """Link the homepage campaign to {ROOT_CAMPAIGN_SUBDOMAIN}.{PLATFORM_ROOT_DOMAIN}."""
+    from site_constants import ROOT_CAMPAIGN_ID
+
+    subdomain = os.getenv("ROOT_CAMPAIGN_SUBDOMAIN", "sudan-needs-you").strip().lower()
+    if not subdomain or not platform_root_domain():
+        return
+
+    campaign = rest_get_one(
+        "campaigns",
+        params={"id": f"eq.{ROOT_CAMPAIGN_ID}", "select": "id,slug"},
+    )
+    if campaign and str(campaign.get("slug") or "") != subdomain:
+        rest_patch("campaigns", {"slug": subdomain}, match={"id": ROOT_CAMPAIGN_ID})
+
+    _ensure_campaign_slug_subdomain(ROOT_CAMPAIGN_ID, subdomain)
+
+
 def _ensure_campaign_slug_subdomain(campaign_id: str, slug: str) -> None:
     """Link {slug}.{PLATFORM_ROOT_DOMAIN} to the campaign when platform DNS is configured."""
     root = platform_root_domain()
