@@ -77,6 +77,15 @@ class UtmParams(BaseModel):
     content: str | None = None
 
 
+class DeviceInfo(BaseModel):
+    os: str | None = None
+    browser: str | None = None
+    type: str | None = None
+    country: str | None = None
+    city: str | None = None
+    gender: str | None = None
+
+
 class CreateCheckoutRequest(BaseModel):
     amount: float = Field(gt=0)
     currency: str = Field(min_length=3, max_length=3)
@@ -90,6 +99,7 @@ class CreateCheckoutRequest(BaseModel):
     campaign_id: str | None = None
     checkout_view: Literal["homepage", "popup"] = "homepage"
     utm: UtmParams | None = None
+    device: DeviceInfo | None = None
 
 
 class SwitchPaymentMethodRequest(BaseModel):
@@ -249,7 +259,32 @@ def _checkout_metadata(
         for key, value in utm_fields.items():
             if value:
                 meta[key] = value[:500]
+    if payload.device:
+        device_fields = {
+            "device_os": payload.device.os,
+            "device_browser": payload.device.browser,
+            "device_type": payload.device.type,
+            "device_country": payload.device.country,
+            "device_city": payload.device.city,
+            "device_gender": payload.device.gender,
+        }
+        for key, value in device_fields.items():
+            if value:
+                meta[key] = str(value)[:120]
     return meta
+
+
+def _device_from_meta(meta: dict[str, str]) -> dict[str, str] | None:
+    fields = {
+        "os": meta.get("device_os"),
+        "browser": meta.get("device_browser"),
+        "type": meta.get("device_type"),
+        "country": meta.get("device_country"),
+        "city": meta.get("device_city"),
+        "gender": meta.get("device_gender"),
+    }
+    cleaned = {key: value for key, value in fields.items() if value}
+    return cleaned or None
 
 
 def _utm_from_meta(meta: dict[str, str]) -> dict[str, str] | None:
@@ -726,6 +761,9 @@ def _donation_row_from_intent(payment_intent: stripe.PaymentIntent) -> dict[str,
     utm = _utm_from_meta(meta)
     if utm:
         row["utm"] = utm
+    device = _device_from_meta(meta)
+    if device:
+        row["device"] = device
     return row
 
 

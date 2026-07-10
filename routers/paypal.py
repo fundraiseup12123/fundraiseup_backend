@@ -38,6 +38,15 @@ class PayPalUtm(BaseModel):
     content: str | None = None
 
 
+class PayPalDevice(BaseModel):
+    os: str | None = None
+    browser: str | None = None
+    type: str | None = None
+    country: str | None = None
+    city: str | None = None
+    gender: str | None = None
+
+
 class CreatePayPalOrderRequest(BaseModel):
     amount: float = Field(gt=0)
     currency: str = Field(min_length=3, max_length=3)
@@ -50,6 +59,7 @@ class CreatePayPalOrderRequest(BaseModel):
     checkout_view: Literal["homepage", "popup"] = "homepage"
     donor: PayPalDonor
     utm: PayPalUtm | None = None
+    device: PayPalDevice | None = None
     return_url: str | None = None
     cancel_url: str | None = None
 
@@ -71,6 +81,7 @@ class CompletePayPalRedirectRequest(BaseModel):
     checkout_view: Literal["homepage", "popup"] = "homepage"
     donor: PayPalDonor
     utm: PayPalUtm | None = None
+    device: PayPalDevice | None = None
     paypal_txn_id: str | None = None
 
 
@@ -94,6 +105,7 @@ class CapturePayPalOrderRequest(BaseModel):
     campaign_id: str | None = None
     donor: PayPalDonor
     utm: PayPalUtm | None = None
+    device: PayPalDevice | None = None
 
 
 class CapturePayPalOrderResponse(BaseModel):
@@ -202,6 +214,21 @@ def _record_paypal_donation(
         "processing_fee": processing_fee,
         "payout_amount": payout_amount,
     }
+    if payload.device:
+        device = {
+            k: v
+            for k, v in {
+                "os": payload.device.os,
+                "browser": payload.device.browser,
+                "type": payload.device.type,
+                "country": payload.device.country,
+                "city": payload.device.city,
+                "gender": payload.device.gender,
+            }.items()
+            if v
+        }
+        if device:
+            row["device"] = device
     if payload.utm:
         utm = {
             k: v
