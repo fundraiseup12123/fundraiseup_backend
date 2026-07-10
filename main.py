@@ -231,6 +231,7 @@ def _checkout_metadata(
     organization_id: str | None = None,
     campaign_id: str | None = None,
     campaign_slug: str | None = None,
+    stripe_account: str | None = None,
 ) -> dict[str, str]:
     meta = {
         "first_name": payload.donor.first_name,
@@ -251,6 +252,8 @@ def _checkout_metadata(
         meta["organization_id"] = organization_id
     if campaign_id:
         meta["campaign_id"] = campaign_id
+    if stripe_account:
+        meta["stripe_connect_account"] = stripe_account
     if payload.utm:
         utm_fields = {
             "utm_source": payload.utm.source,
@@ -518,6 +521,7 @@ def create_checkout(payload: CreateCheckoutRequest) -> CheckoutResponse:
         organization_id=organization_id,
         campaign_id=payload.campaign_id,
         campaign_slug=campaign_slug,
+        stripe_account=stripe_account,
     )
 
     try:
@@ -613,8 +617,11 @@ def _customer_id(customer: str | stripe.Customer | None) -> str:
 
 @app.post("/checkout/{payment_intent_id}/switch-method", response_model=CheckoutResponse)
 def switch_payment_method(payment_intent_id: str, payload: SwitchPaymentMethodRequest) -> CheckoutResponse:
+    from stripe_intents import retrieve_payment_intent, stripe_request_kwargs
+
     try:
-        existing = stripe.PaymentIntent.retrieve(payment_intent_id)
+        existing, stripe_account = retrieve_payment_intent(payment_intent_id)
+        stripe_kwargs = stripe_request_kwargs(stripe_account)
         if existing.status in {"canceled", "succeeded"}:
             raise HTTPException(status_code=400, detail="This payment session is no longer active.")
 
@@ -650,6 +657,7 @@ def switch_payment_method(payment_intent_id: str, payload: SwitchPaymentMethodRe
                 "total_display": str(total_display),
                 "cover_fees": str(payload.cover_fees).lower(),
             },
+            **stripe_kwargs,
         )
 
         frequency = meta.get("frequency", "once")
@@ -671,8 +679,11 @@ def switch_payment_method(payment_intent_id: str, payload: SwitchPaymentMethodRe
 
 @app.patch("/checkout/{payment_intent_id}", response_model=CheckoutResponse)
 def update_checkout(payment_intent_id: str, payload: UpdateCheckoutRequest) -> CheckoutResponse:
+    from stripe_intents import retrieve_payment_intent, stripe_request_kwargs
+
     try:
-        existing = stripe.PaymentIntent.retrieve(payment_intent_id)
+        existing, stripe_account = retrieve_payment_intent(payment_intent_id)
+        stripe_kwargs = stripe_request_kwargs(stripe_account)
         meta = _intent_metadata(existing)
         display_currency = meta.get("display_currency", existing.currency.upper()).lower()
         payment_method: PaymentMethodType = meta.get("payment_method", "card")  # type: ignore[assignment]
@@ -691,6 +702,7 @@ def update_checkout(payment_intent_id: str, payload: UpdateCheckoutRequest) -> C
                 "charge_amount": str(charge_total),
                 "total_display": str(total_display),
             },
+            **stripe_kwargs,
         )
 
         frequency = meta.get("frequency", "once")
@@ -706,7 +718,13 @@ def update_checkout(payment_intent_id: str, payload: UpdateCheckoutRequest) -> C
         raise HTTPException(status_code=400, detail=str(exc.user_message or exc)) from exc
 
 
-def _metadata_from_payment_intent(payment_intent: stripe.PaymentIntent) -> dict[str, str]:
+def _metadata_from_payment_intent(
+    payment_intent: stripe.PaymentIntent,
+    *,
+    stripe_account: str | None = None,
+) -> dict[str, str]:
+    from stripe_intents import stripe_request_kwargs
+
     meta = _intent_metadata(payment_intent)
     if meta.get("first_name"):
         return meta
@@ -716,7 +734,11 @@ def _metadata_from_payment_intent(payment_intent: stripe.PaymentIntent) -> dict[
         return meta
 
     invoice_id_str = invoice_id if isinstance(invoice_id, str) else invoice_id.id
-    invoice = stripe.Invoice.retrieve(invoice_id_str, expand=["subscription"])
+    invoice = stripe.Invoice.retrieve(
+        invoice_id_str,
+        expand=["subscription"],
+        **stripe_request_kwargs(stripe_account),
+    )
     subscription = invoice.subscription
     if subscription and not isinstance(subscription, str):
         sub_meta = subscription.metadata.to_dict() if subscription.metadata else {}
@@ -724,8 +746,12 @@ def _metadata_from_payment_intent(payment_intent: stripe.PaymentIntent) -> dict[
     return meta
 
 
-def _donation_row_from_intent(payment_intent: stripe.PaymentIntent) -> dict[str, str | float | None | dict[str, str]]:
-    meta = _metadata_from_payment_intent(payment_intent)
+def _donation_row_from_intent(
+    payment_intent: stripe.PaymentIntent,
+    *,
+    stripe_account: str | None = None,
+) -> dict[str, str | float | None | dict[str, str]]:
+    meta = _metadata_from_payment_intent(payment_intent, stripe_account=stripe_account)
     display_currency = meta.get("display_currency", payment_intent.currency.upper()).upper()
     total_display = float(meta.get("total_display", from_stripe_amount(payment_intent.amount, payment_intent.currency)))
     frequency = meta.get("frequency", "once")
@@ -936,18 +962,20 @@ def get_donations(
 
 @app.post("/donations/record", response_model=DonationFeedItem)
 def record_donation(payload: RecordDonationRequest) -> DonationFeedItem:
+    from stripe_intents import retrieve_payment_intent
+
     if not supabase_enabled():
         raise HTTPException(status_code=503, detail="Donation storage is not configured")
 
     try:
-        payment_intent = stripe.PaymentIntent.retrieve(payload.payment_intent_id)
+        payment_intent, stripe_account = retrieve_payment_intent(payload.payment_intent_id)
     except stripe.error.StripeError as exc:
         raise HTTPException(status_code=400, detail=str(exc.user_message or exc)) from exc
 
     if payment_intent.status != "succeeded":
         raise HTTPException(status_code=400, detail="Payment has not succeeded yet")
 
-    row = _donation_row_from_intent(payment_intent)
+    row = _donation_row_from_intent(payment_intent, stripe_account=stripe_account)
     saved = insert_donation(row)
     if saved:
         from emails import send_donation_alerts_for_row, send_donation_confirmation_for_row
