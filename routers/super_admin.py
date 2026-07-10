@@ -241,19 +241,52 @@ def get_root_donations(
     limit: int = Query(50, ge=1, le=100),
     offset: int = Query(0, ge=0),
 ) -> dict[str, Any]:
+    from site_constants import ROOT_ORG_ID
+
+    select_cols = select_columns(
+        "id", "first_name", "last_name", "email", "amount", "currency",
+        "frequency", "honoree_name", "payment_method", "created_at", "status",
+        "campaign_id", "organization_id",
+    )
     rows = rest_get(
         "donations",
         params={
             "campaign_id": f"eq.{ROOT_CAMPAIGN_ID}",
-            "select": select_columns(
-                "id", "first_name", "last_name", "email", "amount", "currency",
-                "frequency", "honoree_name", "payment_method", "created_at", "status",
-            ),
+            "select": select_cols,
             "order": "created_at.desc",
             "limit": str(limit + 1),
             "offset": str(offset),
         },
     )
+
+    # Older PayPal homepage gifts may have null campaign_id / organization_id.
+    if offset == 0:
+        orphan_rows = rest_get(
+            "donations",
+            params={
+                "payment_method": "eq.paypal",
+                "or": f"(campaign_id.is.null,and(organization_id.is.null,campaign_id.eq.{ROOT_CAMPAIGN_ID}))",
+                "select": select_cols,
+                "order": "created_at.desc",
+                "limit": str(limit),
+            },
+        )
+        if orphan_rows:
+            seen = {str(r.get("id")) for r in rows}
+            for row in orphan_rows:
+                # Keep only true root orphans (no campaign, or root campaign with null org).
+                camp = row.get("campaign_id")
+                org = row.get("organization_id")
+                if camp and camp != ROOT_CAMPAIGN_ID:
+                    continue
+                if org and org != ROOT_ORG_ID:
+                    continue
+                row_id = str(row.get("id") or "")
+                if row_id and row_id not in seen:
+                    rows.append(row)
+                    seen.add(row_id)
+            rows.sort(key=lambda r: str(r.get("created_at") or ""), reverse=True)
+
     has_more = len(rows) > limit
     return {"donations": rows[:limit], "has_more": has_more}
 

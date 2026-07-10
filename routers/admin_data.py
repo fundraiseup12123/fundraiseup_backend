@@ -26,9 +26,13 @@ def admin_list_donations(
     date_preset: str | None = Query(None),
 ) -> dict[str, Any]:
     require_org_access(org_id, user, min_role="member")
+    select_cols = (
+        "id,first_name,last_name,email,amount,currency,frequency,status,payment_method,"
+        "honoree_name,created_at,campaign_id,platform_fee,processing_fee,payout_amount,organization_id"
+    )
     params: dict[str, str] = {
         "organization_id": f"eq.{org_id}",
-        "select": "id,first_name,last_name,email,amount,currency,frequency,status,payment_method,honoree_name,created_at,campaign_id,platform_fee,processing_fee,payout_amount",
+        "select": select_cols,
         "order": "created_at.desc",
         "limit": str(limit + 1),
         "offset": str(offset),
@@ -48,6 +52,38 @@ def admin_list_donations(
         elif date_to:
             params["created_at"] = f"lte.{date_to}"
     rows = rest_get("donations", params=params)
+
+    # Include older PayPal rows that were saved without organization_id but belong to this org's campaigns.
+    if offset == 0:
+        org_campaigns = rest_get(
+            "campaigns",
+            params={"organization_id": f"eq.{org_id}", "select": "id", "limit": "200"},
+        )
+        campaign_ids = [str(c["id"]) for c in org_campaigns if c.get("id")]
+        if campaign_ids:
+            orphan_params: dict[str, str] = {
+                "organization_id": "is.null",
+                "campaign_id": f"in.({','.join(campaign_ids)})",
+                "select": select_cols,
+                "order": "created_at.desc",
+                "limit": str(limit),
+            }
+            if campaign_id:
+                orphan_params["campaign_id"] = f"eq.{campaign_id}"
+            if status:
+                orphan_params["status"] = f"eq.{status}"
+            if frequency and frequency in {"once", "monthly"}:
+                orphan_params["frequency"] = f"eq.{frequency}"
+            orphans = rest_get("donations", params=orphan_params)
+            if orphans:
+                seen = {str(r.get("id")) for r in rows}
+                for row in orphans:
+                    row_id = str(row.get("id") or "")
+                    if row_id and row_id not in seen:
+                        rows.append(row)
+                        seen.add(row_id)
+                rows.sort(key=lambda r: str(r.get("created_at") or ""), reverse=True)
+
     has_more = len(rows) > limit
     total_amount = sum(float(r.get("amount", 0)) for r in rows[:limit])
     return {"donations": rows[:limit], "has_more": has_more, "total_amount": total_amount}

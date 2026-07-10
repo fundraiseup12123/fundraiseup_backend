@@ -144,6 +144,22 @@ def _paypal_webscr_base() -> str:
     return "https://www.sandbox.paypal.com/cgi-bin/webscr"
 
 
+def _resolve_paypal_organization_id(campaign_id: str | None) -> str:
+    from db import rest_get_one
+    from site_constants import ROOT_CAMPAIGN_ID, ROOT_ORG_ID
+
+    if campaign_id:
+        campaign = rest_get_one(
+            "campaigns",
+            params={"id": f"eq.{campaign_id}", "select": "organization_id"},
+        )
+        if campaign and campaign.get("organization_id"):
+            return str(campaign["organization_id"])
+        if campaign_id == ROOT_CAMPAIGN_ID:
+            return ROOT_ORG_ID
+    return ROOT_ORG_ID
+
+
 def _record_paypal_donation(
     *,
     order_id: str,
@@ -160,6 +176,12 @@ def _record_paypal_donation(
         processing_fee = estimate_processing_fee(base_amount, display_currency)
         payout_amount = max(0.0, round(base_amount - processing_fee, 2))
 
+    campaign_id = payload.campaign_id
+    from site_constants import ROOT_CAMPAIGN_ID
+
+    if not campaign_id:
+        campaign_id = ROOT_CAMPAIGN_ID
+
     row = {
         "stripe_payment_intent_id": order_id,
         "first_name": payload.donor.first_name,
@@ -172,7 +194,8 @@ def _record_paypal_donation(
         "payment_method": "paypal",
         "honoree_name": payload.honoree_name or None,
         "comment": payload.comment or None,
-        "campaign_id": payload.campaign_id,
+        "organization_id": _resolve_paypal_organization_id(campaign_id),
+        "campaign_id": campaign_id,
         "status": "succeeded",
         "fee_covered": cover_fees,
         "platform_fee": 0,
