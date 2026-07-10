@@ -191,6 +191,7 @@ class CreateCampaignRequest(BaseModel):
 
 class UpdateCampaignRequest(BaseModel):
     name: str | None = None
+    slug: str | None = None
     status: str | None = None
     default_currency: str | None = None
     stripe_account_id: str | None = None
@@ -213,6 +214,47 @@ class DomainRequest(BaseModel):
 def _slugify(name: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
     return slug or secrets.token_hex(4)
+
+
+def _ensure_campaign_slug_subdomain(campaign_id: str, slug: str) -> None:
+    """Link {slug}.{PLATFORM_ROOT_DOMAIN} to the campaign when platform DNS is configured."""
+    root = platform_root_domain()
+    if not root or not slug:
+        return
+
+    try:
+        hostname, is_platform_subdomain = resolve_campaign_hostname(slug)
+    except ValueError:
+        return
+    if not is_platform_subdomain:
+        return
+
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc).isoformat()
+    verified = {"verified_at": now, "ssl_status": "active"}
+
+    existing_hostname = rest_get_one("domains", params={"hostname": f"eq.{hostname}", "select": "*"})
+    if existing_hostname and str(existing_hostname.get("campaign_id")) != campaign_id:
+        return
+
+    campaign_domains = rest_get("domains", params={"campaign_id": f"eq.{campaign_id}", "select": "*"})
+    for domain in campaign_domains:
+        host = str(domain.get("hostname") or "")
+        if not host.endswith(f".{root}"):
+            continue
+        if host == hostname:
+            if not domain.get("verified_at"):
+                rest_patch("domains", verified, match={"id": domain["id"]})
+            return
+        rest_patch("domains", {"hostname": hostname, **verified}, match={"id": domain["id"]})
+        return
+
+    if not existing_hostname:
+        rest_insert(
+            "domains",
+            {"campaign_id": campaign_id, "hostname": hostname, **verified},
+        )
 
 
 def _get_org_id(user: AuthUser, org_id: str) -> str:
@@ -277,6 +319,7 @@ def create_campaign(
         "campaign_content",
         {"campaign_id": campaign["id"], **_default_campaign_content(payload.name)},
     )
+    _ensure_campaign_slug_subdomain(str(campaign["id"]), slug)
     return campaign
 
 
@@ -337,9 +380,35 @@ def update_campaign(
     user: Annotated[AuthUser, Depends(require_auth)],
 ) -> dict[str, Any]:
     require_org_access(org_id, user, min_role="admin")
+    existing_campaign = rest_get_one(
+        "campaigns",
+        params={
+            "id": f"eq.{campaign_id}",
+            "organization_id": f"eq.{org_id}",
+            "select": "id,slug,status",
+        },
+    )
+    if not existing_campaign:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+
     updates: dict[str, Any] = {}
     if payload.name is not None:
         updates["name"] = payload.name
+    if payload.slug is not None:
+        slug = payload.slug.strip().lower()
+        if not slug:
+            raise HTTPException(status_code=400, detail="Campaign slug cannot be empty")
+        slug_conflict = rest_get_one(
+            "campaigns",
+            params={
+                "organization_id": f"eq.{org_id}",
+                "slug": f"eq.{slug}",
+                "select": "id",
+            },
+        )
+        if slug_conflict and str(slug_conflict.get("id")) != campaign_id:
+            raise HTTPException(status_code=400, detail=f"Campaign slug '{slug}' already exists in this organization")
+        updates["slug"] = slug
     if payload.status is not None:
         updates["status"] = payload.status
     if payload.default_currency is not None:
@@ -349,9 +418,13 @@ def update_campaign(
     if payload.paypal_account_id is not None:
         updates["paypal_account_id"] = payload.paypal_account_id or None
 
-    campaign = None
     if updates:
-        campaign = rest_patch("campaigns", updates, match={"id": campaign_id})
+        rest_patch("campaigns", updates, match={"id": campaign_id})
+
+    resolved_slug = str(updates.get("slug") or existing_campaign.get("slug") or "")
+    resolved_status = str(updates.get("status") or existing_campaign.get("status") or "")
+    if resolved_slug and resolved_status == "live":
+        _ensure_campaign_slug_subdomain(campaign_id, resolved_slug)
 
     if payload.content:
         content_data = payload.content.model_dump()

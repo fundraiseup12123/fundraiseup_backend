@@ -51,6 +51,9 @@ cors_origins = [
 extra_origins = os.getenv("CORS_ORIGINS", "")
 if extra_origins:
     cors_origins.extend(origin.strip() for origin in extra_origins.split(",") if origin.strip())
+frontend_url = os.getenv("FRONTEND_URL", "").strip().rstrip("/")
+if frontend_url and frontend_url not in cors_origins:
+    cors_origins.append(frontend_url)
 
 app.add_middleware(
     CORSMiddleware,
