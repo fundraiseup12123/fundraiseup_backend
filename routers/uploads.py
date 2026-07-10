@@ -12,6 +12,9 @@ router = APIRouter(tags=["uploads"])
 MAX_BYTES = 5 * 1024 * 1024
 ALLOWED_TYPES = {
     "image/jpeg",
+    "image/jpg",
+    "image/jfif",
+    "image/pjpeg",
     "image/png",
     "image/gif",
     "image/webp",
@@ -36,6 +39,8 @@ async def admin_upload_asset(
     ensure_campaign_assets_bucket()
 
     content = await file.read()
+    if len(content) < 256:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty or corrupted. Please try again.")
     if len(content) > MAX_BYTES:
         raise HTTPException(status_code=400, detail="File must be 5 MB or smaller")
 

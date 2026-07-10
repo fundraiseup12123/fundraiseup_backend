@@ -21,11 +21,30 @@ def supabase_storage_configured() -> bool:
     return bool(_supabase_url() and _supabase_secret())
 
 
+def _looks_like_image(buffer: bytes) -> bool:
+    if len(buffer) < 12:
+        return False
+    if buffer[:3] == b"\xff\xd8\xff":
+        return True
+    if buffer[:8] == b"\x89PNG\r\n\x1a\n":
+        return True
+    if buffer[:4] == b"RIFF" and buffer[8:12] == b"WEBP":
+        return True
+    if buffer[:4] == b"GIF8":
+        return True
+    if buffer.startswith(b"<svg") or buffer.startswith(b"<?xml"):
+        return True
+    return False
+
+
 def upload_campaign_asset(buffer: bytes, filename: str, content_type: str) -> str:
     base_url = _supabase_url()
     secret = _supabase_secret()
     if not base_url or not secret:
         raise RuntimeError("Supabase storage is not configured on the server.")
+
+    if not _looks_like_image(buffer):
+        raise RuntimeError("Upload rejected: file does not look like a valid image.")
 
     ensure_campaign_assets_bucket()
 
