@@ -89,6 +89,64 @@ def admin_list_donations(
     return {"donations": rows[:limit], "has_more": has_more, "total_amount": total_amount}
 
 
+def _merge_orphan_donations(
+    org_id: str,
+    rows: list[dict[str, Any]],
+    campaigns: list[dict[str, Any]],
+    *,
+    campaign_id: str | None = None,
+    designation: str | None = None,
+    status: str | None = None,
+    frequency: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    select: str,
+) -> list[dict[str, Any]]:
+    """Include PayPal rows saved without organization_id but tied to this org's campaigns."""
+    campaign_ids = [str(c["id"]) for c in campaigns if c.get("id")]
+    if not campaign_ids:
+        return rows
+
+    orphan_params: dict[str, str] = {
+        "organization_id": "is.null",
+        "campaign_id": f"in.({','.join(campaign_ids)})",
+        "select": select,
+        "order": "created_at.desc",
+        "limit": "1000",
+    }
+    if campaign_id:
+        orphan_params["campaign_id"] = f"eq.{campaign_id}"
+    elif designation:
+        matching = [str(c["id"]) for c in campaigns if c.get("designation") == designation]
+        if not matching:
+            return rows
+        orphan_params["campaign_id"] = f"in.({','.join(matching)})"
+    if status:
+        orphan_params["status"] = f"eq.{status}"
+    if frequency and frequency in {"once", "monthly"}:
+        orphan_params["frequency"] = f"eq.{frequency}"
+    if date_from and date_to:
+        orphan_params["and"] = f"(created_at.gte.{date_from},created_at.lte.{date_to})"
+    elif date_from:
+        orphan_params["created_at"] = f"gte.{date_from}"
+    elif date_to:
+        orphan_params["created_at"] = f"lte.{date_to}"
+
+    orphans = rest_get("donations", params=orphan_params)
+    if not orphans:
+        return rows
+
+    seen = {str(r.get("id")) for r in rows}
+    merged = list(rows)
+    for row in orphans:
+        row_id = str(row.get("id") or "")
+        if row_id and row_id not in seen:
+            merged.append(row)
+            seen.add(row_id)
+    merged.sort(key=lambda r: str(r.get("created_at") or ""), reverse=True)
+    return merged
+
+
 @router.get("/orgs/{org_id}/donations/{donation_id}")
 def admin_donation_detail(
     org_id: str,
@@ -142,7 +200,7 @@ def admin_insights(
     designation: str | None = Query(None),
     utm_source: str | None = Query(None),
     frequency: str | None = Query(None),
-    date_preset: str = Query("today"),
+    date_preset: str = Query("all"),
     interval: str = Query("hourly"),
     reporting_currency: str = Query("GBP"),
 ) -> dict[str, Any]:
@@ -188,6 +246,18 @@ def admin_insights(
         params["created_at"] = f"lte.{date_to}"
 
     rows = rest_get("donations", params=params)
+    rows = _merge_orphan_donations(
+        org_id,
+        rows,
+        campaigns,
+        campaign_id=campaign_id,
+        designation=designation,
+        status="succeeded",
+        frequency=frequency,
+        date_from=date_from,
+        date_to=date_to,
+        select=params["select"],
+    )
 
     recurring = [r for r in rows if r.get("frequency") == "monthly"]
     one_time = [r for r in rows if r.get("frequency") != "monthly"]
