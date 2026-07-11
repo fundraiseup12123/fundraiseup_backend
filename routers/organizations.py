@@ -446,8 +446,6 @@ def update_campaign(
 
     if payload.content:
         content_data = payload.content.model_dump()
-        if content_data.get("logo_url") and (content_data.get("logo_width") != 80 or content_data.get("logo_height") != 80):
-            raise HTTPException(status_code=400, detail="Logo must be 80×80 pixels")
         if content_data.get("hero_url") and (content_data.get("hero_width") != 1248 or content_data.get("hero_height") != 702):
             raise HTTPException(status_code=400, detail="Hero image must be 1248×702 pixels")
         existing = rest_get_one("campaign_content", params={"campaign_id": f"eq.{campaign_id}", "select": "campaign_id"})
