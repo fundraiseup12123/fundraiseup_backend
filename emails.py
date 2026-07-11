@@ -15,7 +15,13 @@ from email_templates import (
     weekly_digest_email,
     weekly_reminder_email,
 )
-from email_branding import DEFAULT_BRAND_NAME, DEFAULT_EMAIL_LOGO_URL, DEFAULT_PRIMARY_COLOR
+from email_branding import (
+    DEFAULT_BRAND_NAME,
+    DEFAULT_EMAIL_BANNER_URL,
+    DEFAULT_EMAIL_LOGO_URL,
+    DEFAULT_PRIMARY_COLOR,
+)
+from email_queue import RateLimited, get_email_queue
 from frontend_url import resolve_frontend_url
 from currency import convert_to_reporting
 from db import supabase_url
@@ -34,11 +40,129 @@ def resend_api_key() -> str:
 
 
 def resend_from_email() -> str:
-    return os.getenv("RESEND_FROM_EMAIL", "Fundraise <donations@fundraiseup.com>").strip()
+    return os.getenv("RESEND_FROM_EMAIL", "FundraiseUp <donations@fundraiseup.com>").strip()
 
 
 def resend_configured() -> bool:
     return bool(resend_api_key())
+
+
+def _contact_email() -> str | None:
+    raw = resend_from_email()
+    if "<" in raw and ">" in raw:
+        return raw.split("<", 1)[1].split(">", 1)[0].strip() or None
+    return raw if "@" in raw else None
+
+
+def _absolute_asset_url(url: str | None) -> str:
+    value = (url or "").strip()
+    if not value:
+        return ""
+    if value.startswith("http://") or value.startswith("https://") or value.startswith("data:"):
+        return value
+    base = resolve_frontend_url().rstrip("/")
+    return f"{base}{value if value.startswith('/') else '/' + value}"
+
+
+_EMAIL_SAFE_EXTS = {".png", ".jpg", ".jpeg", ".jfif", ".gif"}
+_EMAIL_UNSAFE_EXTS = {".avif", ".webp", ".svg", ".svgz", ".heic", ".bmp"}
+
+
+def _email_safe_image_url(url: str | None, *, fallback: str | None = None) -> str:
+    """Return an absolute HTTPS image URL safe for major email clients.
+
+    AVIF/WebP/SVG often fail in Gmail/Outlook; fall back to the platform PNG.
+    """
+    absolute = _absolute_asset_url(url)
+    if not absolute:
+        return fallback or DEFAULT_EMAIL_LOGO_URL
+    if absolute.startswith("data:"):
+        return fallback or DEFAULT_EMAIL_LOGO_URL
+
+    lower = absolute.lower().split("?", 1)[0]
+    for bad in _EMAIL_UNSAFE_EXTS:
+        if lower.endswith(bad):
+            return fallback or DEFAULT_EMAIL_LOGO_URL
+
+    # Prefer known-safe extensions; allow extensionless CDN URLs.
+    has_ext = "." in lower.rsplit("/", 1)[-1]
+    if has_ext and not any(lower.endswith(ext) for ext in _EMAIL_SAFE_EXTS):
+        return fallback or DEFAULT_EMAIL_LOGO_URL
+
+    return absolute
+
+
+def _brand_logo_url() -> str:
+    explicit = os.getenv("EMAIL_LOGO_URL", "").strip()
+    if explicit:
+        return _email_safe_image_url(explicit, fallback=DEFAULT_EMAIL_LOGO_URL)
+    return DEFAULT_EMAIL_LOGO_URL
+
+
+def _brand_banner_url() -> str:
+    explicit = os.getenv("EMAIL_BANNER_URL", "").strip()
+    if explicit:
+        return _email_safe_image_url(explicit, fallback=DEFAULT_EMAIL_BANNER_URL)
+    return DEFAULT_EMAIL_BANNER_URL
+
+
+def _unsubscribe_url(*, email: str, campaign_id: str | None = None) -> str:
+    base = resolve_frontend_url().rstrip("/")
+    from urllib.parse import quote
+
+    q = f"email={quote(email)}"
+    if campaign_id:
+        q += f"&campaign_id={quote(str(campaign_id))}"
+    # Public Next.js proxy → FastAPI
+    return f"{base}/api/backend/emails/reminders/unsubscribe?{q}"
+
+
+def _campaign_branding(campaign_id: str | None) -> dict[str, str]:
+    defaults = {
+        "title": "our campaign",
+        "primary_color": DEFAULT_PRIMARY_COLOR,
+        "donate_url": resolve_frontend_url(),
+        "logo_url": _brand_logo_url(),
+        "banner_url": _brand_banner_url(),
+        "organization_name": DEFAULT_BRAND_NAME,
+    }
+    if not campaign_id:
+        return defaults
+
+    content = rest_get_one(
+        "campaign_content",
+        params={"campaign_id": f"eq.{campaign_id}", "select": "title,primary_color,logo_url,hero_url"},
+    )
+    campaign = rest_get_one(
+        "campaigns",
+        params={"id": f"eq.{campaign_id}", "select": "slug,organization_id,name"},
+    )
+    if content and content.get("title"):
+        defaults["title"] = str(content["title"])
+    elif campaign and campaign.get("name"):
+        defaults["title"] = str(campaign["name"])
+    if content and content.get("primary_color"):
+        defaults["primary_color"] = str(content["primary_color"])
+    if content and content.get("logo_url"):
+        logo = _email_safe_image_url(str(content["logo_url"]), fallback="")
+        if logo:
+            defaults["logo_url"] = logo
+    # Keep the platform watercolor banner — campaign heroes are often AVIF/JFIF
+    # with content-types email clients reject.
+    defaults["banner_url"] = _brand_banner_url()
+    if campaign and campaign.get("slug"):
+        base = resolve_frontend_url().rstrip("/")
+        defaults["donate_url"] = f"{base}/c/{campaign['slug']}"
+    if campaign and campaign.get("organization_id"):
+        org_id = str(campaign["organization_id"])
+        defaults["organization_id"] = org_id
+        org = rest_get_one(
+            "organizations",
+            params={"id": f"eq.{org_id}", "select": "name"},
+        )
+        if org and org.get("name"):
+            defaults["organization_name"] = str(org["name"])
+    return defaults
 
 
 def _supabase_admin_headers() -> dict[str, str]:
@@ -69,46 +193,6 @@ def get_user_email_by_id(user_id: str) -> str | None:
     return None
 
 
-def _brand_logo_url() -> str:
-    explicit = os.getenv("EMAIL_LOGO_URL", "").strip()
-    if explicit:
-        return explicit
-    return DEFAULT_EMAIL_LOGO_URL
-
-
-def _campaign_branding(campaign_id: str | None) -> dict[str, str]:
-    defaults = {
-        "title": "our campaign",
-        "primary_color": "#3872DC",
-        "donate_url": resolve_frontend_url(),
-    }
-    if not campaign_id:
-        return defaults
-
-    content = rest_get_one(
-        "campaign_content",
-        params={"campaign_id": f"eq.{campaign_id}", "select": "title,primary_color,logo_url"},
-    )
-    campaign = rest_get_one(
-        "campaigns",
-        params={"id": f"eq.{campaign_id}", "select": "slug,organization_id"},
-    )
-    if content and content.get("title"):
-        defaults["title"] = str(content["title"])
-    if content and content.get("primary_color"):
-        defaults["primary_color"] = str(content["primary_color"])
-    if content and content.get("logo_url"):
-        logo = str(content["logo_url"])
-        if logo.startswith("http"):
-            defaults["logo_url"] = logo
-    if campaign and campaign.get("slug"):
-        base = resolve_frontend_url().rstrip("/")
-        defaults["donate_url"] = f"{base}/?campaign={campaign['slug']}"
-    if campaign and campaign.get("organization_id"):
-        defaults["organization_id"] = str(campaign["organization_id"])
-    return defaults
-
-
 def log_email(
     *,
     recipient_email: str,
@@ -130,10 +214,75 @@ def log_email(
     )
 
 
-def send_resend_email(*, to: str, subject: str, html: str) -> dict[str, Any]:
-    if not resend_configured():
-        logger.warning("RESEND_API_KEY not set — skipping email to %s", to)
-        return {"sent": False, "reason": "not_configured"}
+def _parse_retry_after(response: httpx.Response) -> float:
+    raw = response.headers.get("retry-after") or response.headers.get("ratelimit-reset") or "1"
+    try:
+        return max(0.25, float(raw))
+    except ValueError:
+        return 1.0
+
+
+def _parse_rate_limit(response: httpx.Response) -> float | None:
+    raw = response.headers.get("ratelimit-limit")
+    if not raw:
+        return None
+    try:
+        # Headers may be "2" or "2;w=1"
+        return max(0.1, float(str(raw).split(";", 1)[0].strip()))
+    except ValueError:
+        return None
+
+
+def _inline_remote_images(html: str) -> tuple[str, list[dict[str, str]]]:
+    """Rewrite remote <img src="https://..."> to cid: and collect Resend attachments.
+
+    Inline CIDs render even when Gmail blocks remote images (common in Spam).
+    """
+    import re
+
+    attachments: list[dict[str, str]] = []
+    seen: dict[str, str] = {}
+
+    def repl(match: re.Match[str]) -> str:
+        url = match.group(1)
+        if url.startswith("cid:"):
+            return match.group(0)
+        if url in seen:
+            return f'src="cid:{seen[url]}"'
+        cid = f"fu-img-{len(attachments) + 1}"
+        filename = url.rsplit("/", 1)[-1].split("?", 1)[0] or "image.png"
+        if "." not in filename:
+            filename = f"{filename}.png"
+        attachments.append(
+            {
+                "path": url,
+                "filename": filename,
+                "content_id": cid,
+            }
+        )
+        seen[url] = cid
+        return f'src="cid:{cid}"'
+
+    rewritten = re.sub(r'src="(https?://[^"]+)"', repl, html)
+    return rewritten, attachments
+
+
+def _deliver_resend_email(
+    *,
+    to: str,
+    subject: str,
+    html: str,
+    attachments: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """POST one email to Resend. Raises RateLimited on HTTP 429."""
+    payload: dict[str, Any] = {
+        "from": resend_from_email(),
+        "to": [to],
+        "subject": subject,
+        "html": html,
+    }
+    if attachments:
+        payload["attachments"] = attachments
 
     response = httpx.post(
         "https://api.resend.com/emails",
@@ -141,14 +290,17 @@ def send_resend_email(*, to: str, subject: str, html: str) -> dict[str, Any]:
             "Authorization": f"Bearer {resend_api_key()}",
             "Content-Type": "application/json",
         },
-        json={
-            "from": resend_from_email(),
-            "to": [to],
-            "subject": subject,
-            "html": html,
-        },
-        timeout=30.0,
+        json=payload,
+        timeout=45.0,
     )
+
+    limit = _parse_rate_limit(response)
+    if limit is not None:
+        get_email_queue(_deliver_resend_email).set_max_per_second(limit)
+
+    if response.status_code == 429:
+        raise RateLimited(retry_after=_parse_retry_after(response), limit=limit)
+
     if response.status_code >= 400:
         detail = response.text
         try:
@@ -161,6 +313,38 @@ def send_resend_email(*, to: str, subject: str, html: str) -> dict[str, Any]:
     return {"sent": True, "id": body.get("id")}
 
 
+def send_resend_email(*, to: str, subject: str, html: str) -> dict[str, Any]:
+    """Enqueue email send (rate-limited) and wait for delivery."""
+    if not resend_configured():
+        logger.warning("RESEND_API_KEY not set — skipping email to %s", to)
+        return {"sent": False, "reason": "not_configured"}
+
+    # Do not CID-inline images: Gmail webmail often shows them as file attachments
+    # instead of rendering them in the body (especially in Spam).
+    return get_email_queue(_deliver_resend_email).submit(to=to, subject=subject, html=html)
+
+
+def _email_presentation(
+    branding: dict[str, str],
+    *,
+    recipient_email: str | None = None,
+    campaign_id: str | None = None,
+) -> dict[str, Any]:
+    cid = campaign_id or None
+    return {
+        "logo_url": branding.get("logo_url", _brand_logo_url()),
+        "banner_url": branding.get("banner_url", _brand_banner_url()),
+        "organization_name": branding.get("organization_name", DEFAULT_BRAND_NAME),
+        "campaign_title": branding.get("title", "our campaign"),
+        "contact_email": _contact_email(),
+        "unsubscribe_url": (
+            _unsubscribe_url(email=recipient_email, campaign_id=cid)
+            if recipient_email
+            else None
+        ),
+    }
+
+
 def send_donation_confirmation_for_row(row: dict[str, Any]) -> bool:
     email = (row.get("email") or "").strip()
     if not email or "@" not in email:
@@ -169,7 +353,11 @@ def send_donation_confirmation_for_row(row: dict[str, Any]) -> bool:
     campaign_id = row.get("campaign_id")
     branding = _campaign_branding(str(campaign_id) if campaign_id else ROOT_CAMPAIGN_ID)
     donor_name = f"{row.get('first_name', '')} {row.get('last_name', '')}".strip() or "Friend"
-    logo_url = branding.get("logo_url", _brand_logo_url())
+    extras = _email_presentation(
+        branding,
+        recipient_email=email,
+        campaign_id=str(campaign_id) if campaign_id else None,
+    )
 
     subject, html = donation_confirmation_email(
         donor_name=donor_name,
@@ -177,9 +365,12 @@ def send_donation_confirmation_for_row(row: dict[str, Any]) -> bool:
         currency=str(row.get("currency", "USD")),
         frequency=str(row.get("frequency", "once")),
         campaign_title=str(branding.get("title", "our campaign")),
-        logo_url=logo_url,
+        logo_url=extras["logo_url"],
         donate_url=str(branding.get("donate_url", resolve_frontend_url())),
-        primary_color=str(branding.get("primary_color", "#3872DC")),
+        primary_color=str(branding.get("primary_color", DEFAULT_PRIMARY_COLOR)),
+        organization_name=str(branding.get("title") or extras["organization_name"]),
+        banner_url=extras["banner_url"],
+        contact_email=extras["contact_email"],
     )
 
     try:
@@ -207,7 +398,11 @@ def subscribe_weekly_reminder(
     normalized = email.strip().lower()
     campaign = campaign_id or ROOT_CAMPAIGN_ID
     branding = _campaign_branding(campaign)
-    logo_url = branding.get("logo_url", _brand_logo_url())
+    extras = _email_presentation(
+        branding,
+        recipient_email=normalized,
+        campaign_id=str(campaign),
+    )
 
     existing = rest_get_one(
         "email_reminders",
@@ -234,9 +429,13 @@ def subscribe_weekly_reminder(
 
     subject, html = popup_reminder_subscribed_email(
         campaign_title=str(branding.get("title", "our campaign")),
-        logo_url=logo_url,
+        logo_url=extras["logo_url"],
         donate_url=str(branding.get("donate_url", resolve_frontend_url())),
-        primary_color=str(branding.get("primary_color", "#3872DC")),
+        primary_color=str(branding.get("primary_color", DEFAULT_PRIMARY_COLOR)),
+        organization_name=extras["organization_name"],
+        banner_url=extras["banner_url"],
+        contact_email=extras["contact_email"],
+        unsubscribe_url=extras["unsubscribe_url"],
     )
     try:
         send_resend_email(to=normalized, subject=subject, html=html)
@@ -250,6 +449,33 @@ def subscribe_weekly_reminder(
         logger.warning("Reminder subscribe email failed: %s", exc)
 
     return {"subscribed": True}
+
+
+def unsubscribe_weekly_reminder(
+    *,
+    email: str,
+    campaign_id: str | None = None,
+) -> dict[str, Any]:
+    normalized = email.strip().lower()
+    if not normalized or "@" not in normalized:
+        return {"unsubscribed": False, "reason": "invalid_email"}
+
+    params: dict[str, str] = {
+        "email": f"eq.{normalized}",
+        "select": "id",
+    }
+    if campaign_id:
+        params["campaign_id"] = f"eq.{campaign_id}"
+
+    rows = rest_get("email_reminders", params=params)
+    if not rows:
+        return {"unsubscribed": True, "updated": 0}
+
+    updated = 0
+    for row in rows:
+        rest_patch("email_reminders", {"active": False}, match={"id": row["id"]})
+        updated += 1
+    return {"unsubscribed": True, "updated": updated}
 
 
 def send_weekly_reminders() -> dict[str, int | str]:
@@ -282,14 +508,22 @@ def send_weekly_reminders() -> dict[str, int | str]:
 
         campaign_id = reminder.get("campaign_id") or ROOT_CAMPAIGN_ID
         branding = _campaign_branding(str(campaign_id))
-        logo_url = branding.get("logo_url", _brand_logo_url())
+        extras = _email_presentation(
+            branding,
+            recipient_email=str(email),
+            campaign_id=str(campaign_id),
+        )
 
         subject, html = weekly_reminder_email(
             donor_name=reminder.get("donor_name"),
             campaign_title=str(branding.get("title", "our campaign")),
-            logo_url=logo_url,
+            logo_url=extras["logo_url"],
             donate_url=str(branding.get("donate_url", resolve_frontend_url())),
-            primary_color=str(branding.get("primary_color", "#3872DC")),
+            primary_color=str(branding.get("primary_color", DEFAULT_PRIMARY_COLOR)),
+            organization_name=extras["organization_name"],
+            banner_url=extras["banner_url"],
+            contact_email=extras["contact_email"],
+            unsubscribe_url=extras["unsubscribe_url"],
         )
 
         try:
@@ -343,15 +577,23 @@ def send_weekly_reminders() -> dict[str, int | str]:
                 pass
 
         branding = _campaign_branding(row.get("campaign_id"))
-        logo_url = branding.get("logo_url", _brand_logo_url())
+        extras = _email_presentation(
+            branding,
+            recipient_email=email,
+            campaign_id=str(row.get("campaign_id") or "") or None,
+        )
         donor_name = f"{row.get('first_name', '')} {row.get('last_name', '')}".strip() or None
 
         subject, html = weekly_reminder_email(
             donor_name=donor_name,
             campaign_title=str(branding.get("title", "our campaign")),
-            logo_url=logo_url,
+            logo_url=extras["logo_url"],
             donate_url=str(branding.get("donate_url", resolve_frontend_url())),
-            primary_color=str(branding.get("primary_color", "#3872DC")),
+            primary_color=str(branding.get("primary_color", DEFAULT_PRIMARY_COLOR)),
+            organization_name=extras["organization_name"],
+            banner_url=extras["banner_url"],
+            contact_email=extras["contact_email"],
+            unsubscribe_url=extras["unsubscribe_url"],
         )
 
         try:
@@ -458,6 +700,8 @@ def send_donation_alerts_for_row(row: dict[str, Any]) -> int:
     if row.get("id"):
         admin_url = f"{admin_url}/{row['id']}"
     logo_url = _brand_logo_url()
+    banner_url = _brand_banner_url()
+    contact = _contact_email()
     sent = 0
 
     for recipient in _org_notification_recipients(str(org_id)):
@@ -471,6 +715,8 @@ def send_donation_alerts_for_row(row: dict[str, Any]) -> int:
             admin_url=admin_url,
             logo_url=logo_url,
             primary_color=DEFAULT_PRIMARY_COLOR,
+            banner_url=banner_url,
+            contact_email=contact,
         )
         try:
             send_resend_email(to=recipient["email"], subject=subject, html=html)
@@ -538,6 +784,8 @@ def send_org_weekly_digests() -> dict[str, int]:
         )
         admin_url = f"{resolve_frontend_url().rstrip('/')}/admin/insights"
         logo_url = _brand_logo_url()
+        banner_url = _brand_banner_url()
+        contact = _contact_email()
         organization_name = str(org.get("name") or "your organization")
 
         for recipient in _org_notification_recipients(org_id):
@@ -550,6 +798,8 @@ def send_org_weekly_digests() -> dict[str, int]:
                 admin_url=admin_url,
                 logo_url=logo_url,
                 primary_color=DEFAULT_PRIMARY_COLOR,
+                banner_url=banner_url,
+                contact_email=contact,
             )
             try:
                 send_resend_email(to=recipient["email"], subject=subject, html=html)

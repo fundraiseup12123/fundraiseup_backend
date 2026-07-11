@@ -1,8 +1,20 @@
-"""Fundraise email branding defaults."""
+"""FundraiseUp email branding defaults.
 
+Images must be publicly reachable HTTPS PNG/JPEG — Gmail blocks AVIF/WebP and
+relative paths. Banner/logo are hosted on Supabase public storage.
+"""
+
+# Platform F mark (PNG) for email headers.
 DEFAULT_EMAIL_LOGO_URL = (
-    "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABwAAAAcCAMAAABF0y+mAAAARVBMVEX////Y7+TO693R7N/s9/JRwI4AsW8Os3IAr2q04csrt3u7488jtXjj9OxixZhryJ1xyqC/5dMArmYetXbv+PSDz6uM0rChUDNYAAAAaUlEQVR4Ac2OQwLEQAAEx7b+/9PYyW1Z1yb4WyDCG4icNcr4jpAnDTF1gJ9FzcwBYc9J53cCBu+Cbk/vWmTb0weRL5pRd1EnNpMheCOltgH5LGqWc+b1Lmxvc3sWteCcM/ssWj1QwL/TA/joBfiV9nmeAAAAAElFTkSuQmCC"
+    "https://galiikzdbkbtqkhxlkgy.supabase.co/storage/v1/object/public/"
+    "campaign-assets/campaigns/a8312bd1-f9b9-4ec1-8d28-ddb28efd9bb5.png"
 )
 
-DEFAULT_BRAND_NAME = "Fundraise"
+# Soft watercolor banner (compressed JPEG) for email headers.
+DEFAULT_EMAIL_BANNER_URL = (
+    "https://galiikzdbkbtqkhxlkgy.supabase.co/storage/v1/object/public/"
+    "campaign-assets/campaigns/8bd051d2-f10a-4eec-8721-e7dc06af43b9.jpg"
+)
+
+DEFAULT_BRAND_NAME = "FundraiseUp"
 DEFAULT_PRIMARY_COLOR = "#3872DC"

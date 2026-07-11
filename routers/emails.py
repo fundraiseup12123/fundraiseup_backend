@@ -13,6 +13,7 @@ from emails import (
     send_org_weekly_digests,
     send_weekly_reminders,
     subscribe_weekly_reminder,
+    unsubscribe_weekly_reminder,
 )
 
 router = APIRouter(prefix="/emails", tags=["emails"])
@@ -37,6 +38,14 @@ def subscribe_reminder(payload: ReminderSubscribeRequest) -> dict[str, Any]:
         source="popup",
         donor_name=payload.donor_name,
     )
+
+
+@router.get("/reminders/unsubscribe")
+def unsubscribe_reminder(
+    email: EmailStr,
+    campaign_id: str | None = None,
+) -> dict[str, Any]:
+    return unsubscribe_weekly_reminder(email=str(email), campaign_id=campaign_id)
 
 
 @router.post("/cron/weekly-reminders")

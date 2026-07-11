@@ -12,7 +12,7 @@ from fastapi import HTTPException
 
 from db import rest_get_one, rest_insert, rest_patch, supabase_url
 from emails import log_email, send_resend_email
-from email_branding import DEFAULT_EMAIL_LOGO_URL, DEFAULT_PRIMARY_COLOR
+from email_branding import DEFAULT_EMAIL_BANNER_URL, DEFAULT_EMAIL_LOGO_URL, DEFAULT_PRIMARY_COLOR
 from email_templates import org_admin_invite_email
 from frontend_url import resolve_frontend_url
 
@@ -181,6 +181,8 @@ def send_org_invite_email(
         existing_user=existing_user,
         logo_url=os.getenv("EMAIL_LOGO_URL", "").strip() or DEFAULT_EMAIL_LOGO_URL,
         primary_color=DEFAULT_PRIMARY_COLOR,
+        banner_url=os.getenv("EMAIL_BANNER_URL", "").strip() or DEFAULT_EMAIL_BANNER_URL,
+        contact_email=None,
     )
     result = send_resend_email(to=recipient_email, subject=subject, html=html)
     if result.get("sent"):
