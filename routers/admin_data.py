@@ -113,6 +113,12 @@ def admin_list_donations(
         page = rows[:limit]
 
     total_amount = sum(_row_amount(r, reporting_currency) for r in page)
+    for row in page:
+        original_currency = str(row.get("currency") or "USD").upper()
+        row["original_amount"] = float(row.get("amount") or 0)
+        row["original_currency"] = original_currency
+        row["reporting_amount"] = _row_amount(row, reporting_currency)
+        row["reporting_currency"] = reporting_currency
     return {
         "donations": page,
         "has_more": has_more,
