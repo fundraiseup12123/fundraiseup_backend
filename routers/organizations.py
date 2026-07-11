@@ -186,7 +186,7 @@ class CampaignContentPayload(BaseModel):
 class CreateCampaignRequest(BaseModel):
     name: str = Field(min_length=2, max_length=200)
     slug: str | None = None
-    default_currency: str = "USD"
+    default_currency: str | None = None
 
 
 class UpdateCampaignRequest(BaseModel):
@@ -311,13 +311,20 @@ def create_campaign(
     if existing:
         raise HTTPException(status_code=400, detail=f"Campaign slug '{slug}' already exists in this organization")
 
+    org = rest_get_one(
+        "organizations",
+        params={"id": f"eq.{org_id}", "select": "default_currency"},
+    )
+    currency = (payload.default_currency or (org or {}).get("default_currency") or "USD")
+    currency = str(currency).strip().upper() or "USD"
+
     campaign = rest_insert(
         "campaigns",
         {
             "organization_id": org_id,
             "name": payload.name,
             "slug": slug,
-            "default_currency": payload.default_currency.upper(),
+            "default_currency": currency,
             "status": "draft",
         },
     )
@@ -328,7 +335,7 @@ def create_campaign(
                 "organization_id": org_id,
                 "name": payload.name,
                 "slug": slug,
-                "default_currency": payload.default_currency.upper(),
+                "default_currency": currency,
                 "status": "draft",
             },
         )
@@ -786,11 +793,57 @@ def get_org_settings(org_id: str, user: Annotated[AuthUser, Depends(require_auth
     _get_org_id(user, org_id)
     org = rest_get_one(
         "organizations",
-        params={"id": f"eq.{org_id}", "select": "id,name,default_currency,reporting_currency,payment_methods,notification_prefs"},
+        params={
+            "id": f"eq.{org_id}",
+            "select": "id,name,slug,default_currency,reporting_currency,payment_methods,notification_prefs",
+        },
     )
     if not org:
         raise HTTPException(status_code=404, detail="Organization not found")
     return org
+
+
+def _cascade_org_default_currency(org_id: str, currency: str) -> int:
+    """Push org default currency onto every campaign in the organization."""
+    code = currency.strip().upper()
+    if not code:
+        return 0
+    campaigns = rest_get(
+        "campaigns",
+        params={"organization_id": f"eq.{org_id}", "select": "id"},
+    )
+    updated = 0
+    for campaign in campaigns:
+        cid = str(campaign.get("id") or "")
+        if not cid:
+            continue
+        rest_patch("campaigns", {"default_currency": code}, match={"id": cid})
+        updated += 1
+        default_rows = rest_get(
+            "campaign_currencies",
+            params={
+                "campaign_id": f"eq.{cid}",
+                "is_default": "eq.true",
+                "select": "id,currency_code",
+            },
+        )
+        for row in default_rows:
+            if str(row.get("currency_code") or "").upper() == code:
+                continue
+            conflict = rest_get_one(
+                "campaign_currencies",
+                params={
+                    "campaign_id": f"eq.{cid}",
+                    "currency_code": f"eq.{code}",
+                    "select": "id",
+                },
+            )
+            if conflict:
+                rest_patch("campaign_currencies", {"is_default": True}, match={"id": conflict["id"]})
+                rest_patch("campaign_currencies", {"is_default": False}, match={"id": row["id"]})
+            else:
+                rest_patch("campaign_currencies", {"currency_code": code}, match={"id": row["id"]})
+    return updated
 
 
 @router.patch("/{org_id}/settings")
@@ -800,9 +853,65 @@ def update_org_settings(
     user: Annotated[AuthUser, Depends(require_auth)],
 ) -> dict[str, Any]:
     require_org_access(org_id, user, min_role="admin")
-    allowed = {"name", "default_currency", "reporting_currency", "payment_methods", "notification_prefs"}
-    updates = {k: v for k, v in payload.items() if k in allowed}
+    existing = rest_get_one(
+        "organizations",
+        params={"id": f"eq.{org_id}", "select": "id,name,slug,default_currency,reporting_currency"},
+    )
+    if not existing:
+        raise HTTPException(status_code=404, detail="Organization not found")
+
+    allowed = {"name", "slug", "default_currency", "reporting_currency", "payment_methods", "notification_prefs"}
+    updates: dict[str, Any] = {k: v for k, v in payload.items() if k in allowed}
+
+    if "name" in updates:
+        name = str(updates["name"] or "").strip()
+        if len(name) < 2:
+            raise HTTPException(status_code=400, detail="Organization name must be at least 2 characters")
+        updates["name"] = name
+
+    if "slug" in updates:
+        slug = _slugify(str(updates["slug"] or ""))
+        if len(slug) < 2:
+            raise HTTPException(status_code=400, detail="Organization slug must be at least 2 characters")
+        conflict = rest_get_one(
+            "organizations",
+            params={"slug": f"eq.{slug}", "select": "id"},
+        )
+        if conflict and str(conflict.get("id")) != org_id:
+            raise HTTPException(status_code=400, detail=f"Organization slug '{slug}' is already taken")
+        updates["slug"] = slug
+
+    currency_changed = False
+    if "default_currency" in updates and updates["default_currency"] is not None:
+        updates["default_currency"] = str(updates["default_currency"]).strip().upper()
+        if not updates["default_currency"]:
+            raise HTTPException(status_code=400, detail="Default currency is required")
+        currency_changed = updates["default_currency"] != str(existing.get("default_currency") or "").upper()
+
+    if "reporting_currency" in updates and updates["reporting_currency"] is not None:
+        updates["reporting_currency"] = str(updates["reporting_currency"]).strip().upper()
+        if not updates["reporting_currency"]:
+            raise HTTPException(status_code=400, detail="Reporting currency is required")
+
+    if not updates:
+        raise HTTPException(status_code=400, detail="No updates provided")
+
     updated = rest_patch("organizations", updates, match={"id": org_id})
     if not updated:
         raise HTTPException(status_code=500, detail="Failed to update organization")
-    return updated
+
+    campaigns_updated = 0
+    if currency_changed:
+        campaigns_updated = _cascade_org_default_currency(org_id, str(updates["default_currency"]))
+
+    # Return fresh settings including slug for the admin UI.
+    fresh = rest_get_one(
+        "organizations",
+        params={
+            "id": f"eq.{org_id}",
+            "select": "id,name,slug,default_currency,reporting_currency,payment_methods,notification_prefs",
+        },
+    ) or updated
+    if isinstance(fresh, dict):
+        fresh = {**fresh, "campaigns_currency_updated": campaigns_updated}
+    return fresh

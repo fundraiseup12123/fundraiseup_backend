@@ -233,7 +233,7 @@ def donation_confirmation_email(
         <strong style="color:#0f172a;">{escape(amount_label)}</strong>
         to <strong>{escape(name)}</strong>.
       </p>
-      <p style="margin:0 0 12px;">This email confirms your payment was processed successfully.</p>
+      <p style="margin:0 0 12px;">This email confirms your donation was processed successfully.</p>
       {recurring_note}
       <p style="margin:16px 0 0;">— Your friends at {escape(name)}</p>
     """

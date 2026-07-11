@@ -12,7 +12,12 @@ from pydantic import BaseModel, EmailStr, Field
 
 from auth import AuthUser, require_auth, require_super_admin
 from db import rest_delete, rest_get, rest_get_one, rest_insert, rest_patch, select_columns
-from routers.organizations import CampaignContentPayload, PopupViewPayload
+from routers.organizations import (
+    CampaignContentPayload,
+    PopupViewPayload,
+    _cascade_org_default_currency,
+    _slugify as org_slugify,
+)
 from invite_service import fulfill_organization_invite
 
 router = APIRouter(prefix="/super", tags=["super-admin"])
@@ -293,8 +298,10 @@ def get_root_donations(
 
 class UpdateOrganizationRequest(BaseModel):
     name: str | None = None
+    slug: str | None = None
     status: str | None = None
     default_currency: str | None = None
+    reporting_currency: str | None = None
 
 
 @router.patch("/organizations/{org_id}")
@@ -303,18 +310,42 @@ def update_organization(
     payload: UpdateOrganizationRequest,
     user: Annotated[AuthUser, Depends(require_super_admin)],
 ) -> dict[str, Any]:
+    existing = rest_get_one(
+        "organizations",
+        params={"id": f"eq.{org_id}", "select": "id,default_currency"},
+    )
+    if not existing:
+        raise HTTPException(status_code=404, detail="Organization not found")
+
     updates: dict[str, Any] = {}
     if payload.name is not None:
-        updates["name"] = payload.name
+        name = payload.name.strip()
+        if len(name) < 2:
+            raise HTTPException(status_code=400, detail="Organization name must be at least 2 characters")
+        updates["name"] = name
+    if payload.slug is not None:
+        slug = org_slugify(payload.slug)
+        if len(slug) < 2:
+            raise HTTPException(status_code=400, detail="Organization slug must be at least 2 characters")
+        conflict = rest_get_one("organizations", params={"slug": f"eq.{slug}", "select": "id"})
+        if conflict and str(conflict.get("id")) != org_id:
+            raise HTTPException(status_code=400, detail=f"Organization slug '{slug}' is already taken")
+        updates["slug"] = slug
     if payload.status is not None:
         updates["status"] = payload.status
+    currency_changed = False
     if payload.default_currency is not None:
         updates["default_currency"] = payload.default_currency.upper()
+        currency_changed = updates["default_currency"] != str(existing.get("default_currency") or "").upper()
+    if payload.reporting_currency is not None:
+        updates["reporting_currency"] = payload.reporting_currency.upper()
     if not updates:
         raise HTTPException(status_code=400, detail="No updates provided")
     updated = rest_patch("organizations", updates, match={"id": org_id})
     if not updated:
         raise HTTPException(status_code=404, detail="Organization not found")
+    if currency_changed:
+        _cascade_org_default_currency(org_id, str(updates["default_currency"]))
     return updated
 
 
