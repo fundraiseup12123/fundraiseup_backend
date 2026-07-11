@@ -35,8 +35,8 @@ def _default_campaign_content(name: str) -> dict[str, Any]:
             "dedication_hint": root.get("dedication_hint"),
             "primary_color": root.get("primary_color") or "#3872DC",
             "logo_url": root.get("logo_url"),
-            "logo_width": root.get("logo_width") or 120,
-            "logo_height": root.get("logo_height") or 120,
+            "logo_width": root.get("logo_width") or 80,
+            "logo_height": root.get("logo_height") or 80,
             "hero_url": root.get("hero_url"),
             "hero_width": root.get("hero_width") or 1248,
             "hero_height": root.get("hero_height") or 702,
@@ -173,8 +173,8 @@ class CampaignContentPayload(BaseModel):
     dedication_hint: str | None = None
     primary_color: str = "#3872DC"
     logo_url: str | None = None
-    logo_width: int = 120
-    logo_height: int = 120
+    logo_width: int = 80
+    logo_height: int = 80
     hero_url: str | None = None
     hero_width: int = 1248
     hero_height: int = 702
@@ -446,8 +446,8 @@ def update_campaign(
 
     if payload.content:
         content_data = payload.content.model_dump()
-        if content_data.get("logo_url") and (content_data.get("logo_width") != 120 or content_data.get("logo_height") != 120):
-            raise HTTPException(status_code=400, detail="Logo must be 120×120 pixels")
+        if content_data.get("logo_url") and (content_data.get("logo_width") != 80 or content_data.get("logo_height") != 80):
+            raise HTTPException(status_code=400, detail="Logo must be 80×80 pixels")
         if content_data.get("hero_url") and (content_data.get("hero_width") != 1248 or content_data.get("hero_height") != 702):
             raise HTTPException(status_code=400, detail="Hero image must be 1248×702 pixels")
         existing = rest_get_one("campaign_content", params={"campaign_id": f"eq.{campaign_id}", "select": "campaign_id"})
