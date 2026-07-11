@@ -24,8 +24,11 @@ def admin_list_donations(
     status: str | None = Query(None),
     frequency: str | None = Query(None),
     date_preset: str | None = Query(None),
+    sort: str = Query("desc", pattern="^(asc|desc)$"),
 ) -> dict[str, Any]:
     require_org_access(org_id, user, min_role="member")
+    sort_desc = sort != "asc"
+    order = "created_at.desc" if sort_desc else "created_at.asc"
     select_cols = (
         "id,first_name,last_name,email,amount,currency,frequency,status,payment_method,"
         "honoree_name,created_at,campaign_id,platform_fee,processing_fee,payout_amount,organization_id"
@@ -33,7 +36,7 @@ def admin_list_donations(
     params: dict[str, str] = {
         "organization_id": f"eq.{org_id}",
         "select": select_cols,
-        "order": "created_at.desc",
+        "order": order,
         "limit": str(limit + 1),
         "offset": str(offset),
     }
@@ -65,7 +68,7 @@ def admin_list_donations(
                 "organization_id": "is.null",
                 "campaign_id": f"in.({','.join(campaign_ids)})",
                 "select": select_cols,
-                "order": "created_at.desc",
+                "order": order,
                 "limit": str(limit),
             }
             if campaign_id:
@@ -82,7 +85,7 @@ def admin_list_donations(
                     if row_id and row_id not in seen:
                         rows.append(row)
                         seen.add(row_id)
-                rows.sort(key=lambda r: str(r.get("created_at") or ""), reverse=True)
+                rows.sort(key=lambda r: str(r.get("created_at") or ""), reverse=sort_desc)
 
     has_more = len(rows) > limit
     total_amount = sum(float(r.get("amount", 0)) for r in rows[:limit])
