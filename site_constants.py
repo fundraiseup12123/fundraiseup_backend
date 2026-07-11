@@ -53,7 +53,7 @@ DEFAULT_CAMPAIGN_CONTENT = {
     "primary_color": "#3872DC",
     "logo_url": "/assets/logo.avif",
     "logo_width": 160,
-    "logo_height": 56,
+    "logo_height": 160,
     "hero_url": "/assets/herobanner.jfif",
     "hero_width": 1248,
     "hero_height": 702,
