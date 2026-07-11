@@ -24,21 +24,28 @@ def admin_list_donations(
     status: str | None = Query(None),
     frequency: str | None = Query(None),
     date_preset: str | None = Query(None),
-    sort: str = Query("desc", pattern="^(asc|desc)$"),
+    sort: str = Query("date_desc", pattern="^(date_desc|asc|desc)$"),
 ) -> dict[str, Any]:
     require_org_access(org_id, user, min_role="member")
-    sort_desc = sort != "asc"
-    order = "created_at.desc" if sort_desc else "created_at.asc"
+    org = rest_get_one(
+        "organizations",
+        params={"id": f"eq.{org_id}", "select": "reporting_currency"},
+    )
+    reporting_currency = str((org or {}).get("reporting_currency") or "USD").upper()
+    amount_sort = sort in {"asc", "desc"}
+    sort_desc = sort == "desc"
     select_cols = (
         "id,first_name,last_name,email,amount,currency,frequency,status,payment_method,"
         "honoree_name,created_at,campaign_id,platform_fee,processing_fee,payout_amount,organization_id"
     )
+    # Amount sort loads the filtered set so FX conversion ranks correctly across currencies.
+    fetch_limit = 1000 if amount_sort else limit + 1
     params: dict[str, str] = {
         "organization_id": f"eq.{org_id}",
         "select": select_cols,
-        "order": order,
-        "limit": str(limit + 1),
-        "offset": str(offset),
+        "order": "created_at.desc",
+        "limit": str(fetch_limit),
+        "offset": str(0 if amount_sort else offset),
     }
     if campaign_id:
         params["campaign_id"] = f"eq.{campaign_id}"
@@ -57,7 +64,7 @@ def admin_list_donations(
     rows = rest_get("donations", params=params)
 
     # Include older PayPal rows that were saved without organization_id but belong to this org's campaigns.
-    if offset == 0:
+    if offset == 0 or amount_sort:
         org_campaigns = rest_get(
             "campaigns",
             params={"organization_id": f"eq.{org_id}", "select": "id", "limit": "200"},
@@ -68,8 +75,8 @@ def admin_list_donations(
                 "organization_id": "is.null",
                 "campaign_id": f"in.({','.join(campaign_ids)})",
                 "select": select_cols,
-                "order": order,
-                "limit": str(limit),
+                "order": "created_at.desc",
+                "limit": str(fetch_limit),
             }
             if campaign_id:
                 orphan_params["campaign_id"] = f"eq.{campaign_id}"
@@ -77,6 +84,14 @@ def admin_list_donations(
                 orphan_params["status"] = f"eq.{status}"
             if frequency and frequency in {"once", "monthly"}:
                 orphan_params["frequency"] = f"eq.{frequency}"
+            if date_preset and date_preset != "all":
+                date_from, date_to = _date_range(date_preset)
+                if date_from and date_to:
+                    orphan_params["and"] = f"(created_at.gte.{date_from},created_at.lte.{date_to})"
+                elif date_from:
+                    orphan_params["created_at"] = f"gte.{date_from}"
+                elif date_to:
+                    orphan_params["created_at"] = f"lte.{date_to}"
             orphans = rest_get("donations", params=orphan_params)
             if orphans:
                 seen = {str(r.get("id")) for r in rows}
@@ -85,11 +100,25 @@ def admin_list_donations(
                     if row_id and row_id not in seen:
                         rows.append(row)
                         seen.add(row_id)
-                rows.sort(key=lambda r: str(r.get("created_at") or ""), reverse=sort_desc)
 
-    has_more = len(rows) > limit
-    total_amount = sum(float(r.get("amount", 0)) for r in rows[:limit])
-    return {"donations": rows[:limit], "has_more": has_more, "total_amount": total_amount}
+    if amount_sort:
+        # Stable: newest first within equal converted amounts.
+        rows.sort(key=lambda r: str(r.get("created_at") or ""), reverse=True)
+        rows.sort(key=lambda r: _row_amount(r, reporting_currency), reverse=sort_desc)
+        page = rows[offset : offset + limit]
+        has_more = len(rows) > offset + limit
+    else:
+        rows.sort(key=lambda r: str(r.get("created_at") or ""), reverse=True)
+        has_more = len(rows) > limit
+        page = rows[:limit]
+
+    total_amount = sum(_row_amount(r, reporting_currency) for r in page)
+    return {
+        "donations": page,
+        "has_more": has_more,
+        "total_amount": total_amount,
+        "reporting_currency": reporting_currency,
+    }
 
 
 def _merge_orphan_donations(
