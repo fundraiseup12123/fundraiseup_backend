@@ -131,11 +131,43 @@ class DonationFeedItem(BaseModel):
     frequency: Literal["once", "monthly"]
     honoree_name: str | None = None
     created_at: str
+    country_code: str | None = None
 
 
 class DonationFeedResponse(BaseModel):
     donations: list[DonationFeedItem]
     has_more: bool
+
+
+def _country_code_from_device(device: object) -> str | None:
+    if not isinstance(device, dict):
+        return None
+    raw = (
+        device.get("country")
+        or device.get("Country")
+        or device.get("country_code")
+        or device.get("countryCode")
+    )
+    if raw is None:
+        return None
+    code = str(raw).strip().upper()
+    if len(code) == 2 and code.isalpha():
+        return code
+    return None
+
+
+def _feed_item_from_row(row: dict) -> DonationFeedItem:
+    return DonationFeedItem(
+        id=str(row["id"]),
+        first_name=row["first_name"],
+        last_name=row["last_name"],
+        amount=float(row["amount"]),
+        currency=str(row["currency"]).upper(),
+        frequency=row["frequency"] if row["frequency"] in {"once", "monthly"} else "once",
+        honoree_name=row.get("honoree_name"),
+        created_at=row["created_at"],
+        country_code=_country_code_from_device(row.get("device")),
+    )
 
 
 class WalletDomainResponse(BaseModel):
@@ -926,44 +958,78 @@ def get_donations(
     limit: int = 20,
     offset: int = 0,
     campaign_id: str | None = None,
+    sort: str = "recent",
 ) -> DonationFeedResponse:
     if limit < 1 or limit > 50:
         raise HTTPException(status_code=400, detail="limit must be between 1 and 50")
     if offset < 0:
         raise HTTPException(status_code=400, detail="offset must be >= 0")
+    if sort not in {"recent", "descending"}:
+        raise HTTPException(status_code=400, detail="sort must be recent or descending")
 
     if not supabase_enabled():
         return DonationFeedResponse(donations=[], has_more=False)
 
+    from currency import convert_to_reporting
     from db import rest_get as db_rest_get
+    from db import rest_get_one as db_rest_get_one
+
+    select_cols = (
+        "id,first_name,last_name,amount,currency,frequency,honoree_name,created_at,device"
+    )
+    amount_sort = sort == "descending"
+    fetch_limit = 200 if amount_sort else limit + 1
 
     if campaign_id and _is_uuid(campaign_id) and supabase_enabled():
         params = {
             "campaign_id": f"eq.{campaign_id}",
-            "select": "id,first_name,last_name,amount,currency,frequency,honoree_name,created_at",
+            "select": select_cols,
             "order": "created_at.desc",
-            "limit": str(limit + 1),
-            "offset": str(offset),
+            "limit": str(fetch_limit),
+            "offset": str(0 if amount_sort else offset),
         }
         rows = db_rest_get("donations", params=params)
     else:
-        rows = list_donations(limit=limit + 1, offset=offset)
-    has_more = len(rows) > limit
-    visible = rows[:limit]
+        rows = list_donations(limit=fetch_limit, offset=0 if amount_sort else offset)
 
-    donations = [
-        DonationFeedItem(
-            id=str(row["id"]),
-            first_name=row["first_name"],
-            last_name=row["last_name"],
-            amount=float(row["amount"]),
-            currency=str(row["currency"]).upper(),
-            frequency=row["frequency"] if row["frequency"] in {"once", "monthly"} else "once",
-            honoree_name=row.get("honoree_name"),
-            created_at=row["created_at"],
+    if amount_sort:
+        reporting_currency = "USD"
+        if campaign_id and _is_uuid(campaign_id):
+            campaign = db_rest_get_one(
+                "campaigns",
+                params={"id": f"eq.{campaign_id}", "select": "default_currency,organization_id"},
+            )
+            if campaign:
+                org = db_rest_get_one(
+                    "organizations",
+                    params={
+                        "id": f"eq.{campaign.get('organization_id')}",
+                        "select": "reporting_currency,default_currency",
+                    },
+                )
+                reporting_currency = str(
+                    (org or {}).get("reporting_currency")
+                    or campaign.get("default_currency")
+                    or (org or {}).get("default_currency")
+                    or "USD"
+                ).upper()
+
+        rows.sort(key=lambda r: str(r.get("created_at") or ""), reverse=True)
+        rows.sort(
+            key=lambda r: convert_to_reporting(
+                float(r.get("amount") or 0),
+                str(r.get("currency") or "USD"),
+                reporting_currency,
+            ),
+            reverse=True,
         )
-        for row in visible
-    ]
+        page = rows[offset : offset + limit]
+        has_more = len(rows) > offset + limit
+    else:
+        has_more = len(rows) > limit
+        page = rows[:limit]
+
+    donations = [_feed_item_from_row(row) for row in page]
     return DonationFeedResponse(donations=donations, has_more=has_more)
 
 
@@ -989,29 +1055,11 @@ def record_donation(payload: RecordDonationRequest) -> DonationFeedItem:
 
         send_donation_confirmation_for_row(saved)
         send_donation_alerts_for_row(saved)
-        return DonationFeedItem(
-            id=str(saved["id"]),
-            first_name=saved["first_name"],
-            last_name=saved["last_name"],
-            amount=float(saved["amount"]),
-            currency=str(saved["currency"]).upper(),
-            frequency=saved["frequency"] if saved["frequency"] in {"once", "monthly"} else "once",
-            honoree_name=saved.get("honoree_name"),
-            created_at=saved["created_at"],
-        )
+        return _feed_item_from_row(saved)
 
     existing = get_donation_by_payment_intent(payment_intent.id)
     if existing:
-        return DonationFeedItem(
-            id=str(existing["id"]),
-            first_name=existing["first_name"],
-            last_name=existing["last_name"],
-            amount=float(existing["amount"]),
-            currency=str(existing["currency"]).upper(),
-            frequency=existing["frequency"] if existing["frequency"] in {"once", "monthly"} else "once",
-            honoree_name=existing.get("honoree_name"),
-            created_at=existing["created_at"],
-        )
+        return _feed_item_from_row(existing)
 
     raise HTTPException(
         status_code=500,

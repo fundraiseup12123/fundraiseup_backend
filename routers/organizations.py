@@ -42,12 +42,20 @@ def _default_campaign_content(name: str) -> dict[str, Any]:
             "hero_height": root.get("hero_height") or 702,
             "hero_alt": root.get("hero_alt"),
             "favicon_url": root.get("favicon_url"),
+            "show_donor_country": bool(root.get("show_donor_country") or False),
+            "recent_donations_sort": (
+                root.get("recent_donations_sort")
+                if root.get("recent_donations_sort") in {"recent", "descending"}
+                else "recent"
+            ),
         }
     return {
         "title": name,
         "caption": "",
         "body_html": "<p>Campaign content goes here.</p>",
         "primary_color": "#3872DC",
+        "show_donor_country": False,
+        "recent_donations_sort": "recent",
     }
 
 
@@ -181,6 +189,8 @@ class CampaignContentPayload(BaseModel):
     hero_alt: str | None = None
     favicon_url: str | None = None
     popup_view_json: str | None = None
+    show_donor_country: bool = False
+    recent_donations_sort: str = Field(default="recent", pattern="^(recent|descending)$")
 
 
 class CreateCampaignRequest(BaseModel):
@@ -456,10 +466,31 @@ def update_campaign(
         if content_data.get("hero_url") and (content_data.get("hero_width") != 1248 or content_data.get("hero_height") != 702):
             raise HTTPException(status_code=400, detail="Hero image must be 1248×702 pixels")
         existing = rest_get_one("campaign_content", params={"campaign_id": f"eq.{campaign_id}", "select": "campaign_id"})
+        feed_keys = ("show_donor_country", "recent_donations_sort")
         if existing:
-            rest_patch("campaign_content", content_data, match={"campaign_id": campaign_id})
+            updated = rest_patch("campaign_content", content_data, match={"campaign_id": campaign_id})
+            if not updated and any(k in content_data for k in feed_keys):
+                fallback = {k: v for k, v in content_data.items() if k not in feed_keys}
+                updated = rest_patch("campaign_content", fallback, match={"campaign_id": campaign_id})
+                if updated:
+                    raise HTTPException(
+                        status_code=503,
+                        detail="Content saved but recent-donations options failed: run backend/sql/010_recent_donations_settings.sql on Supabase.",
+                    )
+            if not updated:
+                raise HTTPException(status_code=500, detail="Failed to update campaign content")
         else:
-            rest_insert("campaign_content", {"campaign_id": campaign_id, **content_data})
+            inserted = rest_insert("campaign_content", {"campaign_id": campaign_id, **content_data})
+            if not inserted and any(k in content_data for k in feed_keys):
+                fallback = {k: v for k, v in content_data.items() if k not in feed_keys}
+                inserted = rest_insert("campaign_content", {"campaign_id": campaign_id, **fallback})
+                if inserted:
+                    raise HTTPException(
+                        status_code=503,
+                        detail="Content saved but recent-donations options failed: run backend/sql/010_recent_donations_settings.sql on Supabase.",
+                    )
+            if not inserted:
+                raise HTTPException(status_code=500, detail="Failed to create campaign content")
 
     return get_campaign(org_id, campaign_id, user)
 

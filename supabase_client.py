@@ -115,7 +115,7 @@ def list_donations(*, limit: int, offset: int) -> list[dict[str, Any]]:
             f"{_supabase_url()}/rest/v1/donations",
             headers=_headers(),
             params={
-                "select": "id,first_name,last_name,amount,currency,frequency,honoree_name,created_at",
+                "select": "id,first_name,last_name,amount,currency,frequency,honoree_name,created_at,device",
                 "order": "created_at.desc",
                 "limit": str(limit),
                 "offset": str(offset),
