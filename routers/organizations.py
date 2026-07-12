@@ -208,6 +208,8 @@ class UpdateCampaignRequest(BaseModel):
     paypal_account_id: str | None = None
     # None omitted; explicit null clears the minimum (no limit).
     min_donation_amount: float | None = None
+    min_donation_amount_once: float | None = None
+    min_donation_amount_monthly: float | None = None
     content: CampaignContentPayload | None = None
 
 
@@ -454,12 +456,27 @@ def update_campaign(
         updates["stripe_account_id"] = payload.stripe_account_id or None
     if payload.paypal_account_id is not None:
         updates["paypal_account_id"] = payload.paypal_account_id or None
-    if "min_donation_amount" in payload.model_fields_set:
-        raw_min = payload.min_donation_amount
-        if raw_min is None or not isinstance(raw_min, (int, float)) or float(raw_min) <= 0:
-            updates["min_donation_amount"] = None
-        else:
-            updates["min_donation_amount"] = round(float(raw_min), 2)
+    def _normalize_min(raw: float | None) -> float | None:
+        if raw is None or not isinstance(raw, (int, float)) or float(raw) <= 0:
+            return None
+        return round(float(raw), 2)
+
+    once_set = "min_donation_amount_once" in payload.model_fields_set
+    monthly_set = "min_donation_amount_monthly" in payload.model_fields_set
+    legacy_set = "min_donation_amount" in payload.model_fields_set
+
+    if once_set or monthly_set:
+        if once_set:
+            updates["min_donation_amount_once"] = _normalize_min(payload.min_donation_amount_once)
+        if monthly_set:
+            updates["min_donation_amount_monthly"] = _normalize_min(payload.min_donation_amount_monthly)
+        # Clear legacy single minimum when frequency-specific values are saved.
+        updates["min_donation_amount"] = None
+    elif legacy_set:
+        legacy = _normalize_min(payload.min_donation_amount)
+        updates["min_donation_amount"] = legacy
+        updates["min_donation_amount_once"] = legacy
+        updates["min_donation_amount_monthly"] = legacy
 
     if updates:
         rest_patch("campaigns", updates, match={"id": campaign_id})

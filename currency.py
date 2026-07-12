@@ -205,6 +205,25 @@ def convert_min_donation(min_amount: float, from_currency: str, to_currency: str
     return math.ceil(raw * 100) / 100
 
 
+def resolve_min_donation_for_frequency(
+    campaign: dict,
+    frequency: str,
+) -> float | None:
+    """Pick once/monthly minimum; fall back to legacy min_donation_amount."""
+    freq = (frequency or "once").lower()
+    key = "min_donation_amount_monthly" if freq == "monthly" else "min_donation_amount_once"
+    raw = campaign.get(key)
+    if raw is None:
+        raw = campaign.get("min_donation_amount")
+    if raw is None:
+        return None
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return val if val > 0 else None
+
+
 def assert_meets_min_donation(
     amount: float,
     currency: str,
@@ -229,7 +248,7 @@ def assert_meets_min_donation(
     if amount + 1e-9 < required:
         raise HTTPException(
             status_code=400,
-            detail=f"Minimum donation is {format_display_amount(required, donor)}",
+            detail=f"Minimum {format_display_amount(required, donor)}",
         )
 
 

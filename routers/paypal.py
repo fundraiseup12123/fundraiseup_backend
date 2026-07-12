@@ -268,7 +268,7 @@ def paypal_checkout_config(
 
 @router.post("/prepare-redirect")
 def paypal_prepare_redirect(payload: PreparePayPalRedirectRequest) -> dict[str, str]:
-    from currency import assert_meets_min_donation
+    from currency import assert_meets_min_donation, resolve_min_donation_for_frequency
     from db import rest_get_one
     from routers.paypal_connect import resolve_paypal_payee_email_for_checkout
 
@@ -280,14 +280,14 @@ def paypal_prepare_redirect(payload: PreparePayPalRedirectRequest) -> dict[str, 
             "campaigns",
             params={
                 "id": f"eq.{payload.campaign_id}",
-                "select": "min_donation_amount,default_currency,status",
+                "select": "min_donation_amount,min_donation_amount_once,min_donation_amount_monthly,default_currency,status",
             },
         )
         if campaign and campaign.get("status") == "live":
             assert_meets_min_donation(
                 payload.amount,
                 payload.currency,
-                min_donation_amount=campaign.get("min_donation_amount"),
+                min_donation_amount=resolve_min_donation_for_frequency(campaign, "once"),
                 default_currency=campaign.get("default_currency"),
             )
 
