@@ -463,6 +463,9 @@ def update_campaign(
 
     if payload.content:
         content_data = payload.content.model_dump()
+        # Omit unset pop-up branding so homepage-only saves do not wipe it.
+        if content_data.get("popup_view_json") is None:
+            content_data.pop("popup_view_json", None)
         if content_data.get("hero_url") and (content_data.get("hero_width") != 1248 or content_data.get("hero_height") != 702):
             raise HTTPException(status_code=400, detail="Hero image must be 1248×702 pixels")
         existing = rest_get_one("campaign_content", params={"campaign_id": f"eq.{campaign_id}", "select": "campaign_id"})
@@ -477,6 +480,14 @@ def update_campaign(
                         status_code=503,
                         detail="Content saved but recent-donations options failed: run backend/sql/010_recent_donations_settings.sql on Supabase.",
                     )
+            if not updated and "popup_view_json" in content_data:
+                fallback = {k: v for k, v in content_data.items() if k != "popup_view_json"}
+                updated = rest_patch("campaign_content", fallback, match={"campaign_id": campaign_id})
+                if updated:
+                    raise HTTPException(
+                        status_code=503,
+                        detail="Content saved but pop-up view failed: run backend/sql/005_popup_view_json.sql on Supabase.",
+                    )
             if not updated:
                 raise HTTPException(status_code=500, detail="Failed to update campaign content")
         else:
@@ -488,6 +499,14 @@ def update_campaign(
                     raise HTTPException(
                         status_code=503,
                         detail="Content saved but recent-donations options failed: run backend/sql/010_recent_donations_settings.sql on Supabase.",
+                    )
+            if not inserted and "popup_view_json" in content_data:
+                fallback = {k: v for k, v in content_data.items() if k != "popup_view_json"}
+                inserted = rest_insert("campaign_content", {"campaign_id": campaign_id, **fallback})
+                if inserted:
+                    raise HTTPException(
+                        status_code=503,
+                        detail="Content saved but pop-up view failed: run backend/sql/005_popup_view_json.sql on Supabase.",
                     )
             if not inserted:
                 raise HTTPException(status_code=500, detail="Failed to create campaign content")
