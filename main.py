@@ -977,20 +977,28 @@ def get_donations(
     select_cols = (
         "id,first_name,last_name,amount,currency,frequency,honoree_name,created_at,device"
     )
+    select_cols_no_device = (
+        "id,first_name,last_name,amount,currency,frequency,honoree_name,created_at"
+    )
     amount_sort = sort == "descending"
     fetch_limit = 200 if amount_sort else limit + 1
 
-    if campaign_id and _is_uuid(campaign_id) and supabase_enabled():
-        params = {
-            "campaign_id": f"eq.{campaign_id}",
-            "select": select_cols,
-            "order": "created_at.desc",
-            "limit": str(fetch_limit),
-            "offset": str(0 if amount_sort else offset),
-        }
-        rows = db_rest_get("donations", params=params)
-    else:
-        rows = list_donations(limit=fetch_limit, offset=0 if amount_sort else offset)
+    def _fetch(select: str) -> list:
+        if campaign_id and _is_uuid(campaign_id) and supabase_enabled():
+            params = {
+                "campaign_id": f"eq.{campaign_id}",
+                "select": select,
+                "order": "created_at.desc",
+                "limit": str(fetch_limit),
+                "offset": str(0 if amount_sort else offset),
+            }
+            return db_rest_get("donations", params=params)
+        return list_donations(limit=fetch_limit, offset=0 if amount_sort else offset)
+
+    rows = _fetch(select_cols)
+    if not rows and select_cols != select_cols_no_device:
+        # Older schemas / select errors return [] — retry without device.
+        rows = _fetch(select_cols_no_device)
 
     if amount_sort:
         reporting_currency = "USD"

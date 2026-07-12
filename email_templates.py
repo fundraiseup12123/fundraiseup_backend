@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from html import escape
+from typing import Any
 
 from email_branding import DEFAULT_EMAIL_BANNER_URL
 
@@ -493,6 +494,175 @@ def weekly_digest_email(
         primary_color=primary_color,
         banner_url=banner_url,
         contact_email=contact_email,
+        campaigns=None,
+    )
+    return subject, html
+
+
+# --- Editable org overrides (admin Templates UI) ---------------------------------
+
+EDITABLE_TEMPLATE_KEYS: tuple[str, ...] = (
+    "donation_confirmation",
+    "donation_alert",
+    "reminder_subscribed",
+    "weekly_reminder",
+    "weekly_donor_reminder",
+    "org_weekly_digest",
+)
+
+TEMPLATE_LABELS: dict[str, str] = {
+    "donation_confirmation": "Donation confirmation",
+    "donation_alert": "Donation alert",
+    "reminder_subscribed": "Reminder signup",
+    "weekly_reminder": "Weekly reminder",
+    "weekly_donor_reminder": "Weekly donor reminder",
+    "org_weekly_digest": "Weekly digest",
+}
+
+TEMPLATE_TOKENS_HELP = (
+    "{{donor_name}}, {{amount}}, {{campaign_title}}, {{org_name}}, "
+    "{{admin_name}}, {{donation_count}}, {{total_raised}}"
+)
+
+
+def default_editable_template(template_key: str) -> dict[str, str | None]:
+    """Default subject/headline/body (with tokens) for the Templates editor."""
+    key = template_key.strip()
+    if key == "donation_confirmation":
+        return {
+            "template_key": key,
+            "label": TEMPLATE_LABELS[key],
+            "subject": "Donation confirmed — {{amount}}",
+            "headline": "Thank you for supporting {{campaign_title}}",
+            "body_html": (
+                "<p>Greetings,</p>"
+                "<p>Thank you for your generous donation of <strong>{{amount}}</strong> "
+                "to <strong>{{campaign_title}}</strong>.</p>"
+                "<p>This email confirms your donation was processed successfully.</p>"
+                "<p>— Your friends at {{campaign_title}}</p>"
+            ),
+            "banner_url": DEFAULT_EMAIL_BANNER_URL,
+            "logo_url": None,
+            "cta_label": "View campaign",
+            "is_custom": False,
+        }
+    if key == "donation_alert":
+        return {
+            "template_key": key,
+            "label": TEMPLATE_LABELS[key],
+            "subject": "New donation — {{amount}}",
+            "headline": "New donation received",
+            "body_html": (
+                "<p>Greetings{{admin_name}}.</p>"
+                "<p><strong>{{donor_name}}</strong> just donated "
+                "<strong>{{amount}}</strong> to <strong>{{campaign_title}}</strong> "
+                "({{org_name}}).</p>"
+                "<p>Open your organization console to view the full donation record.</p>"
+            ),
+            "banner_url": DEFAULT_EMAIL_BANNER_URL,
+            "logo_url": None,
+            "cta_label": "View in admin",
+            "is_custom": False,
+        }
+    if key == "reminder_subscribed":
+        return {
+            "template_key": key,
+            "label": TEMPLATE_LABELS[key],
+            "subject": "We'll remind you about {{campaign_title}}",
+            "headline": "A friendly reminder to support {{campaign_title}}",
+            "body_html": (
+                "<p>Greetings,</p>"
+                "<p>Thanks for signing up. We will send you a friendly weekly reminder about "
+                "<strong>{{campaign_title}}</strong> until you donate or unsubscribe.</p>"
+                "<p>— Your friends at {{campaign_title}}</p>"
+            ),
+            "banner_url": DEFAULT_EMAIL_BANNER_URL,
+            "logo_url": None,
+            "cta_label": None,
+            "is_custom": False,
+        }
+    if key in {"weekly_reminder", "weekly_donor_reminder"}:
+        return {
+            "template_key": key,
+            "label": TEMPLATE_LABELS[key],
+            "subject": "A friendly reminder",
+            "headline": "A friendly reminder to support {{campaign_title}}",
+            "body_html": (
+                "<p>Greetings,</p>"
+                "<p>We are reaching out to remind you of your interest in donating to "
+                "<strong>{{campaign_title}}</strong>. Should you decide to proceed, your "
+                "contribution would be welcome. We value every donation that supports our cause.</p>"
+                "<p>— Your friends at {{campaign_title}}</p>"
+            ),
+            "banner_url": DEFAULT_EMAIL_BANNER_URL,
+            "logo_url": None,
+            "cta_label": None,
+            "is_custom": False,
+        }
+    if key == "org_weekly_digest":
+        return {
+            "template_key": key,
+            "label": TEMPLATE_LABELS[key],
+            "subject": "Weekly digest — {{org_name}}",
+            "headline": "Your weekly insights — {{org_name}}",
+            "body_html": (
+                "<p>Greetings{{admin_name}}.</p>"
+                "<p>Here is your weekly summary for <strong>{{org_name}}</strong>:</p>"
+                "<p>Donations: <strong>{{donation_count}}</strong><br/>"
+                "Total raised: <strong>{{total_raised}}</strong></p>"
+                "<p>Open insights for charts and breakdowns.</p>"
+            ),
+            "banner_url": DEFAULT_EMAIL_BANNER_URL,
+            "logo_url": None,
+            "cta_label": "Open insights",
+            "is_custom": False,
+        }
+    raise ValueError(f"Unknown editable template key: {template_key}")
+
+
+def apply_email_tokens(text: str, tokens: dict[str, str], *, escape_html: bool = False) -> str:
+    result = text or ""
+    for key, value in tokens.items():
+        needle = "{{" + key + "}}"
+        replacement = escape(value) if escape_html else value
+        result = result.replace(needle, replacement)
+    return result
+
+
+def render_editable_email(
+    *,
+    template: dict[str, Any],
+    tokens: dict[str, str],
+    logo_url: str,
+    primary_color: str = "#3872DC",
+    organization_name: str | None = None,
+    banner_url: str | None = None,
+    cta_url: str | None = None,
+    contact_email: str | None = None,
+    unsubscribe_url: str | None = None,
+) -> tuple[str, str]:
+    """Build subject + HTML from an editable template row (or defaults)."""
+    subject = apply_email_tokens(str(template.get("subject") or ""), tokens, escape_html=False)
+    headline = apply_email_tokens(str(template.get("headline") or ""), tokens, escape_html=False)
+    # Body is HTML from the editor; escape token values only.
+    body = apply_email_tokens(str(template.get("body_html") or ""), tokens, escape_html=True)
+    resolved_banner = (template.get("banner_url") or banner_url or DEFAULT_EMAIL_BANNER_URL or None)
+    resolved_logo = (template.get("logo_url") or logo_url or "").strip() or logo_url
+    cta_label = template.get("cta_label")
+    cta = str(cta_label).strip() if cta_label else None
+
+    html = branded_email_html(
+        preheader=subject,
+        headline=headline,
+        body_html=body,
+        cta_label=cta if cta_url else None,
+        cta_url=cta_url if cta else None,
+        logo_url=resolved_logo,
+        organization_name=organization_name or tokens.get("org_name") or tokens.get("campaign_title"),
+        primary_color=primary_color,
+        banner_url=str(resolved_banner) if resolved_banner else None,
+        contact_email=contact_email,
+        unsubscribe_url=unsubscribe_url,
         campaigns=None,
     )
     return subject, html

@@ -9,7 +9,13 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from auth import AuthUser, require_auth, require_org_access
 from currency import convert_to_reporting, estimate_processing_fee
-from db import rest_get, rest_get_one
+from db import rest_get, rest_get_one, rest_insert, rest_patch
+from email_templates import (
+    EDITABLE_TEMPLATE_KEYS,
+    TEMPLATE_TOKENS_HELP,
+    default_editable_template,
+)
+from pydantic import BaseModel, Field
 
 router = APIRouter(prefix="/admin", tags=["admin-data"])
 
@@ -119,11 +125,161 @@ def admin_list_donations(
         row["original_currency"] = original_currency
         row["reporting_amount"] = _row_amount(row, reporting_currency)
         row["reporting_currency"] = reporting_currency
+
+    _attach_last_emails(page)
+
     return {
         "donations": page,
         "has_more": has_more,
         "total_amount": total_amount,
         "reporting_currency": reporting_currency,
+    }
+
+
+def _attach_last_emails(rows: list[dict[str, Any]]) -> None:
+    ids = [str(r.get("id")) for r in rows if r.get("id")]
+    if not ids:
+        return
+    logs = rest_get(
+        "email_logs",
+        params={
+            "donation_id": f"in.({','.join(ids)})",
+            "select": "donation_id,template_key,sent_at",
+            "order": "sent_at.desc",
+            "limit": str(max(50, len(ids) * 8)),
+        },
+    )
+    latest: dict[str, dict[str, Any]] = {}
+    for log in logs:
+        donation_id = str(log.get("donation_id") or "")
+        if donation_id and donation_id not in latest:
+            latest[donation_id] = log
+    for row in rows:
+        info = latest.get(str(row.get("id") or ""))
+        row["last_email_template_key"] = (info or {}).get("template_key")
+        row["last_email_sent_at"] = (info or {}).get("sent_at")
+
+
+class EmailTemplateUpdate(BaseModel):
+    subject: str = Field(min_length=1, max_length=500)
+    headline: str = Field(min_length=1, max_length=500)
+    body_html: str = ""
+    banner_url: str | None = None
+    logo_url: str | None = None
+    cta_label: str | None = None
+
+
+@router.get("/orgs/{org_id}/email-templates")
+def list_email_templates(
+    org_id: str,
+    user: Annotated[AuthUser, Depends(require_auth)],
+) -> dict[str, Any]:
+    require_org_access(org_id, user, min_role="admin")
+    saved = rest_get(
+        "email_templates",
+        params={
+            "organization_id": f"eq.{org_id}",
+            "select": "template_key,subject,headline,body_html,banner_url,logo_url,cta_label,updated_at",
+        },
+    )
+    by_key = {str(row.get("template_key")): row for row in saved if row.get("template_key")}
+    templates: list[dict[str, Any]] = []
+    for key in EDITABLE_TEMPLATE_KEYS:
+        defaults = default_editable_template(key)
+        row = by_key.get(key)
+        if row:
+            templates.append(
+                {
+                    **defaults,
+                    **{k: row.get(k) for k in ("subject", "headline", "body_html", "banner_url", "logo_url", "cta_label")},
+                    "template_key": key,
+                    "updated_at": row.get("updated_at"),
+                    "is_custom": True,
+                }
+            )
+        else:
+            templates.append(defaults)
+    return {"templates": templates, "tokens_help": TEMPLATE_TOKENS_HELP}
+
+
+@router.get("/orgs/{org_id}/email-templates/{template_key}")
+def get_email_template(
+    org_id: str,
+    template_key: str,
+    user: Annotated[AuthUser, Depends(require_auth)],
+) -> dict[str, Any]:
+    require_org_access(org_id, user, min_role="admin")
+    if template_key not in EDITABLE_TEMPLATE_KEYS:
+        raise HTTPException(status_code=404, detail="Unknown template")
+    defaults = default_editable_template(template_key)
+    row = rest_get_one(
+        "email_templates",
+        params={
+            "organization_id": f"eq.{org_id}",
+            "template_key": f"eq.{template_key}",
+            "select": "template_key,subject,headline,body_html,banner_url,logo_url,cta_label,updated_at",
+        },
+    )
+    if not row:
+        return defaults
+    return {
+        **defaults,
+        **{k: row.get(k) for k in ("subject", "headline", "body_html", "banner_url", "logo_url", "cta_label")},
+        "template_key": template_key,
+        "updated_at": row.get("updated_at"),
+        "is_custom": True,
+    }
+
+
+@router.patch("/orgs/{org_id}/email-templates/{template_key}")
+def update_email_template(
+    org_id: str,
+    template_key: str,
+    payload: EmailTemplateUpdate,
+    user: Annotated[AuthUser, Depends(require_auth)],
+) -> dict[str, Any]:
+    require_org_access(org_id, user, min_role="admin")
+    if template_key not in EDITABLE_TEMPLATE_KEYS:
+        raise HTTPException(status_code=404, detail="Unknown template")
+
+    now = datetime.now(timezone.utc).isoformat()
+    row = {
+        "organization_id": org_id,
+        "template_key": template_key,
+        "subject": payload.subject.strip(),
+        "headline": payload.headline.strip(),
+        "body_html": payload.body_html or "",
+        "banner_url": (payload.banner_url or "").strip() or None,
+        "logo_url": (payload.logo_url or "").strip() or None,
+        "cta_label": (payload.cta_label or "").strip() or None,
+        "updated_at": now,
+    }
+    existing = rest_get_one(
+        "email_templates",
+        params={
+            "organization_id": f"eq.{org_id}",
+            "template_key": f"eq.{template_key}",
+            "select": "id",
+        },
+    )
+    if existing and existing.get("id"):
+        saved = rest_patch("email_templates", row, match={"id": str(existing["id"])})
+    else:
+        saved = rest_insert("email_templates", row)
+
+    if not saved:
+        raise HTTPException(
+            status_code=503,
+            detail="Could not save template. Run backend/sql/011_email_templates.sql on Supabase.",
+        )
+
+    defaults = default_editable_template(template_key)
+    return {
+        **defaults,
+        **{k: row.get(k) for k in ("subject", "headline", "body_html", "banner_url", "logo_url", "cta_label")},
+        "template_key": template_key,
+        "updated_at": now,
+        "is_custom": True,
     }
 
 

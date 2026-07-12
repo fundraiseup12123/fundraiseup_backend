@@ -11,7 +11,9 @@ from db import rest_get, rest_get_one, rest_insert, rest_patch
 from email_templates import (
     donation_alert_email,
     donation_confirmation_email,
+    default_editable_template,
     popup_reminder_subscribed_email,
+    render_editable_email,
     weekly_digest_email,
     weekly_reminder_email,
 )
@@ -214,6 +216,74 @@ def log_email(
     )
 
 
+def get_org_email_template(organization_id: str | None, template_key: str) -> dict[str, Any] | None:
+    if not organization_id:
+        return None
+    try:
+        return rest_get_one(
+            "email_templates",
+            params={
+                "organization_id": f"eq.{organization_id}",
+                "template_key": f"eq.{template_key}",
+                "select": "template_key,subject,headline,body_html,banner_url,logo_url,cta_label",
+            },
+        )
+    except Exception:
+        return None
+
+
+def _fmt_amount_token(amount: float | str, currency: str) -> str:
+    try:
+        value = float(amount)
+        return f"{value:,.2f} {str(currency).upper()}"
+    except (TypeError, ValueError):
+        return f"{amount} {currency}".strip()
+
+
+def compose_templated_email(
+    *,
+    template_key: str,
+    organization_id: str | None,
+    tokens: dict[str, str],
+    logo_url: str,
+    primary_color: str,
+    organization_name: str | None,
+    banner_url: str | None,
+    cta_url: str | None,
+    contact_email: str | None,
+    unsubscribe_url: str | None = None,
+    fallback: tuple[str, str] | None = None,
+) -> tuple[str, str]:
+    """Use org override when present; otherwise return provided fallback builders."""
+    override = get_org_email_template(organization_id, template_key)
+    if override:
+        return render_editable_email(
+            template=override,
+            tokens=tokens,
+            logo_url=logo_url,
+            primary_color=primary_color,
+            organization_name=organization_name,
+            banner_url=banner_url,
+            cta_url=cta_url,
+            contact_email=contact_email,
+            unsubscribe_url=unsubscribe_url,
+        )
+    if fallback:
+        return fallback
+    defaults = default_editable_template(template_key)
+    return render_editable_email(
+        template=defaults,
+        tokens=tokens,
+        logo_url=logo_url,
+        primary_color=primary_color,
+        organization_name=organization_name,
+        banner_url=banner_url,
+        cta_url=cta_url,
+        contact_email=contact_email,
+        unsubscribe_url=unsubscribe_url,
+    )
+
+
 def _parse_retry_after(response: httpx.Response) -> float:
     raw = response.headers.get("retry-after") or response.headers.get("ratelimit-reset") or "1"
     try:
@@ -359,18 +429,37 @@ def send_donation_confirmation_for_row(row: dict[str, Any]) -> bool:
         campaign_id=str(campaign_id) if campaign_id else None,
     )
 
-    subject, html = donation_confirmation_email(
-        donor_name=donor_name,
-        amount=row.get("amount", 0),
-        currency=str(row.get("currency", "USD")),
-        frequency=str(row.get("frequency", "once")),
-        campaign_title=str(branding.get("title", "our campaign")),
+    subject, html = compose_templated_email(
+        template_key="donation_confirmation",
+        organization_id=branding.get("organization_id") or row.get("organization_id"),
+        tokens={
+            "donor_name": donor_name,
+            "amount": _fmt_amount_token(row.get("amount", 0), str(row.get("currency", "USD"))),
+            "campaign_title": str(branding.get("title", "our campaign")),
+            "org_name": str(extras["organization_name"]),
+            "admin_name": "",
+            "donation_count": "",
+            "total_raised": "",
+        },
         logo_url=extras["logo_url"],
-        donate_url=str(branding.get("donate_url", resolve_frontend_url())),
         primary_color=str(branding.get("primary_color", DEFAULT_PRIMARY_COLOR)),
         organization_name=str(branding.get("title") or extras["organization_name"]),
         banner_url=extras["banner_url"],
+        cta_url=str(branding.get("donate_url", resolve_frontend_url())),
         contact_email=extras["contact_email"],
+        fallback=donation_confirmation_email(
+            donor_name=donor_name,
+            amount=row.get("amount", 0),
+            currency=str(row.get("currency", "USD")),
+            frequency=str(row.get("frequency", "once")),
+            campaign_title=str(branding.get("title", "our campaign")),
+            logo_url=extras["logo_url"],
+            donate_url=str(branding.get("donate_url", resolve_frontend_url())),
+            primary_color=str(branding.get("primary_color", DEFAULT_PRIMARY_COLOR)),
+            organization_name=str(branding.get("title") or extras["organization_name"]),
+            banner_url=extras["banner_url"],
+            contact_email=extras["contact_email"],
+        ),
     )
 
     try:
@@ -427,15 +516,35 @@ def subscribe_weekly_reminder(
     elif existing.get("active") is False:
         rest_patch("email_reminders", {"active": True}, match={"id": existing["id"]})
 
-    subject, html = popup_reminder_subscribed_email(
-        campaign_title=str(branding.get("title", "our campaign")),
+    subject, html = compose_templated_email(
+        template_key="reminder_subscribed",
+        organization_id=branding.get("organization_id"),
+        tokens={
+            "donor_name": donor_name or "",
+            "amount": "",
+            "campaign_title": str(branding.get("title", "our campaign")),
+            "org_name": extras["organization_name"],
+            "admin_name": "",
+            "donation_count": "",
+            "total_raised": "",
+        },
         logo_url=extras["logo_url"],
-        donate_url=str(branding.get("donate_url", resolve_frontend_url())),
         primary_color=str(branding.get("primary_color", DEFAULT_PRIMARY_COLOR)),
         organization_name=extras["organization_name"],
         banner_url=extras["banner_url"],
+        cta_url=str(branding.get("donate_url", resolve_frontend_url())),
         contact_email=extras["contact_email"],
         unsubscribe_url=extras["unsubscribe_url"],
+        fallback=popup_reminder_subscribed_email(
+            campaign_title=str(branding.get("title", "our campaign")),
+            logo_url=extras["logo_url"],
+            donate_url=str(branding.get("donate_url", resolve_frontend_url())),
+            primary_color=str(branding.get("primary_color", DEFAULT_PRIMARY_COLOR)),
+            organization_name=extras["organization_name"],
+            banner_url=extras["banner_url"],
+            contact_email=extras["contact_email"],
+            unsubscribe_url=extras["unsubscribe_url"],
+        ),
     )
     try:
         send_resend_email(to=normalized, subject=subject, html=html)
@@ -514,16 +623,36 @@ def send_weekly_reminders() -> dict[str, int | str]:
             campaign_id=str(campaign_id),
         )
 
-        subject, html = weekly_reminder_email(
-            donor_name=reminder.get("donor_name"),
-            campaign_title=str(branding.get("title", "our campaign")),
+        subject, html = compose_templated_email(
+            template_key="weekly_reminder",
+            organization_id=branding.get("organization_id"),
+            tokens={
+                "donor_name": str(reminder.get("donor_name") or ""),
+                "amount": "",
+                "campaign_title": str(branding.get("title", "our campaign")),
+                "org_name": extras["organization_name"],
+                "admin_name": "",
+                "donation_count": "",
+                "total_raised": "",
+            },
             logo_url=extras["logo_url"],
-            donate_url=str(branding.get("donate_url", resolve_frontend_url())),
             primary_color=str(branding.get("primary_color", DEFAULT_PRIMARY_COLOR)),
             organization_name=extras["organization_name"],
             banner_url=extras["banner_url"],
+            cta_url=str(branding.get("donate_url", resolve_frontend_url())),
             contact_email=extras["contact_email"],
             unsubscribe_url=extras["unsubscribe_url"],
+            fallback=weekly_reminder_email(
+                donor_name=reminder.get("donor_name"),
+                campaign_title=str(branding.get("title", "our campaign")),
+                logo_url=extras["logo_url"],
+                donate_url=str(branding.get("donate_url", resolve_frontend_url())),
+                primary_color=str(branding.get("primary_color", DEFAULT_PRIMARY_COLOR)),
+                organization_name=extras["organization_name"],
+                banner_url=extras["banner_url"],
+                contact_email=extras["contact_email"],
+                unsubscribe_url=extras["unsubscribe_url"],
+            ),
         )
 
         try:
@@ -584,16 +713,36 @@ def send_weekly_reminders() -> dict[str, int | str]:
         )
         donor_name = f"{row.get('first_name', '')} {row.get('last_name', '')}".strip() or None
 
-        subject, html = weekly_reminder_email(
-            donor_name=donor_name,
-            campaign_title=str(branding.get("title", "our campaign")),
+        subject, html = compose_templated_email(
+            template_key="weekly_donor_reminder",
+            organization_id=row.get("organization_id") or branding.get("organization_id"),
+            tokens={
+                "donor_name": donor_name or "",
+                "amount": "",
+                "campaign_title": str(branding.get("title", "our campaign")),
+                "org_name": extras["organization_name"],
+                "admin_name": "",
+                "donation_count": "",
+                "total_raised": "",
+            },
             logo_url=extras["logo_url"],
-            donate_url=str(branding.get("donate_url", resolve_frontend_url())),
             primary_color=str(branding.get("primary_color", DEFAULT_PRIMARY_COLOR)),
             organization_name=extras["organization_name"],
             banner_url=extras["banner_url"],
+            cta_url=str(branding.get("donate_url", resolve_frontend_url())),
             contact_email=extras["contact_email"],
             unsubscribe_url=extras["unsubscribe_url"],
+            fallback=weekly_reminder_email(
+                donor_name=donor_name,
+                campaign_title=str(branding.get("title", "our campaign")),
+                logo_url=extras["logo_url"],
+                donate_url=str(branding.get("donate_url", resolve_frontend_url())),
+                primary_color=str(branding.get("primary_color", DEFAULT_PRIMARY_COLOR)),
+                organization_name=extras["organization_name"],
+                banner_url=extras["banner_url"],
+                contact_email=extras["contact_email"],
+                unsubscribe_url=extras["unsubscribe_url"],
+            ),
         )
 
         try:
@@ -705,18 +854,38 @@ def send_donation_alerts_for_row(row: dict[str, Any]) -> int:
     sent = 0
 
     for recipient in _org_notification_recipients(str(org_id)):
-        subject, html = donation_alert_email(
-            admin_name=recipient["name"],
-            donor_name=donor_name,
-            amount=row.get("amount", 0),
-            currency=str(row.get("currency", "USD")),
-            campaign_title=campaign_title,
-            organization_name=organization_name,
-            admin_url=admin_url,
+        admin_greeting = f", {recipient['name']}" if recipient.get("name") else ""
+        subject, html = compose_templated_email(
+            template_key="donation_alert",
+            organization_id=str(org_id),
+            tokens={
+                "donor_name": donor_name,
+                "amount": _fmt_amount_token(row.get("amount", 0), str(row.get("currency", "USD"))),
+                "campaign_title": campaign_title,
+                "org_name": organization_name,
+                "admin_name": admin_greeting,
+                "donation_count": "",
+                "total_raised": "",
+            },
             logo_url=logo_url,
             primary_color=DEFAULT_PRIMARY_COLOR,
+            organization_name=organization_name,
             banner_url=banner_url,
+            cta_url=admin_url,
             contact_email=contact,
+            fallback=donation_alert_email(
+                admin_name=recipient["name"],
+                donor_name=donor_name,
+                amount=row.get("amount", 0),
+                currency=str(row.get("currency", "USD")),
+                campaign_title=campaign_title,
+                organization_name=organization_name,
+                admin_url=admin_url,
+                logo_url=logo_url,
+                primary_color=DEFAULT_PRIMARY_COLOR,
+                banner_url=banner_url,
+                contact_email=contact,
+            ),
         )
         try:
             send_resend_email(to=recipient["email"], subject=subject, html=html)
@@ -789,17 +958,38 @@ def send_org_weekly_digests() -> dict[str, int]:
         organization_name = str(org.get("name") or "your organization")
 
         for recipient in _org_notification_recipients(org_id):
-            subject, html = weekly_digest_email(
-                admin_name=recipient["name"],
-                organization_name=organization_name,
-                donation_count=len(donations),
-                total_raised=round(total_raised, 2),
-                reporting_currency=reporting_currency,
-                admin_url=admin_url,
+            admin_greeting = f", {recipient['name']}" if recipient.get("name") else ""
+            amount_label = _fmt_amount_token(round(total_raised, 2), reporting_currency)
+            subject, html = compose_templated_email(
+                template_key="org_weekly_digest",
+                organization_id=org_id,
+                tokens={
+                    "donor_name": "",
+                    "amount": amount_label,
+                    "campaign_title": organization_name,
+                    "org_name": organization_name,
+                    "admin_name": admin_greeting,
+                    "donation_count": str(len(donations)),
+                    "total_raised": amount_label,
+                },
                 logo_url=logo_url,
                 primary_color=DEFAULT_PRIMARY_COLOR,
+                organization_name=organization_name,
                 banner_url=banner_url,
+                cta_url=admin_url,
                 contact_email=contact,
+                fallback=weekly_digest_email(
+                    admin_name=recipient["name"],
+                    organization_name=organization_name,
+                    donation_count=len(donations),
+                    total_raised=round(total_raised, 2),
+                    reporting_currency=reporting_currency,
+                    admin_url=admin_url,
+                    logo_url=logo_url,
+                    primary_color=DEFAULT_PRIMARY_COLOR,
+                    banner_url=banner_url,
+                    contact_email=contact,
+                ),
             )
             try:
                 send_resend_email(to=recipient["email"], subject=subject, html=html)
