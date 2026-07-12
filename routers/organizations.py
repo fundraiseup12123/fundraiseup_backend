@@ -495,6 +495,38 @@ def update_campaign(
     return get_campaign(org_id, campaign_id, user)
 
 
+@router.delete("/{org_id}/campaigns/{campaign_id}")
+def delete_campaign(
+    org_id: str,
+    campaign_id: str,
+    user: Annotated[AuthUser, Depends(require_auth)],
+) -> dict[str, Any]:
+    require_org_access(org_id, user, min_role="admin")
+    if campaign_id == ROOT_CAMPAIGN_ID:
+        raise HTTPException(status_code=400, detail="The platform root campaign cannot be deleted")
+
+    campaign = rest_get_one(
+        "campaigns",
+        params={
+            "id": f"eq.{campaign_id}",
+            "organization_id": f"eq.{org_id}",
+            "select": "id,name",
+        },
+    )
+    if not campaign:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+
+    # Donations reference campaigns without ON DELETE CASCADE — keep gift history.
+    rest_patch("donations", {"campaign_id": None}, match={"campaign_id": campaign_id})
+
+    if not rest_delete("campaigns", match={"id": campaign_id, "organization_id": org_id}):
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to delete campaign. It may still be linked to other records.",
+        )
+    return {"deleted": True, "id": campaign_id, "name": campaign.get("name")}
+
+
 @router.put("/{org_id}/campaigns/{campaign_id}/currencies")
 def update_currencies(
     org_id: str,
