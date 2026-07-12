@@ -524,11 +524,22 @@ def create_checkout(payload: CreateCheckoutRequest) -> CheckoutResponse:
     if payload.campaign_id and _is_uuid(payload.campaign_id):
         campaign = rest_get_one(
             "campaigns",
-            params={"id": f"eq.{payload.campaign_id}", "select": "id,organization_id,slug,status"},
+            params={
+                "id": f"eq.{payload.campaign_id}",
+                "select": "id,organization_id,slug,status,min_donation_amount,default_currency",
+            },
         )
         if campaign:
             if campaign.get("status") != "live":
                 raise HTTPException(status_code=400, detail="Campaign is not available for checkout")
+            from currency import assert_meets_min_donation
+
+            assert_meets_min_donation(
+                payload.amount,
+                payload.currency,
+                min_donation_amount=campaign.get("min_donation_amount"),
+                default_currency=campaign.get("default_currency"),
+            )
             organization_id = campaign["organization_id"]
             campaign_slug = campaign["slug"]
             if not is_root_checkout:

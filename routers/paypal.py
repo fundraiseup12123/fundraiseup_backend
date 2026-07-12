@@ -268,10 +268,28 @@ def paypal_checkout_config(
 
 @router.post("/prepare-redirect")
 def paypal_prepare_redirect(payload: PreparePayPalRedirectRequest) -> dict[str, str]:
+    from currency import assert_meets_min_donation
+    from db import rest_get_one
     from routers.paypal_connect import resolve_paypal_payee_email_for_checkout
 
     if payload.frequency != "once":
         raise HTTPException(status_code=400, detail="PayPal is only available for one-time donations")
+
+    if payload.campaign_id:
+        campaign = rest_get_one(
+            "campaigns",
+            params={
+                "id": f"eq.{payload.campaign_id}",
+                "select": "min_donation_amount,default_currency,status",
+            },
+        )
+        if campaign and campaign.get("status") == "live":
+            assert_meets_min_donation(
+                payload.amount,
+                payload.currency,
+                min_donation_amount=campaign.get("min_donation_amount"),
+                default_currency=campaign.get("default_currency"),
+            )
 
     payee = resolve_paypal_payee_email_for_checkout(payload.campaign_id, payload.checkout_view)
     if not payee:

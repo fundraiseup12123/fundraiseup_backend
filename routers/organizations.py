@@ -206,6 +206,8 @@ class UpdateCampaignRequest(BaseModel):
     default_currency: str | None = None
     stripe_account_id: str | None = None
     paypal_account_id: str | None = None
+    # None omitted; explicit null clears the minimum (no limit).
+    min_donation_amount: float | None = None
     content: CampaignContentPayload | None = None
 
 
@@ -452,6 +454,12 @@ def update_campaign(
         updates["stripe_account_id"] = payload.stripe_account_id or None
     if payload.paypal_account_id is not None:
         updates["paypal_account_id"] = payload.paypal_account_id or None
+    if "min_donation_amount" in payload.model_fields_set:
+        raw_min = payload.min_donation_amount
+        if raw_min is None or not isinstance(raw_min, (int, float)) or float(raw_min) <= 0:
+            updates["min_donation_amount"] = None
+        else:
+            updates["min_donation_amount"] = round(float(raw_min), 2)
 
     if updates:
         rest_patch("campaigns", updates, match={"id": campaign_id})

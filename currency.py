@@ -190,6 +190,49 @@ def convert_to_reporting(amount: float, from_currency: str, reporting_currency: 
     return round(converted, 2)
 
 
+def convert_min_donation(min_amount: float, from_currency: str, to_currency: str) -> float:
+    """Convert a campaign minimum into the donor currency (ceil so never under)."""
+    from_code = from_currency.upper()
+    to_code = to_currency.upper()
+    if min_amount <= 0:
+        return 0.0
+    if from_code == to_code:
+        return float(min_amount)
+    usd_equivalent = float(min_amount) / usd_rate(from_code)
+    raw = usd_equivalent * usd_rate(to_code)
+    if to_code in {c.upper() for c in ZERO_DECIMAL}:
+        return float(math.ceil(raw))
+    return math.ceil(raw * 100) / 100
+
+
+def assert_meets_min_donation(
+    amount: float,
+    currency: str,
+    *,
+    min_donation_amount: float | None,
+    default_currency: str | None,
+) -> None:
+    """Raise HTTPException if amount is below the campaign minimum."""
+    from fastapi import HTTPException
+
+    if min_donation_amount is None:
+        return
+    try:
+        min_val = float(min_donation_amount)
+    except (TypeError, ValueError):
+        return
+    if min_val <= 0:
+        return
+    base = (default_currency or "USD").upper()
+    donor = (currency or "USD").upper()
+    required = convert_min_donation(min_val, base, donor)
+    if amount + 1e-9 < required:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Minimum donation is {format_display_amount(required, donor)}",
+        )
+
+
 def convert_for_paypal(total_amount: float, display_currency: str) -> tuple[str, float]:
     target = paypal_checkout_currency()
     if display_currency.upper() == target:
