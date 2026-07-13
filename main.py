@@ -220,25 +220,27 @@ def register_wallet_domain(payload: RegisterDomainRequest) -> WalletDomainRespon
     if domain.startswith("http://") or domain.startswith("https://"):
         raise HTTPException(status_code=400, detail="Enter only the domain name, not a full URL.")
 
+    def _status(item) -> WalletDomainResponse:
+        # Re-validate so Google Pay / Apple Pay leave "pending" when possible.
+        try:
+            item = stripe.PaymentMethodDomain.validate(item.id)
+        except Exception:
+            pass
+        return WalletDomainResponse(
+            domain=domain,
+            registered=True,
+            google_pay_status=getattr(getattr(item, "google_pay", None), "status", None),
+            apple_pay_status=getattr(getattr(item, "apple_pay", None), "status", None),
+        )
+
     try:
         existing_domains = stripe.PaymentMethodDomain.list(limit=100)
         for item in existing_domains.data:
             if item.domain_name == domain:
-                return WalletDomainResponse(
-                    domain=domain,
-                    registered=True,
-                    google_pay_status=getattr(item.google_pay, "status", None),
-                    apple_pay_status=getattr(item.apple_pay, "status", None),
-                )
+                return _status(item)
 
         created = stripe.PaymentMethodDomain.create(domain_name=domain)
-        return WalletDomainResponse(
-            domain=domain,
-            registered=True,
-            created=True,
-            google_pay_status=getattr(created.google_pay, "status", None),
-            apple_pay_status=getattr(created.apple_pay, "status", None),
-        )
+        return _status(created)
     except stripe.error.StripeError as exc:
         raise HTTPException(status_code=400, detail=str(exc.user_message or exc)) from exc
 
