@@ -243,8 +243,8 @@ def donation_confirmation_email(
         preheader=preheader,
         headline=f"Thank you for supporting {name}",
         body_html=body,
-        cta_label=f"View {name}",
-        cta_url=donate_url,
+        cta_label=None,
+        cta_url=None,
         logo_url=logo_url,
         organization_name=name,
         primary_color=primary_color,
@@ -289,8 +289,8 @@ def weekly_reminder_email(
         body_html=body,
         cta_label=None,
         cta_url=None,
-        secondary_cta_label="Contact us with any questions" if secondary_url else None,
-        secondary_cta_url=secondary_url,
+        secondary_cta_label=None,
+        secondary_cta_url=None,
         logo_url=logo_url,
         organization_name=name,
         primary_color=primary_color,
@@ -330,8 +330,8 @@ def popup_reminder_subscribed_email(
         body_html=body,
         cta_label=None,
         cta_url=None,
-        secondary_cta_label="Contact us with any questions" if secondary_url else None,
-        secondary_cta_url=secondary_url,
+        secondary_cta_label=None,
+        secondary_cta_url=None,
         logo_url=logo_url,
         organization_name=name,
         primary_color=primary_color,
@@ -439,8 +439,8 @@ def donation_alert_email(
         preheader=preheader,
         headline="New donation received",
         body_html=body,
-        cta_label="View in admin",
-        cta_url=admin_url,
+        cta_label=None,
+        cta_url=None,
         logo_url=logo_url,
         organization_name=organization_name,
         primary_color=primary_color,
@@ -487,8 +487,8 @@ def weekly_digest_email(
         preheader=preheader,
         headline=f"Your weekly insights — {organization_name}",
         body_html=body,
-        cta_label="Open insights",
-        cta_url=admin_url,
+        cta_label=None,
+        cta_url=None,
         logo_url=logo_url,
         organization_name=organization_name,
         primary_color=primary_color,
@@ -543,7 +543,7 @@ def default_editable_template(template_key: str) -> dict[str, str | None]:
             ),
             "banner_url": DEFAULT_EMAIL_BANNER_URL,
             "logo_url": None,
-            "cta_label": "View campaign",
+            "cta_label": None,
             "is_custom": False,
         }
     if key == "donation_alert":
@@ -561,7 +561,7 @@ def default_editable_template(template_key: str) -> dict[str, str | None]:
             ),
             "banner_url": DEFAULT_EMAIL_BANNER_URL,
             "logo_url": None,
-            "cta_label": "View in admin",
+            "cta_label": None,
             "is_custom": False,
         }
     if key == "reminder_subscribed":
@@ -614,7 +614,7 @@ def default_editable_template(template_key: str) -> dict[str, str | None]:
             ),
             "banner_url": DEFAULT_EMAIL_BANNER_URL,
             "logo_url": None,
-            "cta_label": "Open insights",
+            "cta_label": None,
             "is_custom": False,
         }
     raise ValueError(f"Unknown editable template key: {template_key}")
@@ -648,15 +648,13 @@ def render_editable_email(
     body = apply_email_tokens(str(template.get("body_html") or ""), tokens, escape_html=True)
     resolved_banner = (template.get("banner_url") or banner_url or DEFAULT_EMAIL_BANNER_URL or None)
     resolved_logo = (template.get("logo_url") or logo_url or "").strip() or logo_url
-    cta_label = template.get("cta_label")
-    cta = str(cta_label).strip() if cta_label else None
 
     html = branded_email_html(
         preheader=subject,
         headline=headline,
         body_html=body,
-        cta_label=cta if cta_url else None,
-        cta_url=cta_url if cta else None,
+        cta_label=None,
+        cta_url=None,
         logo_url=resolved_logo,
         organization_name=organization_name or tokens.get("org_name") or tokens.get("campaign_title"),
         primary_color=primary_color,

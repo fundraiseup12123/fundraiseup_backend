@@ -472,7 +472,7 @@ def send_donation_confirmation_for_row(row: dict[str, Any]) -> bool:
         primary_color=str(branding.get("primary_color", DEFAULT_PRIMARY_COLOR)),
         organization_name=str(branding.get("title") or extras["organization_name"]),
         banner_url=extras["banner_url"],
-        cta_url=str(branding.get("donate_url", resolve_frontend_url())),
+        cta_url=None,
         contact_email=extras["contact_email"],
         fallback=donation_confirmation_email(
             donor_name=donor_name,
