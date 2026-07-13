@@ -116,6 +116,9 @@ class UpdateCheckoutRequest(BaseModel):
 
 class RegisterDomainRequest(BaseModel):
     domain: str = Field(min_length=3, max_length=253)
+    # Required for Connect direct charges — Apple Pay / Google Pay domains must be
+    # registered on the connected account that owns the PaymentIntent.
+    stripe_account: str | None = Field(default=None, max_length=255)
 
 
 class RecordDonationRequest(BaseModel):
@@ -220,10 +223,13 @@ def register_wallet_domain(payload: RegisterDomainRequest) -> WalletDomainRespon
     if domain.startswith("http://") or domain.startswith("https://"):
         raise HTTPException(status_code=400, detail="Enter only the domain name, not a full URL.")
 
+    stripe_account = (payload.stripe_account or "").strip() or None
+    account_kwargs = {"stripe_account": stripe_account} if stripe_account else {}
+
     def _status(item) -> WalletDomainResponse:
         # Re-validate so Google Pay / Apple Pay leave "pending" when possible.
         try:
-            item = stripe.PaymentMethodDomain.validate(item.id)
+            item = stripe.PaymentMethodDomain.validate(item.id, **account_kwargs)
         except Exception:
             pass
         return WalletDomainResponse(
@@ -234,12 +240,12 @@ def register_wallet_domain(payload: RegisterDomainRequest) -> WalletDomainRespon
         )
 
     try:
-        existing_domains = stripe.PaymentMethodDomain.list(limit=100)
+        existing_domains = stripe.PaymentMethodDomain.list(limit=100, **account_kwargs)
         for item in existing_domains.data:
             if item.domain_name == domain:
                 return _status(item)
 
-        created = stripe.PaymentMethodDomain.create(domain_name=domain)
+        created = stripe.PaymentMethodDomain.create(domain_name=domain, **account_kwargs)
         return _status(created)
     except stripe.error.StripeError as exc:
         raise HTTPException(status_code=400, detail=str(exc.user_message or exc)) from exc
