@@ -48,6 +48,17 @@ def unsubscribe_reminder(
     return unsubscribe_weekly_reminder(email=str(email), campaign_id=campaign_id)
 
 
+@router.post("/reminders/unsubscribe")
+def unsubscribe_reminder_one_click(
+    email: EmailStr | None = None,
+    campaign_id: str | None = None,
+) -> dict[str, Any]:
+    """Gmail/Yahoo one-click unsubscribe (List-Unsubscribe-Post)."""
+    if email is None:
+        return {"unsubscribed": False, "reason": "missing_email"}
+    return unsubscribe_weekly_reminder(email=str(email), campaign_id=campaign_id)
+
+
 @router.post("/cron/weekly-reminders")
 def cron_weekly_reminders(
     authorization: Annotated[str | None, Header()] = None,

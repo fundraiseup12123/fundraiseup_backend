@@ -343,6 +343,8 @@ def _deliver_resend_email(
     subject: str,
     html: str,
     attachments: list[dict[str, Any]] | None = None,
+    headers: dict[str, str] | None = None,
+    reply_to: str | list[str] | None = None,
 ) -> dict[str, Any]:
     """POST one email to Resend. Raises RateLimited on HTTP 429."""
     payload: dict[str, Any] = {
@@ -353,6 +355,10 @@ def _deliver_resend_email(
     }
     if attachments:
         payload["attachments"] = attachments
+    if headers:
+        payload["headers"] = headers
+    if reply_to:
+        payload["reply_to"] = reply_to if isinstance(reply_to, list) else [reply_to]
 
     response = httpx.post(
         "https://api.resend.com/emails",
@@ -383,15 +389,36 @@ def _deliver_resend_email(
     return {"sent": True, "id": body.get("id")}
 
 
-def send_resend_email(*, to: str, subject: str, html: str) -> dict[str, Any]:
+def send_resend_email(
+    *,
+    to: str,
+    subject: str,
+    html: str,
+    unsubscribe_url: str | None = None,
+    reply_to: str | None = None,
+) -> dict[str, Any]:
     """Enqueue email send (rate-limited) and wait for delivery."""
     if not resend_configured():
         logger.warning("RESEND_API_KEY not set — skipping email to %s", to)
         return {"sent": False, "reason": "not_configured"}
 
+    contact = _contact_email()
+    headers: dict[str, str] = {}
+    if unsubscribe_url:
+        headers["List-Unsubscribe"] = f"<{unsubscribe_url}>"
+        headers["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click"
+    elif contact:
+        headers["List-Unsubscribe"] = f"<mailto:{contact}?subject=unsubscribe>"
+
     # Do not CID-inline images: Gmail webmail often shows them as file attachments
     # instead of rendering them in the body (especially in Spam).
-    return get_email_queue(_deliver_resend_email).submit(to=to, subject=subject, html=html)
+    return get_email_queue(_deliver_resend_email).submit(
+        to=to,
+        subject=subject,
+        html=html,
+        headers=headers or None,
+        reply_to=reply_to or contact,
+    )
 
 
 def _email_presentation(
@@ -547,7 +574,7 @@ def subscribe_weekly_reminder(
         ),
     )
     try:
-        send_resend_email(to=normalized, subject=subject, html=html)
+        send_resend_email(to=normalized, subject=subject, html=html, unsubscribe_url=extras["unsubscribe_url"])
         log_email(
             recipient_email=normalized,
             subject=subject,
@@ -656,7 +683,7 @@ def send_weekly_reminders() -> dict[str, int | str]:
         )
 
         try:
-            send_resend_email(to=email, subject=subject, html=html)
+            send_resend_email(to=email, subject=subject, html=html, unsubscribe_url=extras["unsubscribe_url"])
             log_email(
                 recipient_email=email,
                 subject=subject,
@@ -746,7 +773,7 @@ def send_weekly_reminders() -> dict[str, int | str]:
         )
 
         try:
-            send_resend_email(to=email, subject=subject, html=html)
+            send_resend_email(to=email, subject=subject, html=html, unsubscribe_url=extras["unsubscribe_url"])
             log_email(
                 recipient_email=email,
                 subject=subject,

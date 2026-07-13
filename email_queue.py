@@ -38,6 +38,8 @@ class _EmailJob:
     subject: str
     html: str
     attachments: list[dict[str, Any]] | None = None
+    headers: dict[str, str] | None = None
+    reply_to: str | list[str] | None = None
     done: threading.Event = field(default_factory=threading.Event)
     result: dict[str, Any] | None = None
     error: BaseException | None = None
@@ -81,11 +83,20 @@ class EmailSendQueue:
         subject: str,
         html: str,
         attachments: list[dict[str, Any]] | None = None,
+        headers: dict[str, str] | None = None,
+        reply_to: str | list[str] | None = None,
         timeout: float = 180.0,
     ) -> dict[str, Any]:
         """Enqueue an email and wait until it is sent (or fails)."""
         self.start()
-        job = _EmailJob(to=to, subject=subject, html=html, attachments=attachments)
+        job = _EmailJob(
+            to=to,
+            subject=subject,
+            html=html,
+            attachments=attachments,
+            headers=headers,
+            reply_to=reply_to,
+        )
         self._q.put(job)
         if not job.done.wait(timeout=timeout):
             raise RuntimeError(f"Email send timed out in queue for {to}")
@@ -139,6 +150,8 @@ class EmailSendQueue:
                     subject=job.subject,
                     html=job.html,
                     attachments=job.attachments,
+                    headers=job.headers,
+                    reply_to=job.reply_to,
                 )
             except RateLimited as exc:
                 delay = max(exc.retry_after, 1.0 / self._max_per_second)
