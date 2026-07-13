@@ -224,22 +224,22 @@ def register_wallet_domain(payload: RegisterDomainRequest) -> WalletDomainRespon
         raise HTTPException(status_code=400, detail="Enter only the domain name, not a full URL.")
 
     stripe_account = (payload.stripe_account or "").strip() or None
-    account_kwargs = {"stripe_account": stripe_account} if stripe_account else {}
 
-    def _status(item) -> WalletDomainResponse:
-        # Re-validate so Google Pay / Apple Pay leave "pending" when possible.
-        try:
-            item = stripe.PaymentMethodDomain.validate(item.id, **account_kwargs)
-        except Exception:
-            pass
-        return WalletDomainResponse(
-            domain=domain,
-            registered=True,
-            google_pay_status=getattr(getattr(item, "google_pay", None), "status", None),
-            apple_pay_status=getattr(getattr(item, "apple_pay", None), "status", None),
-        )
+    def _register(account_id: str | None) -> WalletDomainResponse:
+        account_kwargs = {"stripe_account": account_id} if account_id else {}
 
-    try:
+        def _status(item) -> WalletDomainResponse:
+            try:
+                item = stripe.PaymentMethodDomain.validate(item.id, **account_kwargs)
+            except Exception:
+                pass
+            return WalletDomainResponse(
+                domain=domain,
+                registered=True,
+                google_pay_status=getattr(getattr(item, "google_pay", None), "status", None),
+                apple_pay_status=getattr(getattr(item, "apple_pay", None), "status", None),
+            )
+
         existing_domains = stripe.PaymentMethodDomain.list(limit=100, **account_kwargs)
         for item in existing_domains.data:
             if item.domain_name == domain:
@@ -247,6 +247,15 @@ def register_wallet_domain(payload: RegisterDomainRequest) -> WalletDomainRespon
 
         created = stripe.PaymentMethodDomain.create(domain_name=domain, **account_kwargs)
         return _status(created)
+
+    try:
+        # Always register on the platform account.
+        platform_result = _register(None)
+        # For Connect direct charges, also register on the connected account.
+        if stripe_account:
+            connect_result = _register(stripe_account)
+            return connect_result
+        return platform_result
     except stripe.error.StripeError as exc:
         raise HTTPException(status_code=400, detail=str(exc.user_message or exc)) from exc
 
