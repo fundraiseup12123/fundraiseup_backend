@@ -11,6 +11,7 @@ ZERO_DECIMAL = {
 }
 
 PAYPAL_CURRENCIES = {"usd", "eur", "gbp", "aud", "cad", "chf", "nzd", "sek", "dkk", "nok", "pln", "czk", "huf"}
+NOWPAYMENTS_FIAT = {"usd", "eur", "gbp", "aud", "cad", "chf", "nzd", "sek", "dkk", "nok", "pln", "czk", "huf", "jpy", "ils", "inr", "aed", "sgd", "hkd", "try", "brl", "mxn"}
 
 # 1 USD = X PKR (override via PKR_USD_RATE in backend/.env)
 PKR_USD_RATE = float(os.getenv("PKR_USD_RATE", "278"))
@@ -118,6 +119,13 @@ def conversion_note(display_currency: str, payment_method: PaymentMethodType, to
     from paypal_client import paypal_configured
 
     if payment_method == "nowpayments":
+        charge_code, charge_total = convert_for_nowpayments(total_display, display_currency)
+        if charge_code != display_currency.upper():
+            return (
+                f"Crypto checkout prices in {charge_code}. Your "
+                f"{format_display_amount(total_display, display_currency)} donation is approximately "
+                f"{format_display_amount(charge_total, charge_code)}."
+            )
         return (
             "You will complete payment in crypto on NOWPayments. "
             "The crypto amount is calculated at checkout."
@@ -257,6 +265,20 @@ def assert_meets_min_donation(
             detail=f"Minimum {format_display_amount(required, donor)}",
         )
 
+
+
+
+def supports_nowpayments_fiat(currency: str) -> bool:
+    return currency.lower() in NOWPAYMENTS_FIAT
+
+
+def convert_for_nowpayments(total_amount: float, display_currency: str) -> tuple[str, float]:
+    """Invoice fiat NOWPayments can price — map unsupported (e.g. PKR) to USD."""
+    code = display_currency.upper()
+    if supports_nowpayments_fiat(code):
+        return code, round(float(total_amount), 2)
+    converted = convert_to_reporting(float(total_amount), code, "USD")
+    return "USD", round(converted, 2)
 
 def convert_for_paypal(total_amount: float, display_currency: str) -> tuple[str, float]:
     target = paypal_checkout_currency()

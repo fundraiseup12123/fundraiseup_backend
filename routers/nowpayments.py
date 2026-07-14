@@ -399,6 +399,9 @@ def nowpayments_prepare_redirect(payload: PrepareNowPaymentsRedirectRequest) -> 
 
     display_currency = payload.currency.lower()
     base_amount, total_display = _resolve_total(payload.amount, display_currency, payload.cover_fees)
+    from currency import convert_for_nowpayments
+
+    invoice_currency, invoice_amount = convert_for_nowpayments(total_display, display_currency)
     payment_ref = str(uuid.uuid4())
     frontend_url = resolve_frontend_url()
 
@@ -420,8 +423,8 @@ def nowpayments_prepare_redirect(payload: PrepareNowPaymentsRedirectRequest) -> 
     try:
         invoice = create_invoice(
             api_key=str(account["api_key"]),
-            price_amount=total_display,
-            price_currency=display_currency,
+            price_amount=invoice_amount,
+            price_currency=invoice_currency.lower(),
             order_id=payment_ref,
             order_description=f"Donation from {payload.donor.first_name} {payload.donor.last_name}",
             ipn_callback_url=_ipn_callback_url(),
@@ -436,8 +439,8 @@ def nowpayments_prepare_redirect(payload: PrepareNowPaymentsRedirectRequest) -> 
         "redirect_url": str(invoice["invoice_url"]),
         "payment_ref": payment_ref,
         "invoice_id": invoice_id,
-        "charge_currency": display_currency.upper(),
-        "charge_amount": f"{total_display:.2f}",
+        "charge_currency": invoice_currency.upper(),
+        "charge_amount": f"{invoice_amount:.2f}",
         "display_amount": format_display_amount(total_display, display_currency),
     }
 
