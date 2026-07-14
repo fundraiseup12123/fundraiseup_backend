@@ -59,7 +59,9 @@ def create_invoice(
         "success_url": success_url,
         "cancel_url": cancel_url,
         "is_fixed_rate": False,
-        "is_fee_paid_by_user": False,
+        # Donor covers NOWPayments/network fees so received amount matches invoice
+        # and payments are less likely to stick on partially_paid.
+        "is_fee_paid_by_user": True,
     }
     with httpx.Client(timeout=30.0) as client:
         response = client.post(
