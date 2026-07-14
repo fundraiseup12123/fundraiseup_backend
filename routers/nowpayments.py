@@ -652,9 +652,13 @@ async def nowpayments_ipn(request: Request) -> dict[str, str]:
     if accounts and not verified:
         raise HTTPException(status_code=401, detail="Invalid IPN signature")
 
-    if payment_status in {"finished", "confirmed", "partially_paid"} and (order_id or invoice_id):
+    if payment_status in {"finished", "confirmed", "partially_paid", "sending"} and (
+        order_id or invoice_id
+    ):
         crypto_fields = _crypto_fields_from_ipn(payload)
-        status = "succeeded" if payment_status != "partially_paid" else "pending"
+        # Treat partial as succeeded: fee shortfalls / dust underpayment still
+        # record the gift with whatever crypto actually landed (actually_paid).
+        status = "succeeded"
         updates = {"status": status, **crypto_fields}
 
         existing = _find_donation_by_nowpayments_keys(payment_ref=order_id or None, invoice_id=invoice_id)
