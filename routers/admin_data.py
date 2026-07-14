@@ -42,7 +42,8 @@ def admin_list_donations(
     sort_desc = sort == "desc"
     select_cols = (
         "id,first_name,last_name,email,amount,currency,frequency,status,payment_method,"
-        "honoree_name,created_at,campaign_id,platform_fee,processing_fee,payout_amount,organization_id"
+        "honoree_name,created_at,campaign_id,platform_fee,processing_fee,payout_amount,"
+        "organization_id,crypto_amount,crypto_currency"
     )
     # Amount sort loads the filtered set so FX conversion ranks correctly across currencies.
     fetch_limit = 1000 if amount_sort else limit + 1

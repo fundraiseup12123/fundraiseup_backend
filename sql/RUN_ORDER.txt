@@ -25,5 +25,7 @@
 --   012_min_donation_amount.sql
 --   013_min_donation_once_monthly.sql
 --   014_nowpayments_accounts.sql
+--   015_donation_crypto_amount.sql
+--   016_nowpayments_checkouts.sql
 --   donations.sql                        (included in 000)
 --   seed_donations.sql                   (optional sample data)

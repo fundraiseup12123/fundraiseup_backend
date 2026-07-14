@@ -121,6 +121,84 @@ def _resolve_organization_id(campaign_id: str | None) -> str:
     return ROOT_ORG_ID
 
 
+def _checkout_payload_from_prepare(payload: PrepareNowPaymentsRedirectRequest) -> dict[str, Any]:
+    return payload.model_dump(mode="json")
+
+
+def _save_pending_checkout(
+    *,
+    payment_ref: str,
+    invoice_id: str | None,
+    payload: PrepareNowPaymentsRedirectRequest,
+) -> None:
+    rest_insert(
+        "nowpayments_checkouts",
+        {
+            "payment_ref": payment_ref,
+            "invoice_id": invoice_id or None,
+            "payload": _checkout_payload_from_prepare(payload),
+        },
+        on_conflict="payment_ref",
+    )
+
+
+def _load_pending_checkout(
+    *,
+    payment_ref: str | None = None,
+    invoice_id: str | None = None,
+) -> dict[str, Any] | None:
+    if payment_ref:
+        row = rest_get_one(
+            "nowpayments_checkouts",
+            params={"payment_ref": f"eq.{payment_ref}", "select": "*"},
+        )
+        if row:
+            return row
+    if invoice_id:
+        return rest_get_one(
+            "nowpayments_checkouts",
+            params={"invoice_id": f"eq.{invoice_id}", "select": "*"},
+        )
+    return None
+
+
+def _complete_request_from_pending(
+    pending: dict[str, Any],
+    *,
+    payment_ref: str | None = None,
+    invoice_id: str | None = None,
+) -> CompleteNowPaymentsRedirectRequest:
+    raw = pending.get("payload") or {}
+    if isinstance(raw, str):
+        import json
+
+        raw = json.loads(raw)
+    data = dict(raw)
+    data["payment_ref"] = payment_ref or pending.get("payment_ref") or data.get("payment_ref")
+    data["invoice_id"] = invoice_id or pending.get("invoice_id") or data.get("invoice_id")
+    return CompleteNowPaymentsRedirectRequest.model_validate(data)
+
+
+def _find_donation_by_nowpayments_keys(
+    *,
+    payment_ref: str | None = None,
+    invoice_id: str | None = None,
+) -> dict[str, Any] | None:
+    keys: list[str] = []
+    if payment_ref:
+        keys.append(f"np_{payment_ref}")
+    if invoice_id:
+        keys.append(f"np_inv_{invoice_id}")
+    for key in keys:
+        row = rest_get_one(
+            "donations",
+            params={"stripe_payment_intent_id": f"eq.{key}", "select": "id,status,stripe_payment_intent_id"},
+        )
+        if row:
+            return row
+    return None
+
+
 def resolve_nowpayments_account_for_checkout(
     campaign_id: str | None,
     checkout_view: str | None,
@@ -189,6 +267,8 @@ def _record_nowpayments_donation(
     base_amount: float,
     total_display: float,
     status: str = "succeeded",
+    crypto_amount: float | None = None,
+    crypto_currency: str | None = None,
 ) -> dict[str, object] | None:
     display_currency = payload.currency.upper()
     cover_fees = payload.cover_fees
@@ -225,6 +305,10 @@ def _record_nowpayments_donation(
         "processing_fee": processing_fee,
         "payout_amount": payout_amount,
     }
+    if crypto_amount is not None:
+        row["crypto_amount"] = crypto_amount
+    if crypto_currency:
+        row["crypto_currency"] = crypto_currency.upper()
     if payload.device:
         device = {
             k: v
@@ -435,6 +519,7 @@ def nowpayments_prepare_redirect(payload: PrepareNowPaymentsRedirectRequest) -> 
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     invoice_id = str(invoice.get("id") or "")
+    _save_pending_checkout(payment_ref=payment_ref, invoice_id=invoice_id or None, payload=payload)
     return {
         "redirect_url": str(invoice["invoice_url"]),
         "payment_ref": payment_ref,
@@ -457,16 +542,22 @@ def nowpayments_complete_redirect(payload: CompleteNowPaymentsRedirectRequest) -
     if payload.invoice_id:
         payment_id = f"np_inv_{payload.invoice_id}"
 
-    existing = rest_get_one(
-        "donations",
-        params={"stripe_payment_intent_id": f"eq.{payment_id}", "select": "id,status"},
+    existing = _find_donation_by_nowpayments_keys(
+        payment_ref=payload.payment_ref,
+        invoice_id=payload.invoice_id,
     )
     if existing:
         return {
-            "payment_id": payment_id,
+            "payment_id": existing.get("stripe_payment_intent_id") or payment_id,
             "status": existing.get("status") or "succeeded",
             "recorded": True,
         }
+
+    _save_pending_checkout(
+        payment_ref=payload.payment_ref,
+        invoice_id=payload.invoice_id,
+        payload=payload,
+    )
 
     recorded = _record_nowpayments_donation(
         payment_id=payment_id,
@@ -482,6 +573,43 @@ def nowpayments_complete_redirect(payload: CompleteNowPaymentsRedirectRequest) -
     }
 
 
+class CompleteByRefRequest(BaseModel):
+    payment_ref: str = Field(min_length=5, max_length=128)
+    invoice_id: str | None = None
+
+
+@router.post("/complete-by-ref")
+def nowpayments_complete_by_ref(payload: CompleteByRefRequest) -> dict[str, object]:
+    """Record donation using server-stored checkout when browser sessionStorage is missing."""
+    pending = _load_pending_checkout(payment_ref=payload.payment_ref, invoice_id=payload.invoice_id)
+    if not pending:
+        raise HTTPException(status_code=404, detail="Checkout session not found for this payment.")
+
+    complete = _complete_request_from_pending(
+        pending,
+        payment_ref=payload.payment_ref,
+        invoice_id=payload.invoice_id,
+    )
+    return nowpayments_complete_redirect(complete)
+
+
+def _crypto_fields_from_ipn(payload: dict[str, Any]) -> dict[str, Any]:
+    """Extract paid crypto amount/ticker from NOWPayments IPN body."""
+    amount = payload.get("actually_paid")
+    if amount is None:
+        amount = payload.get("pay_amount")
+    currency = payload.get("pay_currency") or payload.get("outcome_currency")
+    out: dict[str, Any] = {}
+    try:
+        if amount is not None and str(amount).strip() != "":
+            out["crypto_amount"] = float(amount)
+    except (TypeError, ValueError):
+        pass
+    if currency:
+        out["crypto_currency"] = str(currency).upper()
+    return out
+
+
 @router.post("/ipn")
 async def nowpayments_ipn(request: Request) -> dict[str, str]:
     try:
@@ -494,6 +622,7 @@ async def nowpayments_ipn(request: Request) -> dict[str, str]:
     signature = request.headers.get("x-nowpayments-sig")
     order_id = str(payload.get("order_id") or "")
     payment_status = str(payload.get("payment_status") or "").lower()
+    invoice_id = str(payload.get("invoice_id") or "") or None
 
     # Prefer org account matching payment; fall back to any active account for signature check.
     accounts = rest_get(
@@ -523,23 +652,39 @@ async def nowpayments_ipn(request: Request) -> dict[str, str]:
     if accounts and not verified:
         raise HTTPException(status_code=401, detail="Invalid IPN signature")
 
-    if payment_status in {"finished", "confirmed"} and order_id:
-        payment_id = f"np_{order_id}"
-        existing = rest_get_one(
-            "donations",
-            params={"stripe_payment_intent_id": f"eq.{payment_id}", "select": "id,status"},
-        )
-        if existing and existing.get("status") != "succeeded":
-            rest_patch("donations", {"status": "succeeded"}, match={"id": existing["id"]})
-        # Also try invoice-keyed rows
-        invoice_id = payload.get("invoice_id")
-        if invoice_id:
-            inv_key = f"np_inv_{invoice_id}"
-            inv_row = rest_get_one(
-                "donations",
-                params={"stripe_payment_intent_id": f"eq.{inv_key}", "select": "id,status"},
+    if payment_status in {"finished", "confirmed", "partially_paid"} and (order_id or invoice_id):
+        crypto_fields = _crypto_fields_from_ipn(payload)
+        status = "succeeded" if payment_status != "partially_paid" else "pending"
+        updates = {"status": status, **crypto_fields}
+
+        existing = _find_donation_by_nowpayments_keys(payment_ref=order_id or None, invoice_id=invoice_id)
+        if existing:
+            rest_patch("donations", updates, match={"id": existing["id"]})
+            return {"status": "ok"}
+
+        # Donor may never have returned to success URL — create from stored checkout.
+        pending = _load_pending_checkout(payment_ref=order_id or None, invoice_id=invoice_id)
+        if pending:
+            complete = _complete_request_from_pending(
+                pending,
+                payment_ref=order_id or None,
+                invoice_id=invoice_id,
             )
-            if inv_row and inv_row.get("status") != "succeeded":
-                rest_patch("donations", {"status": "succeeded"}, match={"id": inv_row["id"]})
+            display_currency = complete.currency.lower()
+            base_amount, total_display = _resolve_total(
+                complete.amount, display_currency, complete.cover_fees
+            )
+            payment_id = f"np_{complete.payment_ref}"
+            if complete.invoice_id:
+                payment_id = f"np_inv_{complete.invoice_id}"
+            _record_nowpayments_donation(
+                payment_id=payment_id,
+                payload=complete,
+                base_amount=base_amount,
+                total_display=total_display,
+                status=status,
+                crypto_amount=crypto_fields.get("crypto_amount"),
+                crypto_currency=crypto_fields.get("crypto_currency"),
+            )
 
     return {"status": "ok"}
