@@ -80,7 +80,7 @@ def get_campaign_donations(
         "donations",
         params={
             "campaign_id": f"eq.{campaign_id}",
-            "select": select_columns("id", "first_name", "last_name", "amount", "currency", "frequency", "honoree_name", "created_at"),
+            "select": select_columns("id", "first_name", "last_name", "amount", "currency", "frequency", "honoree_name", "created_at", "device", "crypto_amount", "crypto_currency"),
             "order": "created_at.desc",
             "limit": str(limit + 1),
             "offset": str(offset),

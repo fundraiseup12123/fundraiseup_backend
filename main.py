@@ -135,6 +135,8 @@ class DonationFeedItem(BaseModel):
     honoree_name: str | None = None
     created_at: str
     country_code: str | None = None
+    crypto_amount: float | None = None
+    crypto_currency: str | None = None
 
 
 class DonationFeedResponse(BaseModel):
@@ -160,6 +162,13 @@ def _country_code_from_device(device: object) -> str | None:
 
 
 def _feed_item_from_row(row: dict) -> DonationFeedItem:
+    crypto_amount = row.get("crypto_amount")
+    crypto_currency = row.get("crypto_currency")
+    try:
+        crypto_amount_f = float(crypto_amount) if crypto_amount is not None else None
+    except (TypeError, ValueError):
+        crypto_amount_f = None
+    crypto_code = str(crypto_currency).upper() if crypto_currency else None
     return DonationFeedItem(
         id=str(row["id"]),
         first_name=row["first_name"],
@@ -170,6 +179,8 @@ def _feed_item_from_row(row: dict) -> DonationFeedItem:
         honoree_name=row.get("honoree_name"),
         created_at=row["created_at"],
         country_code=_country_code_from_device(row.get("device")),
+        crypto_amount=crypto_amount_f,
+        crypto_currency=crypto_code,
     )
 
 
@@ -1005,9 +1016,14 @@ def get_donations(
     from db import rest_get_one as db_rest_get_one
 
     select_cols = (
-        "id,first_name,last_name,amount,currency,frequency,honoree_name,created_at,device"
+        "id,first_name,last_name,amount,currency,frequency,honoree_name,created_at,device,"
+        "crypto_amount,crypto_currency"
     )
     select_cols_no_device = (
+        "id,first_name,last_name,amount,currency,frequency,honoree_name,created_at,"
+        "crypto_amount,crypto_currency"
+    )
+    select_cols_basic = (
         "id,first_name,last_name,amount,currency,frequency,honoree_name,created_at"
     )
     amount_sort = sort == "descending"
@@ -1026,9 +1042,10 @@ def get_donations(
         return list_donations(limit=fetch_limit, offset=0 if amount_sort else offset)
 
     rows = _fetch(select_cols)
-    if not rows and select_cols != select_cols_no_device:
-        # Older schemas / select errors return [] — retry without device.
+    if not rows:
         rows = _fetch(select_cols_no_device)
+    if not rows:
+        rows = _fetch(select_cols_basic)
 
     if amount_sort:
         reporting_currency = "USD"
