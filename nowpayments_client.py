@@ -58,7 +58,7 @@ def create_invoice(
         "ipn_callback_url": ipn_callback_url,
         "success_url": success_url,
         "cancel_url": cancel_url,
-        "is_fixed_rate": True,
+        "is_fixed_rate": False,
         "is_fee_paid_by_user": False,
     }
     with httpx.Client(timeout=30.0) as client:
