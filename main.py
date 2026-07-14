@@ -871,6 +871,7 @@ from routers.invites import router as invites_router
 from routers.admin_data import router as admin_data_router
 from routers.paypal import router as paypal_router
 from routers.paypal_connect import router as paypal_connect_router
+from routers.nowpayments import router as nowpayments_router
 from routers.payment_accounts import router as payment_accounts_router
 from routers.emails import router as emails_router
 from routers.uploads import router as uploads_router
@@ -884,6 +885,7 @@ app.include_router(invites_router)
 app.include_router(admin_data_router)
 app.include_router(paypal_router)
 app.include_router(paypal_connect_router)
+app.include_router(nowpayments_router)
 app.include_router(emails_router)
 app.include_router(uploads_router)
 

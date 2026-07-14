@@ -206,6 +206,7 @@ class UpdateCampaignRequest(BaseModel):
     default_currency: str | None = None
     stripe_account_id: str | None = None
     paypal_account_id: str | None = None
+    nowpayments_account_id: str | None = None
     # None omitted; explicit null clears the minimum (no limit).
     min_donation_amount: float | None = None
     min_donation_amount_once: float | None = None
@@ -401,6 +402,22 @@ def get_campaign(
         "paypal_accounts",
         params={"organization_id": f"eq.{org_id}", "select": "*"},
     )
+    nowpayments_accounts_raw = rest_get(
+        "nowpayments_accounts",
+        params={"organization_id": f"eq.{org_id}", "select": "*"},
+    )
+    nowpayments_accounts = [
+        {
+            "id": row.get("id"),
+            "organization_id": row.get("organization_id"),
+            "campaign_id": row.get("campaign_id"),
+            "api_key_hint": row.get("api_key_hint"),
+            "email": row.get("email"),
+            "is_default": bool(row.get("is_default")),
+            "connection_status": row.get("connection_status") or "active",
+        }
+        for row in nowpayments_accounts_raw
+    ]
     return {
         "campaign": campaign,
         "content": content,
@@ -408,6 +425,7 @@ def get_campaign(
         "domains": domains,
         "stripe_accounts": stripe_accounts,
         "paypal_accounts": paypal_accounts,
+        "nowpayments_accounts": nowpayments_accounts,
     }
 
 
@@ -456,6 +474,8 @@ def update_campaign(
         updates["stripe_account_id"] = payload.stripe_account_id or None
     if payload.paypal_account_id is not None:
         updates["paypal_account_id"] = payload.paypal_account_id or None
+    if payload.nowpayments_account_id is not None:
+        updates["nowpayments_account_id"] = payload.nowpayments_account_id or None
     def _normalize_min(raw: float | None) -> float | None:
         if raw is None or not isinstance(raw, (int, float)) or float(raw) <= 0:
             return None

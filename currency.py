@@ -15,7 +15,7 @@ PAYPAL_CURRENCIES = {"usd", "eur", "gbp", "aud", "cad", "chf", "nzd", "sek", "dk
 # 1 USD = X PKR (override via PKR_USD_RATE in backend/.env)
 PKR_USD_RATE = float(os.getenv("PKR_USD_RATE", "278"))
 
-PaymentMethodType = Literal["card", "google_pay", "apple_pay", "paypal"]
+PaymentMethodType = Literal["card", "google_pay", "apple_pay", "paypal", "nowpayments"]
 
 
 def to_stripe_amount(amount: float, currency: str) -> int:
@@ -116,6 +116,12 @@ def convert_for_charge(total_amount: float, display_currency: str, payment_metho
 
 def conversion_note(display_currency: str, payment_method: PaymentMethodType, total_display: float) -> str | None:
     from paypal_client import paypal_configured
+
+    if payment_method == "nowpayments":
+        return (
+            "You will complete payment in crypto on NOWPayments. "
+            "The crypto amount is calculated at checkout."
+        )
 
     if payment_method == "paypal" and paypal_configured():
         charge_currency_code, charge_total = convert_for_paypal(total_display, display_currency)

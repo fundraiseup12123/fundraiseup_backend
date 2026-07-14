@@ -24,5 +24,6 @@
 --   011_email_templates.sql
 --   012_min_donation_amount.sql
 --   013_min_donation_once_monthly.sql
+--   014_nowpayments_accounts.sql
 --   donations.sql                        (included in 000)
 --   seed_donations.sql                   (optional sample data)

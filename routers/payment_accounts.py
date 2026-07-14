@@ -52,6 +52,10 @@ def _default_accounts() -> dict[str, dict[str, Any]]:
             "stripe_charges_enabled": False,
             "paypal_merchant_id": None,
             "paypal_connection_status": None,
+            "nowpayments_api_key": None,
+            "nowpayments_ipn_secret": None,
+            "nowpayments_api_key_hint": None,
+            "nowpayments_connection_status": None,
         },
         "popup": {
             "stripe_account_id": None,
@@ -59,6 +63,10 @@ def _default_accounts() -> dict[str, dict[str, Any]]:
             "stripe_charges_enabled": False,
             "paypal_merchant_id": None,
             "paypal_connection_status": None,
+            "nowpayments_api_key": None,
+            "nowpayments_ipn_secret": None,
+            "nowpayments_api_key_hint": None,
+            "nowpayments_connection_status": None,
         },
     }
 
@@ -118,10 +126,13 @@ def _refresh_stripe_view(view: PaymentView, accounts: dict[str, dict[str, Any]])
 
 
 def _accounts_response(accounts: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
-    return [
-        {"view": "homepage", **accounts["homepage"]},
-        {"view": "popup", **accounts["popup"]},
-    ]
+    out: list[dict[str, Any]] = []
+    for view in ("homepage", "popup"):
+        entry = dict(accounts[view])
+        entry.pop("nowpayments_api_key", None)
+        entry.pop("nowpayments_ipn_secret", None)
+        out.append({"view": view, **entry})
+    return out
 
 
 @router.get("/status")
@@ -152,6 +163,10 @@ def payment_accounts_status(
             "If partner connect is unavailable, Connect PayPal will ask for the business email "
             "that should receive donations. Optional partner Return URL: "
             f"{paypal_return_uri}"
+        ),
+        "nowpayments_setup_hint": (
+            "Paste your NOWPayments API key and IPN secret from Store Settings. "
+            "Crypto checkout works on all devices once attached."
         ),
     }
 
@@ -401,3 +416,76 @@ def handle_root_paypal_callback(code: str, state: str) -> RedirectResponse | Non
     if redirect_url.startswith("/"):
         redirect_url = f"{resolve_frontend_url()}{redirect_url}"
     return RedirectResponse(url=redirect_url)
+
+
+
+def resolve_root_nowpayments_account(checkout_view: str | None) -> dict[str, Any] | None:
+    view: PaymentView = "popup" if checkout_view == "popup" else "homepage"
+    accounts = _load_accounts_raw()
+    entry = accounts.get(view, {})
+    api_key = entry.get("nowpayments_api_key")
+    ipn_secret = entry.get("nowpayments_ipn_secret")
+    if not api_key or not ipn_secret:
+        return None
+    status = entry.get("nowpayments_connection_status")
+    if status and status not in ("active", "pending", "connected", None):
+        return None
+    return {
+        "api_key": api_key,
+        "ipn_secret": ipn_secret,
+        "api_key_hint": entry.get("nowpayments_api_key_hint"),
+        "connection_status": status or "active",
+    }
+
+
+class NowPaymentsAttachPayload(BaseModel):
+    view: PaymentView
+    api_key: str = Field(min_length=8, max_length=256)
+    ipn_secret: str = Field(min_length=8, max_length=256)
+    frontend_origin: str | None = None
+
+
+@router.post("/nowpayments/attach")
+def attach_root_nowpayments(
+    payload: NowPaymentsAttachPayload,
+    user: Annotated[AuthUser, Depends(require_super_admin)],
+) -> dict[str, Any]:
+    from nowpayments_client import api_key_hint, verify_api_key
+
+    api_key = payload.api_key.strip()
+    ipn_secret = payload.ipn_secret.strip()
+    if not verify_api_key(api_key):
+        raise HTTPException(
+            status_code=400,
+            detail="NOWPayments API key is invalid or the API is unreachable.",
+        )
+
+    accounts = _load_accounts_raw()
+    view = payload.view
+    accounts[view] = {
+        **accounts[view],
+        "nowpayments_api_key": api_key,
+        "nowpayments_ipn_secret": ipn_secret,
+        "nowpayments_api_key_hint": api_key_hint(api_key),
+        "nowpayments_connection_status": "active",
+    }
+    _save_accounts(accounts)
+    return {"attached": True, "view": view, "api_key_hint": api_key_hint(api_key)}
+
+
+@router.post("/nowpayments/disconnect")
+def disconnect_root_nowpayments(
+    payload: PaymentViewPayload,
+    user: Annotated[AuthUser, Depends(require_super_admin)],
+) -> dict[str, bool]:
+    accounts = _load_accounts_raw()
+    view = payload.view
+    accounts[view] = {
+        **accounts[view],
+        "nowpayments_api_key": None,
+        "nowpayments_ipn_secret": None,
+        "nowpayments_api_key_hint": None,
+        "nowpayments_connection_status": None,
+    }
+    _save_accounts(accounts)
+    return {"removed": True}
