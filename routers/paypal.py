@@ -361,10 +361,18 @@ def paypal_complete_redirect(payload: CompletePayPalRedirectRequest) -> CaptureP
         total_display=total_display,
     )
     if saved:
-        from emails import send_donation_alerts_for_row, send_donation_confirmation_for_row
+        try:
+            from emails import send_donation_alerts_for_row, send_donation_confirmation_for_row
 
-        send_donation_confirmation_for_row(saved)
-        send_donation_alerts_for_row(saved)
+            send_donation_confirmation_for_row(saved)
+            send_donation_alerts_for_row(saved)
+        except Exception:
+            import logging
+
+            logging.getLogger(__name__).exception(
+                "Post-donation emails failed for PayPal donation %s",
+                (saved or {}).get("id"),
+            )
     return CapturePayPalOrderResponse(order_id=order_id, status="COMPLETED", recorded=bool(saved))
 
 
@@ -446,10 +454,18 @@ def paypal_capture_order(payload: CapturePayPalOrderRequest) -> CapturePayPalOrd
         total_display=total_display,
     )
     if saved:
-        from emails import send_donation_alerts_for_row, send_donation_confirmation_for_row
+        try:
+            from emails import send_donation_alerts_for_row, send_donation_confirmation_for_row
 
-        send_donation_confirmation_for_row(saved)
-        send_donation_alerts_for_row(saved)
+            send_donation_confirmation_for_row(saved)
+            send_donation_alerts_for_row(saved)
+        except Exception:
+            import logging
+
+            logging.getLogger(__name__).exception(
+                "Post-donation emails failed for PayPal donation %s",
+                (saved or {}).get("id"),
+            )
 
     return CapturePayPalOrderResponse(order_id=payload.order_id, status=status, recorded=bool(saved))
 

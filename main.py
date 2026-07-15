@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 import os
 from pathlib import Path
 from typing import Literal
@@ -1022,12 +1024,9 @@ async def stripe_webhook(request: Request) -> dict[str, str]:
         utm = _utm_from_meta(meta)
         if utm:
             row["utm"] = utm
-        saved = insert_donation({k: v for k, v in row.items() if v is not None})
+        saved = insert_donation(_ensure_donation_org({k: v for k, v in row.items() if v is not None}))
         if saved:
-            from emails import send_donation_alerts_for_row, send_donation_confirmation_for_row
-
-            send_donation_confirmation_for_row(saved)
-            send_donation_alerts_for_row(saved)
+            _send_donation_emails_safe(saved)
 
     if event["type"] == "account.updated":
         from db import rest_patch
@@ -1140,6 +1139,35 @@ def get_donations(
     return DonationFeedResponse(donations=donations, has_more=has_more)
 
 
+
+def _ensure_donation_org(row: dict[str, Any]) -> dict[str, Any]:
+    """Backfill organization_id from campaign so the gift appears in the correct admin list."""
+    if row.get("organization_id") or not row.get("campaign_id"):
+        return row
+    campaign = rest_get_one(
+        "campaigns",
+        params={"id": f"eq.{row['campaign_id']}", "select": "organization_id"},
+    )
+    org_id = (campaign or {}).get("organization_id")
+    if org_id:
+        row = {**row, "organization_id": str(org_id)}
+    return row
+
+
+def _send_donation_emails_safe(saved: dict[str, Any]) -> None:
+    """Email failures must never mark a successful payment as unrecorded."""
+    try:
+        from emails import send_donation_alerts_for_row, send_donation_confirmation_for_row
+
+        send_donation_confirmation_for_row(saved)
+        send_donation_alerts_for_row(saved)
+    except Exception:
+        logging.getLogger(__name__).exception(
+            "Post-donation emails failed for donation %s",
+            saved.get("id"),
+        )
+
+
 @app.post("/donations/record", response_model=DonationFeedItem)
 def record_donation(payload: RecordDonationRequest) -> DonationFeedItem:
     from stripe_intents import retrieve_payment_intent
@@ -1155,13 +1183,10 @@ def record_donation(payload: RecordDonationRequest) -> DonationFeedItem:
     if payment_intent.status != "succeeded":
         raise HTTPException(status_code=400, detail="Payment has not succeeded yet")
 
-    row = _donation_row_from_intent(payment_intent, stripe_account=stripe_account)
+    row = _ensure_donation_org(_donation_row_from_intent(payment_intent, stripe_account=stripe_account))
     saved = insert_donation(row)
     if saved:
-        from emails import send_donation_alerts_for_row, send_donation_confirmation_for_row
-
-        send_donation_confirmation_for_row(saved)
-        send_donation_alerts_for_row(saved)
+        _send_donation_emails_safe(saved)
         return _feed_item_from_row(saved)
 
     existing = get_donation_by_payment_intent(payment_intent.id)
