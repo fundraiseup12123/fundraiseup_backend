@@ -465,59 +465,53 @@ def send_donation_confirmation_for_row(row: dict[str, Any]) -> bool:
         campaign_id=str(campaign_id) if campaign_id else None,
     )
 
+    # Portal CTAs only — never block confirmation on Auth user scanning.
     from urllib.parse import quote
-
-    from invite_service import find_user_id_by_email
 
     origin = resolve_frontend_url().rstrip("/")
     email_q = quote(email)
     portal_login_url = f"{origin}/donor-portal/signin?email={email_q}"
     portal_signup_url = f"{origin}/donor-portal/get-started?email={email_q}"
-    has_account = bool(find_user_id_by_email(email.lower()))
-    primary_cta_url = portal_login_url if has_account else portal_signup_url
-    secondary_cta_label = "Get started" if has_account else "Log in"
-    secondary_cta_url = portal_signup_url if has_account else portal_login_url
 
-    subject, html = compose_templated_email(
-        template_key="donation_confirmation",
-        organization_id=branding.get("organization_id") or row.get("organization_id"),
-        tokens={
-            "donor_name": donor_name,
-            "amount": _fmt_amount_token(row.get("amount", 0), str(row.get("currency", "USD"))),
-            "campaign_title": str(branding.get("title", "our campaign")),
-            "org_name": str(extras["organization_name"]),
-            "admin_name": "",
-            "donation_count": "",
-            "total_raised": "",
-        },
-        logo_url=extras["logo_url"],
-        primary_color=str(branding.get("primary_color", DEFAULT_PRIMARY_COLOR)),
-        organization_name=str(branding.get("title") or extras["organization_name"]),
-        banner_url=extras["banner_url"],
-        cta_url=primary_cta_url,
-        cta_label="Log in" if has_account else "Get started",
-        secondary_cta_label=secondary_cta_label,
-        secondary_cta_url=secondary_cta_url,
-        contact_email=extras["contact_email"],
-        fallback=donation_confirmation_email(
-            donor_name=donor_name,
-            amount=row.get("amount", 0),
-            currency=str(row.get("currency", "USD")),
-            frequency=str(row.get("frequency", "once")),
-            campaign_title=str(branding.get("title", "our campaign")),
+    try:
+        subject, html = compose_templated_email(
+            template_key="donation_confirmation",
+            organization_id=branding.get("organization_id") or row.get("organization_id"),
+            tokens={
+                "donor_name": donor_name,
+                "amount": _fmt_amount_token(row.get("amount", 0), str(row.get("currency", "USD"))),
+                "campaign_title": str(branding.get("title", "our campaign")),
+                "org_name": str(extras["organization_name"]),
+                "admin_name": "",
+                "donation_count": "",
+                "total_raised": "",
+            },
             logo_url=extras["logo_url"],
-            donate_url=str(branding.get("donate_url", resolve_frontend_url())),
             primary_color=str(branding.get("primary_color", DEFAULT_PRIMARY_COLOR)),
             organization_name=str(branding.get("title") or extras["organization_name"]),
             banner_url=extras["banner_url"],
+            cta_url=portal_signup_url,
+            cta_label="Get started",
+            secondary_cta_label="Log in",
+            secondary_cta_url=portal_login_url,
             contact_email=extras["contact_email"],
-            portal_login_url=portal_login_url,
-            portal_signup_url=portal_signup_url,
-            has_account=has_account,
-        ),
-    )
-
-    try:
+            fallback=donation_confirmation_email(
+                donor_name=donor_name,
+                amount=row.get("amount", 0),
+                currency=str(row.get("currency", "USD")),
+                frequency=str(row.get("frequency", "once")),
+                campaign_title=str(branding.get("title", "our campaign")),
+                logo_url=extras["logo_url"],
+                donate_url=str(branding.get("donate_url", resolve_frontend_url())),
+                primary_color=str(branding.get("primary_color", DEFAULT_PRIMARY_COLOR)),
+                organization_name=str(branding.get("title") or extras["organization_name"]),
+                banner_url=extras["banner_url"],
+                contact_email=extras["contact_email"],
+                portal_login_url=portal_login_url,
+                portal_signup_url=portal_signup_url,
+                has_account=False,
+            ),
+        )
         send_resend_email(to=email, subject=subject, html=html)
         log_email(
             recipient_email=email,
@@ -527,8 +521,8 @@ def send_donation_confirmation_for_row(row: dict[str, Any]) -> bool:
             donation_id=str(row["id"]) if row.get("id") else None,
         )
         return True
-    except RuntimeError as exc:
-        logger.error("Donation confirmation email failed for %s: %s", email, exc)
+    except Exception as exc:
+        logger.exception("Donation confirmation email failed for %s: %s", email, exc)
         return False
 
 

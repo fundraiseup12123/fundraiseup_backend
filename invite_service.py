@@ -58,8 +58,8 @@ def get_user_email_by_id(user_id: str) -> str | None:
 def find_user_id_by_email(email: str) -> str | None:
     """Return Auth user id only when the email matches exactly (case-insensitive).
 
-    GoTrue's list-users ``email`` query param is often ignored and returns an
-    unfiltered page — using ``users[0]`` caused every signup to look taken.
+    Prefer GoTrue ``filter`` (email/phone search). Fall back to a short page scan
+    with exact matching — never return ``users[0]`` without comparing email.
     """
     url = supabase_url()
     if not url or not _supabase_secret():
@@ -67,15 +67,41 @@ def find_user_id_by_email(email: str) -> str | None:
     target = email.strip().lower()
     if not target:
         return None
+
+    def _match(users: list[Any]) -> str | None:
+        for user in users:
+            if not isinstance(user, dict):
+                continue
+            if str(user.get("email") or "").strip().lower() == target:
+                user_id = str(user.get("id") or "").strip()
+                return user_id or None
+        return None
+
     try:
+        # Fast path: filter query (partial search — still require exact match).
+        response = httpx.get(
+            f"{url}/auth/v1/admin/users",
+            headers=_admin_headers(),
+            params={"page": 1, "per_page": 50, "filter": target},
+            timeout=8.0,
+        )
+        if response.status_code == 200:
+            payload = response.json()
+            users = payload.get("users") if isinstance(payload, dict) else payload
+            if isinstance(users, list):
+                matched = _match(users)
+                if matched:
+                    return matched
+
+        # Slow path: limited pages only (signup/login checks — not email sends).
         page = 1
         per_page = 200
-        while page <= 25:
+        while page <= 5:
             response = httpx.get(
                 f"{url}/auth/v1/admin/users",
                 headers=_admin_headers(),
                 params={"page": page, "per_page": per_page},
-                timeout=20.0,
+                timeout=8.0,
             )
             if response.status_code != 200:
                 return None
@@ -83,12 +109,9 @@ def find_user_id_by_email(email: str) -> str | None:
             users = payload.get("users") if isinstance(payload, dict) else payload
             if not isinstance(users, list) or not users:
                 return None
-            for user in users:
-                if not isinstance(user, dict):
-                    continue
-                if str(user.get("email") or "").strip().lower() == target:
-                    user_id = str(user.get("id") or "").strip()
-                    return user_id or None
+            matched = _match(users)
+            if matched:
+                return matched
             if len(users) < per_page:
                 return None
             page += 1
