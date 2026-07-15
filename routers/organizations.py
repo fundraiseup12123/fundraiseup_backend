@@ -48,6 +48,8 @@ def _default_campaign_content(name: str) -> dict[str, Any]:
                 if root.get("recent_donations_sort") in {"recent", "descending"}
                 else "recent"
             ),
+            "ga4_measurement_id": root.get("ga4_measurement_id") or None,
+            "gtm_container_id": root.get("gtm_container_id") or None,
         }
     return {
         "title": name,
@@ -55,6 +57,8 @@ def _default_campaign_content(name: str) -> dict[str, Any]:
         "body_html": "<p>Campaign content goes here.</p>",
         "primary_color": "#3872DC",
         "show_donor_country": False,
+        "ga4_measurement_id": None,
+        "gtm_container_id": None,
         "recent_donations_sort": "recent",
     }
 
@@ -191,6 +195,19 @@ class CampaignContentPayload(BaseModel):
     popup_view_json: str | None = None
     show_donor_country: bool = False
     recent_donations_sort: str = Field(default="recent", pattern="^(recent|descending)$")
+    ga4_measurement_id: str | None = None
+    gtm_container_id: str | None = None
+
+    def normalize_analytics_ids(self) -> "CampaignContentPayload":
+        ga4 = (self.ga4_measurement_id or "").strip().upper() or None
+        gtm = (self.gtm_container_id or "").strip().upper() or None
+        if ga4 and not ga4.startswith("G-"):
+            ga4 = None
+        if gtm and not gtm.startswith("GTM-"):
+            gtm = None
+        self.ga4_measurement_id = ga4
+        self.gtm_container_id = gtm
+        return self
 
 
 class CreateCampaignRequest(BaseModel):
@@ -514,7 +531,7 @@ def update_campaign(
         if content_data.get("hero_url") and (content_data.get("hero_width") != 1248 or content_data.get("hero_height") != 702):
             raise HTTPException(status_code=400, detail="Hero image must be 1248×702 pixels")
         existing = rest_get_one("campaign_content", params={"campaign_id": f"eq.{campaign_id}", "select": "campaign_id"})
-        feed_keys = ("show_donor_country", "recent_donations_sort")
+        feed_keys = ("show_donor_country", "recent_donations_sort", "ga4_measurement_id", "gtm_container_id")
         if existing:
             updated = rest_patch("campaign_content", content_data, match={"campaign_id": campaign_id})
             if not updated and any(k in content_data for k in feed_keys):

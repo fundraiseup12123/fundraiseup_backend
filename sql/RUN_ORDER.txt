@@ -29,3 +29,5 @@
 --   016_nowpayments_checkouts.sql
 --   donations.sql                        (included in 000)
 --   seed_donations.sql                   (optional sample data)
+
+--   017_campaign_analytics_ids.sql
