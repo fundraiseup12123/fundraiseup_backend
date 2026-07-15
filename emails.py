@@ -252,6 +252,9 @@ def compose_templated_email(
     cta_url: str | None,
     contact_email: str | None,
     unsubscribe_url: str | None = None,
+    cta_label: str | None = None,
+    secondary_cta_label: str | None = None,
+    secondary_cta_url: str | None = None,
     fallback: tuple[str, str] | None = None,
 ) -> tuple[str, str]:
     """Use org override when present; otherwise return provided fallback builders."""
@@ -265,6 +268,9 @@ def compose_templated_email(
             organization_name=organization_name,
             banner_url=banner_url,
             cta_url=cta_url,
+            cta_label=cta_label,
+            secondary_cta_label=secondary_cta_label,
+            secondary_cta_url=secondary_cta_url,
             contact_email=contact_email,
             unsubscribe_url=unsubscribe_url,
         )
@@ -279,6 +285,9 @@ def compose_templated_email(
         organization_name=organization_name,
         banner_url=banner_url,
         cta_url=cta_url,
+        cta_label=cta_label,
+        secondary_cta_label=secondary_cta_label,
+        secondary_cta_url=secondary_cta_url,
         contact_email=contact_email,
         unsubscribe_url=unsubscribe_url,
     )
@@ -456,6 +465,19 @@ def send_donation_confirmation_for_row(row: dict[str, Any]) -> bool:
         campaign_id=str(campaign_id) if campaign_id else None,
     )
 
+    from urllib.parse import quote
+
+    from invite_service import find_user_id_by_email
+
+    origin = resolve_frontend_url().rstrip("/")
+    email_q = quote(email)
+    portal_login_url = f"{origin}/donor-portal/signin?email={email_q}"
+    portal_signup_url = f"{origin}/donor-portal/get-started?email={email_q}"
+    has_account = bool(find_user_id_by_email(email.lower()))
+    primary_cta_url = portal_login_url if has_account else portal_signup_url
+    secondary_cta_label = "Get started" if has_account else "Log in"
+    secondary_cta_url = portal_signup_url if has_account else portal_login_url
+
     subject, html = compose_templated_email(
         template_key="donation_confirmation",
         organization_id=branding.get("organization_id") or row.get("organization_id"),
@@ -472,7 +494,10 @@ def send_donation_confirmation_for_row(row: dict[str, Any]) -> bool:
         primary_color=str(branding.get("primary_color", DEFAULT_PRIMARY_COLOR)),
         organization_name=str(branding.get("title") or extras["organization_name"]),
         banner_url=extras["banner_url"],
-        cta_url=None,
+        cta_url=primary_cta_url,
+        cta_label="Log in" if has_account else "Get started",
+        secondary_cta_label=secondary_cta_label,
+        secondary_cta_url=secondary_cta_url,
         contact_email=extras["contact_email"],
         fallback=donation_confirmation_email(
             donor_name=donor_name,
@@ -486,6 +511,9 @@ def send_donation_confirmation_for_row(row: dict[str, Any]) -> bool:
             organization_name=str(branding.get("title") or extras["organization_name"]),
             banner_url=extras["banner_url"],
             contact_email=extras["contact_email"],
+            portal_login_url=portal_login_url,
+            portal_signup_url=portal_signup_url,
+            has_account=has_account,
         ),
     )
 

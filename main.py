@@ -645,6 +645,22 @@ def create_checkout(payload: CreateCheckoutRequest) -> CheckoutResponse:
                 subscription,
                 stripe_account=stripe_account,
             )
+            # Persist IDs onto the first invoice PI metadata when available (webhook /record).
+            try:
+                if payment_intent_id:
+                    from stripe_intents import stripe_request_kwargs as _srk
+
+                    stripe.PaymentIntent.modify(
+                        payment_intent_id,
+                        metadata={
+                            **metadata,
+                            "subscription_id": subscription.id,
+                            "stripe_customer_id": customer.id,
+                        },
+                        **_srk(stripe_account),
+                    )
+            except Exception:
+                pass
 
             return _build_checkout_response(
                 client_secret=client_secret,
@@ -845,6 +861,34 @@ def _donation_row_from_intent(
         processing_fee = estimate_processing_fee(base_amount, display_currency)
         payout_amount = max(0.0, round(base_amount - processing_fee, 2))
 
+    customer_id = None
+    if payment_intent.customer:
+        customer_id = (
+            payment_intent.customer
+            if isinstance(payment_intent.customer, str)
+            else payment_intent.customer.id
+        )
+
+    subscription_id = None
+    invoice_ref = payment_intent.invoice
+    if invoice_ref:
+        try:
+            from stripe_intents import stripe_request_kwargs
+
+            invoice_id = invoice_ref if isinstance(invoice_ref, str) else invoice_ref.id
+            invoice = stripe.Invoice.retrieve(
+                invoice_id,
+                expand=["subscription"],
+                **stripe_request_kwargs(stripe_account),
+            )
+            sub = invoice.subscription
+            if isinstance(sub, str):
+                subscription_id = sub
+            elif sub is not None:
+                subscription_id = sub.id
+        except Exception:
+            subscription_id = None
+
     row: dict[str, str | float | None | dict[str, str] | bool] = {
         "stripe_payment_intent_id": payment_intent.id,
         "first_name": meta.get("first_name", "Anonymous"),
@@ -864,7 +908,11 @@ def _donation_row_from_intent(
         "platform_fee": 0,
         "processing_fee": processing_fee,
         "payout_amount": payout_amount,
+        "stripe_customer_id": customer_id,
+        "stripe_subscription_id": subscription_id,
     }
+    if stripe_account:
+        row["stripe_account_id"] = stripe_account
     utm = _utm_from_meta(meta)
     if utm:
         row["utm"] = utm
@@ -886,6 +934,7 @@ from routers.nowpayments import router as nowpayments_router
 from routers.payment_accounts import router as payment_accounts_router
 from routers.emails import router as emails_router
 from routers.uploads import router as uploads_router
+from routers.donor_portal import router as donor_portal_router
 
 app.include_router(super_admin_router)
 app.include_router(payment_accounts_router)
@@ -899,6 +948,7 @@ app.include_router(paypal_connect_router)
 app.include_router(nowpayments_router)
 app.include_router(emails_router)
 app.include_router(uploads_router)
+app.include_router(donor_portal_router)
 
 
 @app.on_event("startup")
@@ -962,6 +1012,8 @@ async def stripe_webhook(request: Request) -> dict[str, str]:
             "organization_id": meta.get("organization_id"),
             "campaign_id": meta.get("campaign_id"),
             "stripe_account_id": pi.get("on_behalf_of") or (pi.get("transfer_data") or {}).get("destination"),
+            "stripe_customer_id": pi.get("customer") if isinstance(pi.get("customer"), str) else None,
+            "stripe_subscription_id": meta.get("subscription_id"),
             "fee_covered": cover_fees,
             "platform_fee": 0,
             "processing_fee": processing_fee,

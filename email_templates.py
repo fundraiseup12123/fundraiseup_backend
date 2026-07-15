@@ -213,6 +213,9 @@ def donation_confirmation_email(
     organization_name: str | None = None,
     banner_url: str | None = None,
     contact_email: str | None = None,
+    portal_login_url: str | None = None,
+    portal_signup_url: str | None = None,
+    has_account: bool = False,
 ) -> tuple[str, str]:
     amount_label = _fmt_amount(amount, currency)
     is_monthly = frequency == "monthly"
@@ -227,6 +230,14 @@ def donation_confirmation_email(
         else ""
     )
 
+    portal_note = ""
+    if portal_login_url or portal_signup_url:
+        portal_note = (
+            "<p style='margin:16px 0 0;'>"
+            "Manage your gifts, receipts, and recurring plans in the FundraiseUp Donor Portal."
+            "</p>"
+        )
+
     body = f"""
       <p style="margin:0 0 12px;">Greetings,</p>
       <p style="margin:0 0 12px;">
@@ -236,15 +247,29 @@ def donation_confirmation_email(
       </p>
       <p style="margin:0 0 12px;">This email confirms your donation was processed successfully.</p>
       {recurring_note}
+      {portal_note}
       <p style="margin:16px 0 0;">— Your friends at {escape(name)}</p>
     """
+
+    if has_account and portal_login_url:
+        cta_label, cta_url = "Log in", portal_login_url
+        secondary_cta_label = "Get started" if portal_signup_url else None
+        secondary_cta_url = portal_signup_url
+    elif portal_signup_url:
+        cta_label, cta_url = "Get started", portal_signup_url
+        secondary_cta_label = "Log in" if portal_login_url else None
+        secondary_cta_url = portal_login_url
+    else:
+        cta_label = cta_url = secondary_cta_label = secondary_cta_url = None
 
     html = branded_email_html(
         preheader=preheader,
         headline=f"Thank you for supporting {name}",
         body_html=body,
-        cta_label=None,
-        cta_url=None,
+        cta_label=cta_label,
+        cta_url=cta_url,
+        secondary_cta_label=secondary_cta_label,
+        secondary_cta_url=secondary_cta_url,
         logo_url=logo_url,
         organization_name=name,
         primary_color=primary_color,
@@ -539,11 +564,12 @@ def default_editable_template(template_key: str) -> dict[str, str | None]:
                 "<p>Thank you for your generous donation of <strong>{{amount}}</strong> "
                 "to <strong>{{campaign_title}}</strong>.</p>"
                 "<p>This email confirms your donation was processed successfully.</p>"
+                "<p>Manage your gifts, receipts, and recurring plans in the FundraiseUp Donor Portal.</p>"
                 "<p>— Your friends at {{campaign_title}}</p>"
             ),
             "banner_url": DEFAULT_EMAIL_BANNER_URL,
             "logo_url": None,
-            "cta_label": None,
+            "cta_label": "Get started",
             "is_custom": False,
         }
     if key == "donation_alert":
@@ -638,6 +664,9 @@ def render_editable_email(
     organization_name: str | None = None,
     banner_url: str | None = None,
     cta_url: str | None = None,
+    cta_label: str | None = None,
+    secondary_cta_label: str | None = None,
+    secondary_cta_url: str | None = None,
     contact_email: str | None = None,
     unsubscribe_url: str | None = None,
 ) -> tuple[str, str]:
@@ -648,13 +677,18 @@ def render_editable_email(
     body = apply_email_tokens(str(template.get("body_html") or ""), tokens, escape_html=True)
     resolved_banner = (template.get("banner_url") or banner_url or DEFAULT_EMAIL_BANNER_URL or None)
     resolved_logo = (template.get("logo_url") or logo_url or "").strip() or logo_url
+    resolved_cta_label = cta_label if cta_label is not None else (template.get("cta_label") or None)
+    if not cta_url:
+        resolved_cta_label = None
 
     html = branded_email_html(
         preheader=subject,
         headline=headline,
         body_html=body,
-        cta_label=None,
-        cta_url=None,
+        cta_label=str(resolved_cta_label) if resolved_cta_label else None,
+        cta_url=cta_url,
+        secondary_cta_label=secondary_cta_label,
+        secondary_cta_url=secondary_cta_url,
         logo_url=resolved_logo,
         organization_name=organization_name or tokens.get("org_name") or tokens.get("campaign_title"),
         primary_color=primary_color,
@@ -664,3 +698,34 @@ def render_editable_email(
         campaigns=None,
     )
     return subject, html
+
+def donor_otp_email(*, otp_code: str, full_name: str = "") -> tuple[str, str]:
+    """FundraiseUp-branded OTP email for donor portal Get started."""
+    from email_branding import DEFAULT_EMAIL_LOGO_URL, DEFAULT_PRIMARY_COLOR
+
+    name = escape((full_name or "there").split(" ")[0] or "there")
+    code = escape(otp_code)
+    body = f"""
+      <p style="margin:0 0 16px;font-size:16px;line-height:1.6;color:#334155;">
+        Hi {name}, use this one-time code to finish creating your FundraiseUp Donor Portal account:
+      </p>
+      <p style="margin:24px 0;text-align:center;">
+        <span style="display:inline-block;letter-spacing:0.28em;font-size:28px;font-weight:700;color:#0f172a;background:#f1f5f9;padding:14px 22px;border-radius:10px;">
+          {code}
+        </span>
+      </p>
+      <p style="margin:0;font-size:14px;line-height:1.5;color:#64748b;">
+        This code expires in 15 minutes. If you did not request it, you can ignore this email.
+      </p>
+    """
+    html = branded_email_html(
+        preheader="Your FundraiseUp verification code",
+        headline="Verify your email",
+        body_html=body,
+        logo_url=DEFAULT_EMAIL_LOGO_URL,
+        brand_name="FundraiseUp",
+        organization_name="FundraiseUp",
+        primary_color=DEFAULT_PRIMARY_COLOR,
+        banner_url=None,
+    )
+    return "Your FundraiseUp verification code", html
