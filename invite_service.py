@@ -56,25 +56,46 @@ def get_user_email_by_id(user_id: str) -> str | None:
 
 
 def find_user_id_by_email(email: str) -> str | None:
+    """Return Auth user id only when the email matches exactly (case-insensitive).
+
+    GoTrue's list-users ``email`` query param is often ignored and returns an
+    unfiltered page — using ``users[0]`` caused every signup to look taken.
+    """
     url = supabase_url()
     if not url or not _supabase_secret():
         return None
+    target = email.strip().lower()
+    if not target:
+        return None
     try:
-        response = httpx.get(
-            f"{url}/auth/v1/admin/users",
-            headers=_admin_headers(),
-            params={"email": email.lower()},
-            timeout=20.0,
-        )
-        if response.status_code != 200:
-            return None
-        payload = response.json()
-        users = payload.get("users") if isinstance(payload, dict) else payload
-        if isinstance(users, list) and users:
-            return str(users[0].get("id") or "")
+        page = 1
+        per_page = 200
+        while page <= 25:
+            response = httpx.get(
+                f"{url}/auth/v1/admin/users",
+                headers=_admin_headers(),
+                params={"page": page, "per_page": per_page},
+                timeout=20.0,
+            )
+            if response.status_code != 200:
+                return None
+            payload = response.json()
+            users = payload.get("users") if isinstance(payload, dict) else payload
+            if not isinstance(users, list) or not users:
+                return None
+            for user in users:
+                if not isinstance(user, dict):
+                    continue
+                if str(user.get("email") or "").strip().lower() == target:
+                    user_id = str(user.get("id") or "").strip()
+                    return user_id or None
+            if len(users) < per_page:
+                return None
+            page += 1
     except httpx.HTTPError as exc:
         logger.warning("Supabase user lookup failed for %s: %s", email, exc)
     return None
+
 
 
 def create_supabase_user(
