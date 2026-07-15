@@ -864,30 +864,39 @@ def _donation_row_from_intent(
         payout_amount = max(0.0, round(base_amount - processing_fee, 2))
 
     customer_id = None
-    if payment_intent.customer:
-        customer_id = (
-            payment_intent.customer
-            if isinstance(payment_intent.customer, str)
-            else payment_intent.customer.id
-        )
+    try:
+        customer_ref = payment_intent["customer"]
+    except (KeyError, TypeError, AttributeError):
+        customer_ref = None
+    if customer_ref:
+        customer_id = customer_ref if isinstance(customer_ref, str) else getattr(customer_ref, "id", None)
 
     subscription_id = None
-    invoice_ref = payment_intent.invoice
+    # One-time card PaymentIntents often omit `invoice`. StripeObject.__getattr__
+    # raises KeyError for missing keys — never use attribute access here.
+    try:
+        invoice_ref = payment_intent["invoice"]
+    except (KeyError, TypeError, AttributeError):
+        invoice_ref = None
     if invoice_ref:
         try:
             from stripe_intents import stripe_request_kwargs
 
-            invoice_id = invoice_ref if isinstance(invoice_ref, str) else invoice_ref.id
-            invoice = stripe.Invoice.retrieve(
-                invoice_id,
-                expand=["subscription"],
-                **stripe_request_kwargs(stripe_account),
-            )
-            sub = invoice.subscription
-            if isinstance(sub, str):
-                subscription_id = sub
-            elif sub is not None:
-                subscription_id = sub.id
+            invoice_id = invoice_ref if isinstance(invoice_ref, str) else getattr(invoice_ref, "id", None)
+            if invoice_id:
+                invoice = stripe.Invoice.retrieve(
+                    str(invoice_id),
+                    expand=["subscription"],
+                    **stripe_request_kwargs(stripe_account),
+                )
+                try:
+                    sub = invoice["subscription"]
+                except (KeyError, TypeError, AttributeError):
+                    sub = None
+                if isinstance(sub, str):
+                    subscription_id = sub
+                elif sub is not None:
+                    subscription_id = getattr(sub, "id", None)
         except Exception:
             subscription_id = None
 
