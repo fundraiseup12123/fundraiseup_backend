@@ -825,20 +825,35 @@ def _metadata_from_payment_intent(
     if meta.get("first_name"):
         return meta
 
-    invoice_id = payment_intent.invoice
+    try:
+        invoice_id = payment_intent["invoice"]
+    except (KeyError, TypeError, AttributeError):
+        invoice_id = None
     if not invoice_id:
         return meta
 
-    invoice_id_str = invoice_id if isinstance(invoice_id, str) else invoice_id.id
-    invoice = stripe.Invoice.retrieve(
-        invoice_id_str,
-        expand=["subscription"],
-        **stripe_request_kwargs(stripe_account),
-    )
-    subscription = invoice.subscription
-    if subscription and not isinstance(subscription, str):
-        sub_meta = subscription.metadata.to_dict() if subscription.metadata else {}
-        return {**meta, **sub_meta}
+    try:
+        invoice_id_str = invoice_id if isinstance(invoice_id, str) else getattr(invoice_id, "id", None)
+        if not invoice_id_str:
+            return meta
+        invoice = stripe.Invoice.retrieve(
+            str(invoice_id_str),
+            expand=["subscription"],
+            **stripe_request_kwargs(stripe_account),
+        )
+        try:
+            subscription = invoice["subscription"]
+        except (KeyError, TypeError, AttributeError):
+            subscription = None
+        if subscription and not isinstance(subscription, str):
+            sub_meta = (
+                subscription.metadata.to_dict()
+                if getattr(subscription, "metadata", None)
+                else {}
+            )
+            return {**meta, **sub_meta}
+    except Exception:
+        return meta
     return meta
 
 
