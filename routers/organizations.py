@@ -524,7 +524,7 @@ def update_campaign(
         _ensure_campaign_slug_subdomain(campaign_id, resolved_slug)
 
     if payload.content:
-        content_data = payload.content.model_dump()
+        content_data = payload.content.normalize_analytics_ids().model_dump()
         # Omit unset pop-up branding so homepage-only saves do not wipe it.
         if content_data.get("popup_view_json") is None:
             content_data.pop("popup_view_json", None)
