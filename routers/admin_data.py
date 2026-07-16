@@ -909,25 +909,33 @@ def export_donations_csv(
 
 
 def _ga4_date_range(preset: str, date_from: str | None, date_to: str | None) -> tuple[str, str]:
-    """Return GA4 date strings (YYYY-MM-DD)."""
-    now = datetime.now(timezone.utc).date()
+    """Return GA4 date strings.
+
+    Prefer relative dates (today / NdagsAgo) so ranges follow the GA4 property
+    timezone — absolute UTC dates often make "Today" look empty for users
+    outside UTC.
+    """
     if date_from and date_to:
         return date_from[:10], date_to[:10]
     if preset == "today":
-        return now.isoformat(), now.isoformat()
+        return "today", "today"
     if preset == "yesterday":
-        day = now - timedelta(days=1)
-        return day.isoformat(), day.isoformat()
+        return "yesterday", "yesterday"
+    if preset == "3d":
+        return "2daysAgo", "today"
     if preset == "7d":
-        return (now - timedelta(days=6)).isoformat(), now.isoformat()
+        return "6daysAgo", "today"
     if preset == "30d":
-        return (now - timedelta(days=29)).isoformat(), now.isoformat()
+        return "29daysAgo", "today"
     if preset == "90d":
-        return (now - timedelta(days=89)).isoformat(), now.isoformat()
+        return "89daysAgo", "today"
     if preset == "month":
-        return now.replace(day=1).isoformat(), now.isoformat()
-    # default 28 days
-    return (now - timedelta(days=27)).isoformat(), now.isoformat()
+        # First day of current month in property TZ isn't available as a relative
+        # token — use UTC calendar month as a close fallback.
+        now = datetime.now(timezone.utc).date()
+        return now.replace(day=1).isoformat(), "today"
+    # default ~28 days
+    return "27daysAgo", "today"
 
 
 @router.get("/orgs/{org_id}/google-analytics")
@@ -995,7 +1003,7 @@ def admin_google_analytics(
             }
         )
 
-    from ga4_client import fetch_dashboard, ga4_configured, get_property_id
+    from ga4_client import fetch_dashboard, fetch_realtime_snapshot, ga4_configured, get_property_id
 
     configured = ga4_configured()
     start, end = _ga4_date_range(date_preset, date_from, date_to)
@@ -1072,6 +1080,21 @@ def admin_google_analytics(
         payload["property_id"] = resolved_property_id or ""
         payload["selected_campaign_id"] = selected_id
         payload["error"] = None
+
+        # Today often lags in standard reports — attach realtime (~30 min) so visits appear.
+        if date_preset == "today":
+            payload["realtime"] = fetch_realtime_snapshot(property_id=resolved_property_id)
+            totals = payload.get("totals") or {}
+            if not float(totals.get("users") or 0) and not float(totals.get("sessions") or 0):
+                payload["today_note"] = (
+                    "Standard Today report is still empty (GA4 often delays). "
+                    "Realtime below shows the last ~30 minutes."
+                )
+            else:
+                payload["today_note"] = None
+        else:
+            payload["realtime"] = None
+            payload["today_note"] = None
     except Exception as exc:
         payload.update({**empty_report, "error": str(exc)})
     return payload

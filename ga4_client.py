@@ -127,6 +127,81 @@ def run_report(
     return response.json()
 
 
+def run_realtime_report(
+    *,
+    property_id: str | None = None,
+    metrics: list[str],
+    dimensions: list[str] | None = None,
+    limit: int = 50,
+) -> dict[str, Any]:
+    """GA4 Realtime API — last ~30 minutes (shows visits before daily reports catch up)."""
+    prop = (property_id or _property_id() or "").replace("properties/", "").strip()
+    if not prop:
+        raise RuntimeError("GA4_PROPERTY_ID is not set")
+
+    body: dict[str, Any] = {
+        "metrics": [{"name": name} for name in metrics],
+        "limit": str(limit),
+    }
+    if dimensions:
+        body["dimensions"] = [{"name": name} for name in dimensions]
+
+    token = _access_token()
+    url = f"{GA4_DATA_BASE}/properties/{prop}:runRealtimeReport"
+    with httpx.Client(timeout=30.0) as client:
+        response = client.post(
+            url,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+            },
+            json=body,
+        )
+    if response.status_code >= 400:
+        detail = response.text
+        try:
+            payload = response.json()
+            detail = payload.get("error", {}).get("message") or detail
+        except Exception:
+            pass
+        raise RuntimeError(f"GA4 Realtime API error ({response.status_code}): {detail}")
+    return response.json()
+
+
+def fetch_realtime_snapshot(*, property_id: str | None = None) -> dict[str, Any]:
+    """Active users + page views in the last ~30 minutes."""
+    try:
+        summary = run_realtime_report(
+            property_id=property_id,
+            metrics=["activeUsers", "screenPageViews", "eventCount"],
+            limit=1,
+        )
+        rows = parse_rows(summary)
+        totals = rows[0] if rows else {}
+        # Realtime totals sometimes land in metricHeaders only with empty rows
+        if not totals and summary.get("totals"):
+            headers = [h.get("name", "") for h in summary.get("metricHeaders") or []]
+            values = (summary.get("totals") or [{}])[0].get("metricValues") or []
+            for index, name in enumerate(headers):
+                raw = (values[index] or {}).get("value") if index < len(values) else "0"
+                try:
+                    totals[name] = float(raw or 0)
+                except (TypeError, ValueError):
+                    totals[name] = 0.0
+        return {
+            "active_users": totals.get("activeUsers", 0),
+            "page_views": totals.get("screenPageViews", 0),
+            "events": totals.get("eventCount", 0),
+        }
+    except Exception as exc:
+        return {
+            "active_users": 0,
+            "page_views": 0,
+            "events": 0,
+            "error": str(exc),
+        }
+
+
 def _metric_map(row: dict[str, Any], metric_headers: list[str]) -> dict[str, float]:
     values = row.get("metricValues") or []
     out: dict[str, float] = {}
