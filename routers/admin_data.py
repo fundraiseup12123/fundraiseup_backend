@@ -906,3 +906,166 @@ def export_donations_csv(
             f"{d.get('id')},{d.get('first_name')},{d.get('last_name')},{d.get('email','')},{d.get('amount')},{d.get('currency')},{d.get('frequency')},{d.get('status')},{d.get('created_at')}"
         )
     return {"csv": "\n".join(lines)}
+
+
+def _ga4_date_range(preset: str, date_from: str | None, date_to: str | None) -> tuple[str, str]:
+    """Return GA4 date strings (YYYY-MM-DD)."""
+    now = datetime.now(timezone.utc).date()
+    if date_from and date_to:
+        return date_from[:10], date_to[:10]
+    if preset == "today":
+        return now.isoformat(), now.isoformat()
+    if preset == "yesterday":
+        day = now - timedelta(days=1)
+        return day.isoformat(), day.isoformat()
+    if preset == "7d":
+        return (now - timedelta(days=6)).isoformat(), now.isoformat()
+    if preset == "30d":
+        return (now - timedelta(days=29)).isoformat(), now.isoformat()
+    if preset == "90d":
+        return (now - timedelta(days=89)).isoformat(), now.isoformat()
+    if preset == "month":
+        return now.replace(day=1).isoformat(), now.isoformat()
+    # default 28 days
+    return (now - timedelta(days=27)).isoformat(), now.isoformat()
+
+
+@router.get("/orgs/{org_id}/google-analytics")
+def admin_google_analytics(
+    org_id: str,
+    user: Annotated[AuthUser, Depends(require_auth)],
+    date_preset: str = Query("30d"),
+    date_from: str | None = Query(None),
+    date_to: str | None = Query(None),
+    campaign_id: str | None = Query(None),
+    property_id: str | None = Query(None),
+) -> dict[str, Any]:
+    """Fetch Google Analytics 4 reports for the admin portal."""
+    require_org_access(org_id, user, min_role="member")
+
+    campaigns = rest_get(
+        "campaigns",
+        params={
+            "organization_id": f"eq.{org_id}",
+            "select": "id,title,slug",
+            "order": "created_at.desc",
+            "limit": "200",
+        },
+    )
+    campaign_ids = [str(c["id"]) for c in campaigns if c.get("id")]
+    content_by_id: dict[str, dict[str, Any]] = {}
+    if campaign_ids:
+        contents = rest_get(
+            "campaign_content",
+            params={
+                "campaign_id": f"in.({','.join(campaign_ids)})",
+                "select": "campaign_id,ga4_measurement_id,gtm_container_id,ga4_property_id",
+                "limit": "200",
+            },
+        )
+        content_by_id = {
+            str(row.get("campaign_id")): row for row in contents if row.get("campaign_id")
+        }
+
+    campaign_options = []
+    for campaign in campaigns:
+        cid = str(campaign.get("id") or "")
+        content = content_by_id.get(cid) or {}
+        campaign_options.append(
+            {
+                "id": cid,
+                "title": campaign.get("title") or "Campaign",
+                "slug": campaign.get("slug") or "",
+                "ga4_measurement_id": content.get("ga4_measurement_id") or "",
+                "gtm_container_id": content.get("gtm_container_id") or "",
+                "ga4_property_id": str(content.get("ga4_property_id") or "").strip(),
+            }
+        )
+
+    from ga4_client import fetch_dashboard, ga4_configured, get_property_id
+
+    configured = ga4_configured()
+    start, end = _ga4_date_range(date_preset, date_from, date_to)
+
+    path_contains = None
+    selected_campaign = None
+    resolved_property_id = (property_id or "").strip().replace("properties/", "") or None
+    if campaign_id:
+        selected_campaign = next((c for c in campaign_options if c["id"] == campaign_id), None)
+        if selected_campaign and selected_campaign.get("slug"):
+            path_contains = str(selected_campaign["slug"])
+        # Prefer the property ID admins saved on the campaign
+        if selected_campaign and selected_campaign.get("ga4_property_id"):
+            resolved_property_id = str(selected_campaign["ga4_property_id"])
+
+    if not resolved_property_id:
+        resolved_property_id = get_property_id()
+
+    # If no campaign selected but only one campaign has a property ID, use it
+    if not campaign_id and not resolved_property_id:
+        with_prop = [c for c in campaign_options if c.get("ga4_property_id")]
+        if len(with_prop) == 1:
+            resolved_property_id = with_prop[0]["ga4_property_id"]
+
+    can_fetch = bool(configured and resolved_property_id)
+
+    payload: dict[str, Any] = {
+        "configured": can_fetch,
+        "service_account_ready": configured,
+        "property_id": resolved_property_id or "",
+        "date_preset": date_preset,
+        "date_from": start,
+        "date_to": end,
+        "campaigns": campaign_options,
+        "selected_campaign_id": campaign_id or "",
+        "setup": {
+            "needs_service_account": not configured,
+            "needs_property_id": configured and not resolved_property_id,
+            "hint": (
+                "1) Set GA4_SERVICE_ACCOUNT_JSON (or GA4_SERVICE_ACCOUNT_FILE) on the backend and "
+                "grant that service account Viewer on each GA4 property. "
+                "2) On each campaign Content tab, save GA4 Measurement ID (G-…) for tracking and "
+                "GA4 Property ID (numbers only) for this reporting page."
+            ),
+        },
+    }
+
+    if not can_fetch:
+        payload.update(
+            {
+                "totals": {},
+                "timeseries": [],
+                "top_pages": [],
+                "sources": [],
+                "devices": [],
+                "countries": [],
+                "events": [],
+                "error": None,
+            }
+        )
+        return payload
+
+    try:
+        report = fetch_dashboard(
+            date_from=start,
+            date_to=end,
+            property_id=resolved_property_id,
+            path_contains=path_contains,
+        )
+        payload.update(report)
+        payload["configured"] = True
+        payload["error"] = None
+    except Exception as exc:
+        payload.update(
+            {
+                "totals": {},
+                "timeseries": [],
+                "top_pages": [],
+                "sources": [],
+                "devices": [],
+                "countries": [],
+                "events": [],
+                "error": str(exc),
+            }
+        )
+    return payload

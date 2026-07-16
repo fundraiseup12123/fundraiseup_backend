@@ -5,3 +5,8 @@ __pycache__/
 venv/
 *.egg-info/
 .pytest_cache/
+
+ga4-service-account.json
+*-service-account.json
+steady-datum*.json
+
