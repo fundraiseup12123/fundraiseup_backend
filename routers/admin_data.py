@@ -939,8 +939,9 @@ def admin_google_analytics(
     date_to: str | None = Query(None),
     campaign_id: str | None = Query(None),
     property_id: str | None = Query(None),
+    bootstrap: bool = Query(False),
 ) -> dict[str, Any]:
-    """Fetch Google Analytics 4 reports for the admin portal."""
+    """Fetch GA4 reports scoped to one campaign Property ID (never unscoped 'all')."""
     require_org_access(org_id, user, min_role="member")
 
     # campaigns.name (not title) — wrong columns make PostgREST return []
@@ -999,36 +1000,43 @@ def admin_google_analytics(
     configured = ga4_configured()
     start, end = _ga4_date_range(date_preset, date_from, date_to)
 
-    path_contains = None
+    # Always lock to one campaign — never return unscoped whole-property data first.
+    with_prop = [c for c in campaign_options if c.get("ga4_property_id")]
     selected_campaign = None
-    resolved_property_id = (property_id or "").strip().replace("properties/", "") or None
     if campaign_id:
         selected_campaign = next((c for c in campaign_options if c["id"] == campaign_id), None)
-        if selected_campaign and selected_campaign.get("slug"):
-            path_contains = str(selected_campaign["slug"])
-        # Prefer the property ID admins saved on the campaign
-        if selected_campaign and selected_campaign.get("ga4_property_id"):
-            resolved_property_id = str(selected_campaign["ga4_property_id"])
+    if not selected_campaign and with_prop:
+        selected_campaign = with_prop[0]
+    if not selected_campaign and campaign_options:
+        selected_campaign = campaign_options[0]
 
-    # "All" (or missing query prop): use first campaign Property ID, then env default
-    if not resolved_property_id:
-        with_prop = [c for c in campaign_options if c.get("ga4_property_id")]
-        if with_prop:
-            resolved_property_id = str(with_prop[0]["ga4_property_id"])
+    resolved_property_id = (property_id or "").strip().replace("properties/", "") or None
+    if selected_campaign and selected_campaign.get("ga4_property_id"):
+        resolved_property_id = str(selected_campaign["ga4_property_id"])
     if not resolved_property_id:
         resolved_property_id = get_property_id()
 
-    can_fetch = bool(configured and resolved_property_id)
+    selected_id = str(selected_campaign["id"]) if selected_campaign else ""
+    empty_report = {
+        "totals": {},
+        "timeseries": [],
+        "top_pages": [],
+        "sources": [],
+        "devices": [],
+        "countries": [],
+        "events": [],
+        "error": None,
+    }
 
     payload: dict[str, Any] = {
-        "configured": can_fetch,
+        "configured": False,
         "service_account_ready": configured,
         "property_id": resolved_property_id or "",
         "date_preset": date_preset,
         "date_from": start,
         "date_to": end,
         "campaigns": campaign_options,
-        "selected_campaign_id": campaign_id or "",
+        "selected_campaign_id": selected_id,
         "setup": {
             "needs_service_account": not configured,
             "needs_property_id": configured and not resolved_property_id,
@@ -1039,44 +1047,31 @@ def admin_google_analytics(
                 "GA4 Property ID (numbers only) for this reporting page."
             ),
         },
+        **empty_report,
     }
 
-    if not can_fetch:
-        payload.update(
-            {
-                "totals": {},
-                "timeseries": [],
-                "top_pages": [],
-                "sources": [],
-                "devices": [],
-                "countries": [],
-                "events": [],
-                "error": None,
-            }
-        )
+    # Campaign list only — frontend picks campaign_id before fetching charts
+    if bootstrap:
         return payload
 
+    can_fetch = bool(configured and resolved_property_id and selected_id)
+    payload["configured"] = can_fetch
+    if not can_fetch:
+        return payload
+
+    # Scope = campaign Property ID only (no pagePath slug filter — that undercounted).
     try:
         report = fetch_dashboard(
             date_from=start,
             date_to=end,
             property_id=resolved_property_id,
-            path_contains=path_contains,
+            path_contains=None,
         )
         payload.update(report)
         payload["configured"] = True
+        payload["property_id"] = resolved_property_id or ""
+        payload["selected_campaign_id"] = selected_id
         payload["error"] = None
     except Exception as exc:
-        payload.update(
-            {
-                "totals": {},
-                "timeseries": [],
-                "top_pages": [],
-                "sources": [],
-                "devices": [],
-                "countries": [],
-                "events": [],
-                "error": str(exc),
-            }
-        )
+        payload.update({**empty_report, "error": str(exc)})
     return payload
