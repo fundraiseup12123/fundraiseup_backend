@@ -943,11 +943,12 @@ def admin_google_analytics(
     """Fetch Google Analytics 4 reports for the admin portal."""
     require_org_access(org_id, user, min_role="member")
 
+    # campaigns.name (not title) — wrong columns make PostgREST return []
     campaigns = rest_get(
         "campaigns",
         params={
             "organization_id": f"eq.{org_id}",
-            "select": "id,title,slug",
+            "select": "id,name,slug",
             "order": "created_at.desc",
             "limit": "200",
         },
@@ -955,14 +956,25 @@ def admin_google_analytics(
     campaign_ids = [str(c["id"]) for c in campaigns if c.get("id")]
     content_by_id: dict[str, dict[str, Any]] = {}
     if campaign_ids:
+        id_list = ",".join(campaign_ids)
         contents = rest_get(
             "campaign_content",
             params={
-                "campaign_id": f"in.({','.join(campaign_ids)})",
+                "campaign_id": f"in.({id_list})",
                 "select": "campaign_id,ga4_measurement_id,gtm_container_id,ga4_property_id",
                 "limit": "200",
             },
         )
+        # Migration 020 not applied yet → column missing → empty list; retry without it
+        if not contents:
+            contents = rest_get(
+                "campaign_content",
+                params={
+                    "campaign_id": f"in.({id_list})",
+                    "select": "campaign_id,ga4_measurement_id,gtm_container_id",
+                    "limit": "200",
+                },
+            )
         content_by_id = {
             str(row.get("campaign_id")): row for row in contents if row.get("campaign_id")
         }
@@ -974,7 +986,7 @@ def admin_google_analytics(
         campaign_options.append(
             {
                 "id": cid,
-                "title": campaign.get("title") or "Campaign",
+                "title": campaign.get("name") or campaign.get("title") or "Campaign",
                 "slug": campaign.get("slug") or "",
                 "ga4_measurement_id": content.get("ga4_measurement_id") or "",
                 "gtm_container_id": content.get("gtm_container_id") or "",
@@ -998,14 +1010,13 @@ def admin_google_analytics(
         if selected_campaign and selected_campaign.get("ga4_property_id"):
             resolved_property_id = str(selected_campaign["ga4_property_id"])
 
+    # "All" (or missing query prop): use first campaign Property ID, then env default
+    if not resolved_property_id:
+        with_prop = [c for c in campaign_options if c.get("ga4_property_id")]
+        if with_prop:
+            resolved_property_id = str(with_prop[0]["ga4_property_id"])
     if not resolved_property_id:
         resolved_property_id = get_property_id()
-
-    # If no campaign selected but only one campaign has a property ID, use it
-    if not campaign_id and not resolved_property_id:
-        with_prop = [c for c in campaign_options if c.get("ga4_property_id")]
-        if len(with_prop) == 1:
-            resolved_property_id = with_prop[0]["ga4_property_id"]
 
     can_fetch = bool(configured and resolved_property_id)
 

@@ -546,6 +546,15 @@ def update_campaign(
         )
         if existing:
             updated = rest_patch("campaign_content", content_data, match={"campaign_id": campaign_id})
+            # Property ID column may be missing until migration 020 is applied
+            if not updated and "ga4_property_id" in content_data:
+                without_prop = {k: v for k, v in content_data.items() if k != "ga4_property_id"}
+                updated = rest_patch("campaign_content", without_prop, match={"campaign_id": campaign_id})
+                if updated:
+                    raise HTTPException(
+                        status_code=503,
+                        detail="Content saved but GA4 Property ID failed: run backend/sql/020_campaign_ga4_property_id.sql on Supabase.",
+                    )
             if not updated and any(k in content_data for k in feed_keys):
                 fallback = {k: v for k, v in content_data.items() if k not in feed_keys}
                 updated = rest_patch("campaign_content", fallback, match={"campaign_id": campaign_id})
@@ -566,6 +575,14 @@ def update_campaign(
                 raise HTTPException(status_code=500, detail="Failed to update campaign content")
         else:
             inserted = rest_insert("campaign_content", {"campaign_id": campaign_id, **content_data})
+            if not inserted and "ga4_property_id" in content_data:
+                without_prop = {k: v for k, v in content_data.items() if k != "ga4_property_id"}
+                inserted = rest_insert("campaign_content", {"campaign_id": campaign_id, **without_prop})
+                if inserted:
+                    raise HTTPException(
+                        status_code=503,
+                        detail="Content saved but GA4 Property ID failed: run backend/sql/020_campaign_ga4_property_id.sql on Supabase.",
+                    )
             if not inserted and any(k in content_data for k in feed_keys):
                 fallback = {k: v for k, v in content_data.items() if k not in feed_keys}
                 inserted = rest_insert("campaign_content", {"campaign_id": campaign_id, **fallback})
