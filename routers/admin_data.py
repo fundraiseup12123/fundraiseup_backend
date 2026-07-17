@@ -77,6 +77,10 @@ def admin_list_donations(
             params={"organization_id": f"eq.{org_id}", "select": "id", "limit": "200"},
         )
         campaign_ids = [str(c["id"]) for c in org_campaigns if c.get("id")]
+        from site_constants import ROOT_CAMPAIGN_ID, ROOT_ORG_ID
+
+        if org_id == ROOT_ORG_ID and ROOT_CAMPAIGN_ID not in campaign_ids:
+            campaign_ids.append(ROOT_CAMPAIGN_ID)
         if campaign_ids:
             orphan_params: dict[str, str] = {
                 "organization_id": "is.null",

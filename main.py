@@ -535,7 +535,7 @@ def _payload_from_intent(existing: stripe.PaymentIntent, payment_method: Payment
 def create_checkout(payload: CreateCheckoutRequest) -> CheckoutResponse:
     from db import rest_get_one
     from routers.stripe_connect import resolve_stripe_account_for_checkout
-    from site_constants import ROOT_CAMPAIGN_ID
+    from site_constants import ROOT_CAMPAIGN_ID, ROOT_ORG_ID
 
     display_currency = payload.currency.lower()
     payment_method = payload.payment_method
@@ -579,6 +579,11 @@ def create_checkout(payload: CreateCheckoutRequest) -> CheckoutResponse:
         elif payload.campaign_id != ROOT_CAMPAIGN_ID:
             raise HTTPException(status_code=400, detail="Campaign is not available for checkout")
 
+    checkout_campaign_id = payload.campaign_id
+    if is_root_checkout:
+        organization_id = ROOT_ORG_ID
+        checkout_campaign_id = ROOT_CAMPAIGN_ID
+
     if not stripe_account and not is_root_checkout:
         raise HTTPException(
             status_code=400,
@@ -595,7 +600,7 @@ def create_checkout(payload: CreateCheckoutRequest) -> CheckoutResponse:
         base_amount,
         payment_method,
         organization_id=organization_id,
-        campaign_id=payload.campaign_id,
+        campaign_id=checkout_campaign_id,
         campaign_slug=campaign_slug,
         stripe_account=stripe_account,
     )
@@ -1166,11 +1171,20 @@ def get_donations(
 
 def _ensure_donation_org(row: dict[str, Any]) -> dict[str, Any]:
     """Backfill organization_id from campaign so the gift appears in the correct admin list."""
-    if row.get("organization_id") or not row.get("campaign_id"):
+    from site_constants import ROOT_CAMPAIGN_ID, ROOT_ORG_ID
+
+    if row.get("organization_id"):
         return row
+    campaign_id = row.get("campaign_id")
+    if not campaign_id or campaign_id == ROOT_CAMPAIGN_ID:
+        return {
+            **row,
+            "organization_id": ROOT_ORG_ID,
+            "campaign_id": campaign_id or ROOT_CAMPAIGN_ID,
+        }
     campaign = rest_get_one(
         "campaigns",
-        params={"id": f"eq.{row['campaign_id']}", "select": "organization_id"},
+        params={"id": f"eq.{campaign_id}", "select": "organization_id"},
     )
     org_id = (campaign or {}).get("organization_id")
     if org_id:
