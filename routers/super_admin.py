@@ -212,6 +212,10 @@ def update_root_branding(
         exclude={"popup_view", "popup_view_json"},
         exclude_none=True,
     )
+    # Always persist rich title/text sizes so Reset can clear previous values.
+    content_data["title_html"] = payload.title_html
+    content_data["title_font_size"] = payload.title_font_size
+    content_data["body_font_size"] = payload.body_font_size
     content_data["updated_at"] = datetime.now(timezone.utc).isoformat()
     if payload.popup_view is not None:
         existing = rest_get_one(
@@ -219,10 +223,25 @@ def update_root_branding(
             params={"campaign_id": f"eq.{ROOT_CAMPAIGN_ID}", "select": "popup_view_json"},
         )
         merged = {**(_parse_popup_view(existing) or {}), **payload.popup_view.model_dump(exclude_none=True)}
+        merged["modal_title_html"] = payload.popup_view.modal_title_html
+        merged["modal_title_font_size"] = payload.popup_view.modal_title_font_size
+        merged["modal_body_font_size"] = payload.popup_view.modal_body_font_size
         content_data["popup_view_json"] = json.dumps(merged)
     existing = rest_get_one("campaign_content", params={"campaign_id": f"eq.{ROOT_CAMPAIGN_ID}", "select": "campaign_id"})
     if existing:
         updated = rest_patch("campaign_content", content_data, match={"campaign_id": ROOT_CAMPAIGN_ID})
+        if not updated and any(k in content_data for k in ("title_html", "title_font_size", "body_font_size")):
+            without_sizes = {
+                k: v
+                for k, v in content_data.items()
+                if k not in {"title_html", "title_font_size", "body_font_size"}
+            }
+            updated = rest_patch("campaign_content", without_sizes, match={"campaign_id": ROOT_CAMPAIGN_ID})
+            if updated:
+                raise HTTPException(
+                    status_code=503,
+                    detail="Homepage saved but title formatting/text sizes failed: run backend/sql/023_campaign_text_font_sizes.sql and 024_campaign_title_html.sql on Supabase.",
+                )
         if not updated and "popup_view_json" in content_data:
             fallback = {k: v for k, v in content_data.items() if k != "popup_view_json"}
             updated = rest_patch("campaign_content", fallback, match={"campaign_id": ROOT_CAMPAIGN_ID})
@@ -235,6 +254,18 @@ def update_root_branding(
             raise HTTPException(status_code=500, detail="Failed to update root branding")
     else:
         inserted = rest_insert("campaign_content", {"campaign_id": ROOT_CAMPAIGN_ID, **content_data})
+        if not inserted and any(k in content_data for k in ("title_html", "title_font_size", "body_font_size")):
+            without_sizes = {
+                k: v
+                for k, v in content_data.items()
+                if k not in {"title_html", "title_font_size", "body_font_size"}
+            }
+            inserted = rest_insert("campaign_content", {"campaign_id": ROOT_CAMPAIGN_ID, **without_sizes})
+            if inserted:
+                raise HTTPException(
+                    status_code=503,
+                    detail="Homepage saved but title formatting/text sizes failed: run backend/sql/023_campaign_text_font_sizes.sql and 024_campaign_title_html.sql on Supabase.",
+                )
         if not inserted:
             raise HTTPException(status_code=500, detail="Failed to create root branding content")
     return _root_campaign_bundle()

@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from auth import AuthUser, require_auth, require_org_access
 from db import rest_delete, rest_get, rest_get_one, rest_insert, rest_insert_error, rest_patch, select_columns
@@ -53,6 +53,9 @@ def _default_campaign_content(name: str) -> dict[str, Any]:
             "gtm_container_id": root.get("gtm_container_id") or None,
             "ga4_property_id": root.get("ga4_property_id") or None,
             "meta_pixel_id": root.get("meta_pixel_id") or None,
+            "title_html": None,
+            "title_font_size": root.get("title_font_size"),
+            "body_font_size": root.get("body_font_size"),
         }
     return {
         "title": name,
@@ -64,6 +67,9 @@ def _default_campaign_content(name: str) -> dict[str, Any]:
         "gtm_container_id": None,
         "ga4_property_id": None,
         "meta_pixel_id": None,
+        "title_html": None,
+        "title_font_size": None,
+        "body_font_size": None,
         "recent_donations_sort": "recent",
     }
 
@@ -180,7 +186,23 @@ class PopupViewPayload(BaseModel):
     landing_headline_html: str = ""
     landing_body_html: str = ""
     modal_title: str = ""
+    modal_title_html: str | None = None
     modal_body_html: str = ""
+    modal_title_font_size: int | None = None
+    modal_body_font_size: int | None = None
+
+    @field_validator("modal_title_font_size", "modal_body_font_size", mode="before")
+    @classmethod
+    def _normalize_popup_font_size(cls, value: Any) -> int | None:
+        if value is None or value == "":
+            return None
+        try:
+            size = int(round(float(value)))
+        except (TypeError, ValueError):
+            return None
+        if size < 10 or size > 72:
+            raise ValueError("Font size must be between 10 and 72")
+        return size
 
 
 class CampaignContentPayload(BaseModel):
@@ -204,13 +226,30 @@ class CampaignContentPayload(BaseModel):
     gtm_container_id: str | None = None
     ga4_property_id: str | None = None
     meta_pixel_id: str | None = None
+    title_html: str | None = None
+    title_font_size: int | None = None
+    body_font_size: int | None = None
+
+    @field_validator("title_font_size", "body_font_size", mode="before")
+    @classmethod
+    def _normalize_landing_font_size(cls, value: Any) -> int | None:
+        if value is None or value == "":
+            return None
+        try:
+            size = int(round(float(value)))
+        except (TypeError, ValueError):
+            return None
+        if size < 10 or size > 72:
+            raise ValueError("Font size must be between 10 and 72")
+        return size
 
     def normalize_analytics_ids(self) -> "CampaignContentPayload":
         ga4 = (self.ga4_measurement_id or "").strip().upper() or None
         gtm = (self.gtm_container_id or "").strip().upper() or None
         prop = (self.ga4_property_id or "").strip().replace("properties/", "")
         prop = "".join(ch for ch in prop if ch.isdigit()) or None
-        meta = "".join(ch for ch in (self.meta_pixel_id or "").strip() if ch.isdigit()) or None
+        meta_ids = list(dict.fromkeys(re.findall(r"\d+", self.meta_pixel_id or "")))
+        meta = ",".join(pixel_id for pixel_id in meta_ids if len(pixel_id) >= 5) or None
         if ga4 and not ga4.startswith("G-"):
             ga4 = None
         if gtm and not gtm.startswith("GTM-"):
@@ -550,6 +589,9 @@ def update_campaign(
             "gtm_container_id",
             "ga4_property_id",
             "meta_pixel_id",
+            "title_html",
+            "title_font_size",
+            "body_font_size",
         )
         if existing:
             updated = rest_patch("campaign_content", content_data, match={"campaign_id": campaign_id})
@@ -570,6 +612,19 @@ def update_campaign(
                     raise HTTPException(
                         status_code=503,
                         detail="Content saved but Meta Pixel ID failed: run backend/sql/021_campaign_meta_pixel_id.sql on Supabase.",
+                    )
+            # Rich title/text size columns may be missing until migration 023 is applied
+            if not updated and any(k in content_data for k in ("title_html", "title_font_size", "body_font_size")):
+                without_sizes = {
+                    k: v
+                    for k, v in content_data.items()
+                    if k not in {"title_html", "title_font_size", "body_font_size"}
+                }
+                updated = rest_patch("campaign_content", without_sizes, match={"campaign_id": campaign_id})
+                if updated:
+                    raise HTTPException(
+                        status_code=503,
+                        detail="Content saved but title formatting/text sizes failed: run backend/sql/023_campaign_text_font_sizes.sql and 024_campaign_title_html.sql on Supabase.",
                     )
             if not updated and any(k in content_data for k in feed_keys):
                 fallback = {k: v for k, v in content_data.items() if k not in feed_keys}
@@ -606,6 +661,18 @@ def update_campaign(
                     raise HTTPException(
                         status_code=503,
                         detail="Content saved but Meta Pixel ID failed: run backend/sql/021_campaign_meta_pixel_id.sql on Supabase.",
+                    )
+            if not inserted and any(k in content_data for k in ("title_html", "title_font_size", "body_font_size")):
+                without_sizes = {
+                    k: v
+                    for k, v in content_data.items()
+                    if k not in {"title_html", "title_font_size", "body_font_size"}
+                }
+                inserted = rest_insert("campaign_content", {"campaign_id": campaign_id, **without_sizes})
+                if inserted:
+                    raise HTTPException(
+                        status_code=503,
+                        detail="Content saved but title formatting/text sizes failed: run backend/sql/023_campaign_text_font_sizes.sql and 024_campaign_title_html.sql on Supabase.",
                     )
             if not inserted and any(k in content_data for k in feed_keys):
                 fallback = {k: v for k, v in content_data.items() if k not in feed_keys}

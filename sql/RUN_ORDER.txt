@@ -34,3 +34,5 @@
 --   020_campaign_ga4_property_id.sql
 --   021_campaign_meta_pixel_id.sql
 --   022_organization_timezone.sql
+--   023_campaign_text_font_sizes.sql
+--   024_campaign_title_html.sql
