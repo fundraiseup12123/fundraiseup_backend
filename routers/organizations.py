@@ -5,6 +5,7 @@ import re
 import secrets
 from typing import Annotated, Any
 from urllib.parse import urlparse
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
@@ -51,6 +52,7 @@ def _default_campaign_content(name: str) -> dict[str, Any]:
             "ga4_measurement_id": root.get("ga4_measurement_id") or None,
             "gtm_container_id": root.get("gtm_container_id") or None,
             "ga4_property_id": root.get("ga4_property_id") or None,
+            "meta_pixel_id": root.get("meta_pixel_id") or None,
         }
     return {
         "title": name,
@@ -61,6 +63,7 @@ def _default_campaign_content(name: str) -> dict[str, Any]:
         "ga4_measurement_id": None,
         "gtm_container_id": None,
         "ga4_property_id": None,
+        "meta_pixel_id": None,
         "recent_donations_sort": "recent",
     }
 
@@ -200,12 +203,14 @@ class CampaignContentPayload(BaseModel):
     ga4_measurement_id: str | None = None
     gtm_container_id: str | None = None
     ga4_property_id: str | None = None
+    meta_pixel_id: str | None = None
 
     def normalize_analytics_ids(self) -> "CampaignContentPayload":
         ga4 = (self.ga4_measurement_id or "").strip().upper() or None
         gtm = (self.gtm_container_id or "").strip().upper() or None
         prop = (self.ga4_property_id or "").strip().replace("properties/", "")
         prop = "".join(ch for ch in prop if ch.isdigit()) or None
+        meta = "".join(ch for ch in (self.meta_pixel_id or "").strip() if ch.isdigit()) or None
         if ga4 and not ga4.startswith("G-"):
             ga4 = None
         if gtm and not gtm.startswith("GTM-"):
@@ -213,6 +218,7 @@ class CampaignContentPayload(BaseModel):
         self.ga4_measurement_id = ga4
         self.gtm_container_id = gtm
         self.ga4_property_id = prop
+        self.meta_pixel_id = meta
         return self
 
 
@@ -543,6 +549,7 @@ def update_campaign(
             "ga4_measurement_id",
             "gtm_container_id",
             "ga4_property_id",
+            "meta_pixel_id",
         )
         if existing:
             updated = rest_patch("campaign_content", content_data, match={"campaign_id": campaign_id})
@@ -554,6 +561,15 @@ def update_campaign(
                     raise HTTPException(
                         status_code=503,
                         detail="Content saved but GA4 Property ID failed: run backend/sql/020_campaign_ga4_property_id.sql on Supabase.",
+                    )
+            # Meta Pixel column may be missing until migration 021 is applied
+            if not updated and "meta_pixel_id" in content_data:
+                without_meta = {k: v for k, v in content_data.items() if k != "meta_pixel_id"}
+                updated = rest_patch("campaign_content", without_meta, match={"campaign_id": campaign_id})
+                if updated:
+                    raise HTTPException(
+                        status_code=503,
+                        detail="Content saved but Meta Pixel ID failed: run backend/sql/021_campaign_meta_pixel_id.sql on Supabase.",
                     )
             if not updated and any(k in content_data for k in feed_keys):
                 fallback = {k: v for k, v in content_data.items() if k not in feed_keys}
@@ -582,6 +598,14 @@ def update_campaign(
                     raise HTTPException(
                         status_code=503,
                         detail="Content saved but GA4 Property ID failed: run backend/sql/020_campaign_ga4_property_id.sql on Supabase.",
+                    )
+            if not inserted and "meta_pixel_id" in content_data:
+                without_meta = {k: v for k, v in content_data.items() if k != "meta_pixel_id"}
+                inserted = rest_insert("campaign_content", {"campaign_id": campaign_id, **without_meta})
+                if inserted:
+                    raise HTTPException(
+                        status_code=503,
+                        detail="Content saved but Meta Pixel ID failed: run backend/sql/021_campaign_meta_pixel_id.sql on Supabase.",
                     )
             if not inserted and any(k in content_data for k in feed_keys):
                 fallback = {k: v for k, v in content_data.items() if k not in feed_keys}
@@ -968,7 +992,7 @@ def get_org_settings(org_id: str, user: Annotated[AuthUser, Depends(require_auth
         "organizations",
         params={
             "id": f"eq.{org_id}",
-            "select": "id,name,slug,default_currency,reporting_currency,payment_methods,notification_prefs",
+            "select": "id,name,slug,default_currency,reporting_currency,timezone,payment_methods,notification_prefs",
         },
     )
     if not org:
@@ -1028,12 +1052,20 @@ def update_org_settings(
     require_org_access(org_id, user, min_role="admin")
     existing = rest_get_one(
         "organizations",
-        params={"id": f"eq.{org_id}", "select": "id,name,slug,default_currency,reporting_currency"},
+        params={"id": f"eq.{org_id}", "select": "id,name,slug,default_currency,reporting_currency,timezone"},
     )
     if not existing:
         raise HTTPException(status_code=404, detail="Organization not found")
 
-    allowed = {"name", "slug", "default_currency", "reporting_currency", "payment_methods", "notification_prefs"}
+    allowed = {
+        "name",
+        "slug",
+        "default_currency",
+        "reporting_currency",
+        "timezone",
+        "payment_methods",
+        "notification_prefs",
+    }
     updates: dict[str, Any] = {k: v for k, v in payload.items() if k in allowed}
 
     if "name" in updates:
@@ -1066,6 +1098,16 @@ def update_org_settings(
         if not updates["reporting_currency"]:
             raise HTTPException(status_code=400, detail="Reporting currency is required")
 
+    if "timezone" in updates:
+        timezone = str(updates["timezone"] or "").strip()
+        if not timezone:
+            raise HTTPException(status_code=400, detail="Timezone is required")
+        try:
+            ZoneInfo(timezone)
+        except (ZoneInfoNotFoundError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail="Invalid IANA timezone") from exc
+        updates["timezone"] = timezone
+
     if not updates:
         raise HTTPException(status_code=400, detail="No updates provided")
 
@@ -1082,7 +1124,7 @@ def update_org_settings(
         "organizations",
         params={
             "id": f"eq.{org_id}",
-            "select": "id,name,slug,default_currency,reporting_currency,payment_methods,notification_prefs",
+            "select": "id,name,slug,default_currency,reporting_currency,timezone,payment_methods,notification_prefs",
         },
     ) or updated
     if isinstance(fresh, dict):

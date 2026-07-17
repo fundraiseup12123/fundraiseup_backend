@@ -31,3 +31,6 @@
 --   seed_donations.sql                   (optional sample data)
 
 --   017_campaign_analytics_ids.sql
+--   020_campaign_ga4_property_id.sql
+--   021_campaign_meta_pixel_id.sql
+--   022_organization_timezone.sql
