@@ -229,8 +229,19 @@ class CampaignContentPayload(BaseModel):
     title_html: str | None = None
     title_font_size: int | None = None
     body_font_size: int | None = None
+    title_html_mobile: str | None = None
+    body_html_mobile: str | None = None
+    caption_mobile: str | None = None
+    title_font_size_mobile: int | None = None
+    body_font_size_mobile: int | None = None
 
-    @field_validator("title_font_size", "body_font_size", mode="before")
+    @field_validator(
+        "title_font_size",
+        "body_font_size",
+        "title_font_size_mobile",
+        "body_font_size_mobile",
+        mode="before",
+    )
     @classmethod
     def _normalize_landing_font_size(cls, value: Any) -> int | None:
         if value is None or value == "":
@@ -592,6 +603,18 @@ def update_campaign(
             "title_html",
             "title_font_size",
             "body_font_size",
+            "title_html_mobile",
+            "body_html_mobile",
+            "caption_mobile",
+            "title_font_size_mobile",
+            "body_font_size_mobile",
+        )
+        mobile_landing_keys = (
+            "title_html_mobile",
+            "body_html_mobile",
+            "caption_mobile",
+            "title_font_size_mobile",
+            "body_font_size_mobile",
         )
         if existing:
             updated = rest_patch("campaign_content", content_data, match={"campaign_id": campaign_id})
@@ -612,6 +635,14 @@ def update_campaign(
                     raise HTTPException(
                         status_code=503,
                         detail="Content saved but Meta Pixel ID failed: run backend/sql/021_campaign_meta_pixel_id.sql on Supabase.",
+                    )
+            if not updated and any(k in content_data for k in mobile_landing_keys):
+                without_mobile = {k: v for k, v in content_data.items() if k not in mobile_landing_keys}
+                updated = rest_patch("campaign_content", without_mobile, match={"campaign_id": campaign_id})
+                if updated:
+                    raise HTTPException(
+                        status_code=503,
+                        detail="Content saved but mobile landing text failed: run backend/sql/025_campaign_mobile_landing_text.sql on Supabase.",
                     )
             # Rich title/text size columns may be missing until migration 023 is applied
             if not updated and any(k in content_data for k in ("title_html", "title_font_size", "body_font_size")):
@@ -661,6 +692,14 @@ def update_campaign(
                     raise HTTPException(
                         status_code=503,
                         detail="Content saved but Meta Pixel ID failed: run backend/sql/021_campaign_meta_pixel_id.sql on Supabase.",
+                    )
+            if not inserted and any(k in content_data for k in mobile_landing_keys):
+                without_mobile = {k: v for k, v in content_data.items() if k not in mobile_landing_keys}
+                inserted = rest_insert("campaign_content", {"campaign_id": campaign_id, **without_mobile})
+                if inserted:
+                    raise HTTPException(
+                        status_code=503,
+                        detail="Content saved but mobile landing text failed: run backend/sql/025_campaign_mobile_landing_text.sql on Supabase.",
                     )
             if not inserted and any(k in content_data for k in ("title_html", "title_font_size", "body_font_size")):
                 without_sizes = {
