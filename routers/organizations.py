@@ -26,6 +26,103 @@ router = APIRouter(prefix="/orgs", tags=["organizations"])
 
 ROOT_CAMPAIGN_ID = os.getenv("ROOT_CAMPAIGN_ID", "00000000-0000-4000-8000-000000000002")
 
+# Same once/monthly tiers as hope-for-gaza (USD) and frontend currency.ts defaults.
+_USD_ONCE_PRESETS = [1170, 500, 250, 115, 50, 25]
+_USD_MONTHLY_PRESETS = [95, 45, 25, 15, 10, 5]
+_USD_TO_LOCAL = {
+    "USD": 1.0,
+    "GBP": 0.79,
+    "EUR": 0.92,
+    "AUD": 1.55,
+    "CAD": 1.36,
+    "CHF": 0.88,
+    "NZD": 1.68,
+    "PKR": 278.0,
+    "INR": 83.5,
+    "AED": 3.67,
+    "SAR": 3.75,
+}
+
+
+def _round_ending_0_or_5(value: float) -> int:
+    if value <= 0 or value != value:  # NaN check
+        return 5
+    lower = int(value // 5) * 5
+    rem = value - lower
+    if rem == 0:
+        return max(5, lower)
+    if rem >= 2:
+        return max(5, lower + 5)
+    return max(5, lower)
+
+
+def _round_preset_amount(amount: float, currency: str) -> int:
+    code = currency.upper()
+    if code == "PKR" and amount >= 1000:
+        thousands = max(1, _round_ending_0_or_5(amount / 1000.0))
+        return int(thousands * 1000)
+    return _round_ending_0_or_5(amount)
+
+
+def _format_preset_label(value: int, currency: str) -> str:
+    code = currency.upper()
+    if code == "PKR":
+        if value >= 1000:
+            return f"Rs {int(round(value / 1000.0))}K"
+        return f"Rs {value:,}"
+    if code == "USD":
+        return f"${value:,}"
+    return f"{value:,}"
+
+
+def _default_amount_presets(currency: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    code = (currency or "USD").strip().upper() or "USD"
+    if code == "PKR":
+        once_vals = [700000, 300000, 150000, 70000, 30000, 15000]
+        monthly_vals = [56000, 28000, 14000, 8400, 2800, 1400]
+    elif code == "USD":
+        once_vals = list(_USD_ONCE_PRESETS)
+        monthly_vals = list(_USD_MONTHLY_PRESETS)
+    else:
+        rate = float(_USD_TO_LOCAL.get(code, 1.0))
+        once_vals = [_round_preset_amount(v * rate, code) for v in _USD_ONCE_PRESETS]
+        monthly_vals = [_round_preset_amount(v * rate, code) for v in _USD_MONTHLY_PRESETS]
+
+    once = [{"label": _format_preset_label(v, code), "value": v} for v in once_vals]
+    monthly = [{"label": _format_preset_label(v, code), "value": v} for v in monthly_vals]
+    return once, monthly
+
+
+def _seed_default_campaign_currencies(campaign_id: str, default_currency: str) -> None:
+    """Attach hope-for-gaza-style once/monthly presets for the campaign default currency."""
+    code = (default_currency or "USD").strip().upper() or "USD"
+    once, monthly = _default_amount_presets(code)
+    rest_insert(
+        "campaign_currencies",
+        {
+            "campaign_id": campaign_id,
+            "currency_code": code,
+            "enabled": True,
+            "is_default": True,
+            "amounts_once": once,
+            "amounts_monthly": monthly,
+        },
+    )
+    # Match hope-for-gaza: also keep USD presets available when default is not USD.
+    if code != "USD":
+        usd_once, usd_monthly = _default_amount_presets("USD")
+        rest_insert(
+            "campaign_currencies",
+            {
+                "campaign_id": campaign_id,
+                "currency_code": "USD",
+                "enabled": True,
+                "is_default": False,
+                "amounts_once": usd_once,
+                "amounts_monthly": usd_monthly,
+            },
+        )
+
 
 def _default_campaign_content(name: str) -> dict[str, Any]:
     root = rest_get_one("campaign_content", params={"campaign_id": f"eq.{ROOT_CAMPAIGN_ID}", "select": "*"})
@@ -443,6 +540,7 @@ def create_campaign(
         "campaign_content",
         {"campaign_id": campaign["id"], **_default_campaign_content(payload.name)},
     )
+    _seed_default_campaign_currencies(str(campaign["id"]), currency)
     _ensure_campaign_slug_subdomain(str(campaign["id"]), slug)
     return campaign
 

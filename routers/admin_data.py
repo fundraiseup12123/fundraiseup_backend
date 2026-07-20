@@ -459,6 +459,8 @@ def admin_insights(
     utm_source: str | None = Query(None),
     frequency: str | None = Query(None),
     date_preset: str = Query("all"),
+    date_from: str | None = Query(None),
+    date_to: str | None = Query(None),
     interval: str = Query("hourly"),
     reporting_currency: str = Query("GBP"),
 ) -> dict[str, Any]:
@@ -474,12 +476,18 @@ def admin_insights(
         "campaigns",
         params={"organization_id": f"eq.{org_id}", "select": "id,name,designation"},
     )
-    date_from, date_to = _date_range(date_preset)
+    resolved_from, resolved_to = _insights_date_range(date_preset, date_from, date_to)
 
     if designation and not campaign_id:
         matching = [c["id"] for c in campaigns if c.get("designation") == designation]
         if not matching:
-            return _empty_insights(reporting_currency, date_preset, campaigns)
+            return _empty_insights(
+                reporting_currency,
+                date_preset,
+                campaigns,
+                date_from=resolved_from,
+                date_to=resolved_to,
+            )
 
     rows = _admin_org_donation_rows(
         org_id,
@@ -488,8 +496,8 @@ def admin_insights(
         campaign_id=campaign_id,
         designation=designation,
         frequency=frequency,
-        date_from=date_from,
-        date_to=date_to,
+        date_from=resolved_from,
+        date_to=resolved_to,
     )
 
     if utm_source:
@@ -528,6 +536,8 @@ def admin_insights(
     popup_rows = [r for r in rows if _donation_checkout_view(r) == "popup"]
     country_breakdown_homepage = _breakdown(homepage_rows, _donation_country_label, reporting_currency)
     country_breakdown_popup = _breakdown(popup_rows, _donation_country_label, reporting_currency)
+    device_breakdown_homepage = _breakdown(homepage_rows, _donation_device_label, reporting_currency)
+    device_breakdown_popup = _breakdown(popup_rows, _donation_device_label, reporting_currency)
 
     sources = sorted(
         {
@@ -546,7 +556,7 @@ def admin_insights(
 
     return {
         "reporting_currency": reporting_currency.upper(),
-        "date_label": _date_label(date_preset),
+        "date_label": _date_label(date_preset, resolved_from, resolved_to),
         "raised": {"total": round(total_raised, 2), "count": len(rows)},
         "first_installments": {"total": round(first_installments, 2), "count": len(recurring)},
         "one_time": {"total": round(one_time_total, 2), "count": len(one_time)},
@@ -562,6 +572,8 @@ def admin_insights(
         "hour_breakdown": hour_breakdown,
         "country_breakdown_homepage": country_breakdown_homepage,
         "country_breakdown_popup": country_breakdown_popup,
+        "device_breakdown_homepage": device_breakdown_homepage,
+        "device_breakdown_popup": device_breakdown_popup,
         "filter_options": {
             "campaigns": campaigns,
             "designations": sorted({c.get("designation") for c in campaigns if c.get("designation")}),
@@ -570,11 +582,17 @@ def admin_insights(
     }
 
 
-def _empty_insights(reporting_currency: str, date_preset: str, campaigns: list[dict[str, Any]]) -> dict[str, Any]:
+def _empty_insights(
+    reporting_currency: str,
+    date_preset: str,
+    campaigns: list[dict[str, Any]],
+    date_from: str | None = None,
+    date_to: str | None = None,
+) -> dict[str, Any]:
     empty_chart = [{"hour": h, "amount": 0, "count": 0, "label": _hour_label_from_int(h)} for h in range(24)]
     return {
         "reporting_currency": reporting_currency.upper(),
-        "date_label": _date_label(date_preset),
+        "date_label": _date_label(date_preset, date_from, date_to),
         "raised": {"total": 0, "count": 0},
         "first_installments": {"total": 0, "count": 0},
         "one_time": {"total": 0, "count": 0},
@@ -590,6 +608,8 @@ def _empty_insights(reporting_currency: str, date_preset: str, campaigns: list[d
         "hour_breakdown": [],
         "country_breakdown_homepage": [],
         "country_breakdown_popup": [],
+        "device_breakdown_homepage": [],
+        "device_breakdown_popup": [],
         "filter_options": {
             "campaigns": campaigns,
             "designations": sorted({c.get("designation") for c in campaigns if c.get("designation")}),
@@ -618,9 +638,59 @@ def _date_range(preset: str) -> tuple[str | None, str | None]:
     return None, None
 
 
-def _date_label(preset: str) -> str:
+def _insights_date_range(
+    preset: str,
+    date_from: str | None,
+    date_to: str | None,
+) -> tuple[str | None, str | None]:
+    start = lambda d: d.replace(hour=0, minute=0, second=0, microsecond=0)
+    end = lambda d: d.replace(hour=23, minute=59, second=59, microsecond=999000)
+
+    if preset == "day" and date_from:
+        try:
+            day = datetime.strptime(date_from[:10], "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        except ValueError:
+            return _date_range(preset)
+        return start(day).isoformat(), end(day).isoformat()
+
+    if preset == "custom" and date_from and date_to:
+        try:
+            a = datetime.strptime(date_from[:10], "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            b = datetime.strptime(date_to[:10], "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        except ValueError:
+            return _date_range(preset)
+        from_day = a if a <= b else b
+        to_day = b if a <= b else a
+        return start(from_day).isoformat(), end(to_day).isoformat()
+
+    return _date_range(preset)
+
+
+def _date_label(
+    preset: str,
+    date_from: str | None = None,
+    date_to: str | None = None,
+) -> str:
     now = datetime.now(timezone.utc)
     fmt = "%b %d, %Y"
+
+    def _fmt_iso(value: str | None) -> str | None:
+        if not value:
+            return None
+        try:
+            return datetime.strptime(value[:10], "%Y-%m-%d").strftime(fmt)
+        except ValueError:
+            return None
+
+    if preset == "day":
+        label = _fmt_iso(date_from)
+        return label or "Any day"
+    if preset == "custom":
+        left = _fmt_iso(date_from)
+        right = _fmt_iso(date_to)
+        if left and right:
+            return f"{left} – {right}"
+        return "Custom"
     if preset == "today":
         return now.strftime(fmt)
     if preset == "yesterday":
@@ -672,6 +742,21 @@ def _donation_country_label(row: dict[str, Any]) -> str:
     code = str(raw).strip().upper()
     if len(code) == 2 and code.isalpha():
         return code
+    return "Unknown"
+
+
+def _donation_device_label(row: dict[str, Any]) -> str:
+    device = row.get("device")
+    if not isinstance(device, dict):
+        return "Unknown"
+    raw = device.get("type") or device.get("Type") or ""
+    label = str(raw).strip().lower()
+    if label in ("mobile", "phone"):
+        return "Mobile"
+    if label in ("tablet",):
+        return "Tablet"
+    if label in ("desktop", "computer", "pc"):
+        return "Desktop"
     return "Unknown"
 
 
@@ -1013,11 +1098,71 @@ def export_donations_csv(
     campaign_id: str | None = Query(None),
 ) -> dict[str, str]:
     require_org_access(org_id, user, min_role="member")
-    data = admin_list_donations(org_id, user, campaign_id=campaign_id, limit=1000, offset=0)
-    lines = ["id,first_name,last_name,email,amount,currency,frequency,status,created_at"]
-    for d in data["donations"]:
+    campaigns = rest_get(
+        "campaigns",
+        params={"organization_id": f"eq.{org_id}", "select": "id,name", "limit": "500"},
+    )
+    select_cols = (
+        "id,first_name,last_name,email,amount,currency,frequency,status,payment_method,"
+        "honoree_name,created_at,campaign_id,organization_id"
+    )
+    page_size = 1000
+    rows: list[dict[str, Any]] = []
+    offset = 0
+    while True:
+        params: dict[str, str] = {
+            "organization_id": f"eq.{org_id}",
+            "select": select_cols,
+            "order": "created_at.desc",
+            "limit": str(page_size),
+            "offset": str(offset),
+        }
+        if campaign_id:
+            params["campaign_id"] = f"eq.{campaign_id}"
+        batch = rest_get("donations", params=params)
+        rows.extend(batch)
+        if len(batch) < page_size:
+            break
+        offset += page_size
+        if offset >= 20000:
+            break
+
+    rows = _merge_orphan_donations(
+        org_id,
+        rows,
+        campaigns,
+        campaign_id=campaign_id,
+        select=select_cols,
+    )
+    campaign_name_by_id = {str(c.get("id")): str(c.get("name") or "") for c in campaigns if c.get("id")}
+
+    def csv_cell(value: Any) -> str:
+        text = "" if value is None else str(value)
+        if any(ch in text for ch in (",", '"', "\n", "\r")):
+            return '"' + text.replace('"', '""') + '"'
+        return text
+
+    lines = [
+        "id,first_name,last_name,email,amount,currency,frequency,status,payment_method,campaign,created_at"
+    ]
+    for d in rows:
+        campaign_label = campaign_name_by_id.get(str(d.get("campaign_id") or ""), "")
         lines.append(
-            f"{d.get('id')},{d.get('first_name')},{d.get('last_name')},{d.get('email','')},{d.get('amount')},{d.get('currency')},{d.get('frequency')},{d.get('status')},{d.get('created_at')}"
+            ",".join(
+                [
+                    csv_cell(d.get("id")),
+                    csv_cell(d.get("first_name")),
+                    csv_cell(d.get("last_name")),
+                    csv_cell(d.get("email")),
+                    csv_cell(d.get("amount")),
+                    csv_cell(d.get("currency")),
+                    csv_cell(d.get("frequency")),
+                    csv_cell(d.get("status")),
+                    csv_cell(d.get("payment_method")),
+                    csv_cell(campaign_label),
+                    csv_cell(d.get("created_at")),
+                ]
+            )
         )
     return {"csv": "\n".join(lines)}
 
