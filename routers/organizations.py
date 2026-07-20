@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from auth import AuthUser, require_auth, require_org_access
 from db import rest_delete, rest_get, rest_get_one, rest_insert, rest_insert_error, rest_patch, select_columns
+from routers.payment_accounts import normalize_payment_account_sources
 from invite_service import send_pending_organization_invite
 from domain_utils import (
     platform_domain_config,
@@ -286,6 +287,7 @@ class UpdateCampaignRequest(BaseModel):
     stripe_account_id: str | None = None
     paypal_account_id: str | None = None
     nowpayments_account_id: str | None = None
+    payment_account_sources: dict[str, str] | None = None
     # None omitted; explicit null clears the minimum (no limit).
     min_donation_amount: float | None = None
     min_donation_amount_once: float | None = None
@@ -407,10 +409,11 @@ def create_campaign(
 
     org = rest_get_one(
         "organizations",
-        params={"id": f"eq.{org_id}", "select": "default_currency"},
+        params={"id": f"eq.{org_id}", "select": "default_currency,payment_account_sources"},
     )
     currency = (payload.default_currency or (org or {}).get("default_currency") or "USD")
     currency = str(currency).strip().upper() or "USD"
+    payment_sources = normalize_payment_account_sources((org or {}).get("payment_account_sources"))
 
     campaign = rest_insert(
         "campaigns",
@@ -420,6 +423,7 @@ def create_campaign(
             "slug": slug,
             "default_currency": currency,
             "status": "draft",
+            "payment_account_sources": payment_sources,
         },
     )
     if not campaign:
@@ -431,6 +435,7 @@ def create_campaign(
                 "slug": slug,
                 "default_currency": currency,
                 "status": "draft",
+                "payment_account_sources": payment_sources,
             },
         )
         raise HTTPException(status_code=500, detail=err or "Failed to create campaign")
@@ -555,6 +560,10 @@ def update_campaign(
         updates["paypal_account_id"] = payload.paypal_account_id or None
     if payload.nowpayments_account_id is not None:
         updates["nowpayments_account_id"] = payload.nowpayments_account_id or None
+    if payload.payment_account_sources is not None:
+        updates["payment_account_sources"] = normalize_payment_account_sources(
+            payload.payment_account_sources
+        )
     def _normalize_min(raw: float | None) -> float | None:
         if raw is None or not isinstance(raw, (int, float)) or float(raw) <= 0:
             return None
@@ -1148,28 +1157,8 @@ def get_org_settings(org_id: str, user: Annotated[AuthUser, Depends(require_auth
         org["reminder_interval_days"] = 7
     if "email_organization_name" not in org:
         org["email_organization_name"] = None
-    org["payment_account_sources"] = _normalize_payment_account_sources(org.get("payment_account_sources"))
+    org["payment_account_sources"] = normalize_payment_account_sources(org.get("payment_account_sources"))
     return org
-
-
-def _normalize_payment_account_sources(raw: object) -> dict[str, str]:
-    defaults = {"stripe": "organization", "paypal": "organization", "nowpayments": "organization"}
-    data = raw
-    if isinstance(data, str):
-        try:
-            import json
-
-            data = json.loads(data)
-        except (TypeError, ValueError):
-            data = None
-    if not isinstance(data, dict):
-        return defaults
-    normalized = dict(defaults)
-    for key in defaults:
-        value = str(data.get(key) or "").strip().lower()
-        if value in {"platform", "organization"}:
-            normalized[key] = value
-    return normalized
 
 
 @router.get("/{org_id}/platform-payment-accounts")
@@ -1315,7 +1304,7 @@ def update_org_settings(
             updates["email_organization_name"] = name[:160] if name else None
 
     if "payment_account_sources" in updates:
-        updates["payment_account_sources"] = _normalize_payment_account_sources(
+        updates["payment_account_sources"] = normalize_payment_account_sources(
             updates["payment_account_sources"]
         )
 
@@ -1343,7 +1332,7 @@ def update_org_settings(
     if isinstance(fresh, dict):
         fresh = {
             **fresh,
-            "payment_account_sources": _normalize_payment_account_sources(
+            "payment_account_sources": normalize_payment_account_sources(
                 fresh.get("payment_account_sources")
             ),
             "campaigns_currency_updated": campaigns_updated,

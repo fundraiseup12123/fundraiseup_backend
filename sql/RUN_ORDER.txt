@@ -41,3 +41,4 @@
 --   027_email_organization_name.sql
 --   028_payment_account_sources.sql
 --   029_problem_reports.sql
+--   030_campaign_payment_account_sources.sql

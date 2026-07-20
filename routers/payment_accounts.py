@@ -216,22 +216,61 @@ def resolve_root_paypal_payee(checkout_view: str | None) -> str | None:
     return None
 
 
-def org_uses_platform_provider(org_id: str | None, provider: str) -> bool:
-    if not org_id:
-        return False
-    org = rest_get_one(
-        "organizations",
-        params={"id": f"eq.{org_id}", "select": "payment_account_sources"},
-    )
-    raw = (org or {}).get("payment_account_sources")
-    if isinstance(raw, str):
+def normalize_payment_account_sources(raw: object) -> dict[str, str]:
+    defaults = {"stripe": "organization", "paypal": "organization", "nowpayments": "organization"}
+    data = raw
+    if isinstance(data, str):
         try:
-            raw = json.loads(raw)
-        except (json.JSONDecodeError, TypeError):
-            raw = None
-    if not isinstance(raw, dict):
-        return False
-    return str(raw.get(provider) or "").strip().lower() == "platform"
+            data = json.loads(data)
+        except (TypeError, ValueError):
+            data = None
+    if not isinstance(data, dict):
+        return defaults
+    normalized = dict(defaults)
+    for key in defaults:
+        value = str(data.get(key) or "").strip().lower()
+        if value in {"platform", "organization"}:
+            normalized[key] = value
+    return normalized
+
+
+def resolve_payment_account_sources(
+    org_id: str | None,
+    campaign_id: str | None,
+) -> dict[str, str]:
+    defaults = {"stripe": "organization", "paypal": "organization", "nowpayments": "organization"}
+    resolved_org_id = org_id
+    if campaign_id:
+        campaign = rest_get_one(
+            "campaigns",
+            params={"id": f"eq.{campaign_id}", "select": "payment_account_sources,organization_id"},
+        )
+        if campaign:
+            if not resolved_org_id:
+                resolved_org_id = campaign.get("organization_id")
+            raw = campaign.get("payment_account_sources")
+            if raw is not None:
+                return normalize_payment_account_sources(raw)
+    if resolved_org_id:
+        org = rest_get_one(
+            "organizations",
+            params={"id": f"eq.{resolved_org_id}", "select": "payment_account_sources"},
+        )
+        return normalize_payment_account_sources((org or {}).get("payment_account_sources"))
+    return defaults
+
+
+def uses_platform_provider(
+    org_id: str | None,
+    provider: str,
+    campaign_id: str | None = None,
+) -> bool:
+    sources = resolve_payment_account_sources(org_id, campaign_id)
+    return str(sources.get(provider) or "").strip().lower() == "platform"
+
+
+def org_uses_platform_provider(org_id: str | None, provider: str) -> bool:
+    return uses_platform_provider(org_id, provider, None)
 
 
 def homepage_payment_summary() -> dict[str, Any]:

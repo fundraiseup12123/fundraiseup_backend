@@ -310,9 +310,9 @@ def stripe_account_accessible(account_id: str | None) -> bool:
 
 
 def resolve_stripe_account_for_checkout(org_id: str, campaign_id: str) -> tuple[str | None, dict[str, Any] | None]:
-    from routers.payment_accounts import org_uses_platform_provider, resolve_root_stripe_account
+    from routers.payment_accounts import resolve_root_stripe_account, uses_platform_provider
 
-    if org_uses_platform_provider(org_id, "stripe"):
+    if uses_platform_provider(org_id, "stripe", campaign_id):
         account_id = resolve_root_stripe_account("homepage")
         if not account_id:
             return None, None

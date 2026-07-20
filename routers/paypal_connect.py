@@ -276,9 +276,9 @@ def resolve_paypal_payee_email_for_checkout(campaign_id: str | None, checkout_vi
         )
         if campaign:
             org_id = campaign["organization_id"]
-            from routers.payment_accounts import org_uses_platform_provider, resolve_root_paypal_payee
+            from routers.payment_accounts import resolve_root_paypal_payee, uses_platform_provider
 
-            if org_uses_platform_provider(str(org_id), "paypal"):
+            if uses_platform_provider(str(org_id), "paypal", str(campaign_id)):
                 return resolve_root_paypal_payee("homepage")
 
             if campaign.get("paypal_account_id"):

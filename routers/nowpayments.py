@@ -221,9 +221,9 @@ def resolve_nowpayments_account_for_checkout(
         )
         if campaign:
             org_id = campaign["organization_id"]
-            from routers.payment_accounts import org_uses_platform_provider, resolve_root_nowpayments_account
+            from routers.payment_accounts import resolve_root_nowpayments_account, uses_platform_provider
 
-            if org_uses_platform_provider(str(org_id), "nowpayments"):
+            if uses_platform_provider(str(org_id), "nowpayments", str(campaign_id)):
                 return pick(resolve_root_nowpayments_account("homepage"))
 
             if campaign.get("nowpayments_account_id"):
