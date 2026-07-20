@@ -317,6 +317,9 @@ def _checkout_metadata(
         meta["campaign_id"] = campaign_id
     if stripe_account:
         meta["stripe_connect_account"] = stripe_account
+    meta["checkout_view"] = (
+        payload.checkout_view if payload.checkout_view in ("homepage", "popup") else "homepage"
+    )
     if payload.utm:
         utm_fields = {
             "utm_source": payload.utm.source,
@@ -343,7 +346,7 @@ def _checkout_metadata(
     return meta
 
 
-def _device_from_meta(meta: dict[str, str]) -> dict[str, str] | None:
+def _device_from_meta(meta: dict[str, str]) -> dict[str, str]:
     fields = {
         "os": meta.get("device_os"),
         "browser": meta.get("device_browser"),
@@ -353,7 +356,11 @@ def _device_from_meta(meta: dict[str, str]) -> dict[str, str] | None:
         "gender": meta.get("device_gender"),
     }
     cleaned = {key: value for key, value in fields.items() if value}
-    return cleaned or None
+    checkout_view = meta.get("checkout_view")
+    cleaned["checkout_view"] = (
+        checkout_view if checkout_view in ("homepage", "popup") else "homepage"
+    )
+    return cleaned
 
 
 def _utm_from_meta(meta: dict[str, str]) -> dict[str, str] | None:
@@ -947,9 +954,7 @@ def _donation_row_from_intent(
     utm = _utm_from_meta(meta)
     if utm:
         row["utm"] = utm
-    device = _device_from_meta(meta)
-    if device:
-        row["device"] = device
+    row["device"] = _device_from_meta(meta)
     return row
 
 
@@ -1053,6 +1058,7 @@ async def stripe_webhook(request: Request) -> dict[str, str]:
         utm = _utm_from_meta(meta)
         if utm:
             row["utm"] = utm
+        row["device"] = _device_from_meta(meta)
         saved = insert_donation(_ensure_donation_org({k: v for k, v in row.items() if v is not None}))
         if saved:
             _send_donation_emails_safe(saved)

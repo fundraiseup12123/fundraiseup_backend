@@ -103,6 +103,7 @@ class CapturePayPalOrderRequest(BaseModel):
     honoree_name: str | None = None
     comment: str | None = None
     campaign_id: str | None = None
+    checkout_view: Literal["homepage", "popup"] = "homepage"
     donor: PayPalDonor
     utm: PayPalUtm | None = None
     device: PayPalDevice | None = None
@@ -175,7 +176,7 @@ def _resolve_paypal_organization_id(campaign_id: str | None) -> str:
 def _record_paypal_donation(
     *,
     order_id: str,
-    payload: CreatePayPalOrderRequest | CompletePayPalRedirectRequest,
+    payload: CreatePayPalOrderRequest | CompletePayPalRedirectRequest | CapturePayPalOrderRequest,
     base_amount: float,
     total_display: float,
 ) -> dict[str, object] | None:
@@ -214,6 +215,7 @@ def _record_paypal_donation(
         "processing_fee": processing_fee,
         "payout_amount": payout_amount,
     }
+    device = {}
     if payload.device:
         device = {
             k: v
@@ -227,8 +229,9 @@ def _record_paypal_donation(
             }.items()
             if v
         }
-        if device:
-            row["device"] = device
+    checkout_view = getattr(payload, "checkout_view", None)
+    device["checkout_view"] = checkout_view if checkout_view in ("homepage", "popup") else "homepage"
+    row["device"] = device
     if payload.utm:
         utm = {
             k: v

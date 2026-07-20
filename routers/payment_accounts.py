@@ -216,6 +216,52 @@ def resolve_root_paypal_payee(checkout_view: str | None) -> str | None:
     return None
 
 
+def org_uses_platform_provider(org_id: str | None, provider: str) -> bool:
+    if not org_id:
+        return False
+    org = rest_get_one(
+        "organizations",
+        params={"id": f"eq.{org_id}", "select": "payment_account_sources"},
+    )
+    raw = (org or {}).get("payment_account_sources")
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            raw = None
+    if not isinstance(raw, dict):
+        return False
+    return str(raw.get(provider) or "").strip().lower() == "platform"
+
+
+def homepage_payment_summary() -> dict[str, Any]:
+    entry = _load_accounts_raw().get("homepage") or {}
+    stripe_id = entry.get("stripe_account_id")
+    paypal_merchant = entry.get("paypal_merchant_id")
+    paypal_email = entry.get("paypal_email")
+    now_hint = entry.get("nowpayments_api_key_hint")
+    now_key = entry.get("nowpayments_api_key")
+    return {
+        "stripe": {
+            "connected": bool(stripe_id),
+            "stripe_account_id": stripe_id,
+            "connection_status": entry.get("stripe_connection_status"),
+            "charges_enabled": bool(entry.get("stripe_charges_enabled")),
+        },
+        "paypal": {
+            "connected": bool(paypal_merchant or paypal_email),
+            "paypal_merchant_id": paypal_merchant,
+            "paypal_email": paypal_email,
+            "connection_status": entry.get("paypal_connection_status"),
+        },
+        "nowpayments": {
+            "connected": bool(now_key or now_hint),
+            "api_key_hint": now_hint,
+            "connection_status": entry.get("nowpayments_connection_status"),
+        },
+    }
+
+
 @router.post("/stripe/connect/start")
 def start_root_stripe_connect(
     payload: PaymentViewPayload,

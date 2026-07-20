@@ -36,3 +36,8 @@
 --   022_organization_timezone.sql
 --   023_campaign_text_font_sizes.sql
 --   024_campaign_title_html.sql
+--   025_campaign_mobile_landing_text.sql
+--   026_reminder_interval_days.sql
+--   027_email_organization_name.sql
+--   028_payment_account_sources.sql
+--   029_problem_reports.sql

@@ -483,7 +483,7 @@ def admin_insights(
 
     rows = _admin_org_donation_rows(
         org_id,
-        select="amount,currency,frequency,created_at,campaign_id,payment_method,honoree_name,comment,utm,status",
+        select="amount,currency,frequency,created_at,campaign_id,payment_method,honoree_name,comment,utm,status,device",
         campaigns=campaigns,
         campaign_id=campaign_id,
         designation=designation,
@@ -524,6 +524,10 @@ def admin_insights(
         lambda r: _hour_label(r.get("created_at", "")),
         reporting_currency,
     )
+    homepage_rows = [r for r in rows if _donation_checkout_view(r) == "homepage"]
+    popup_rows = [r for r in rows if _donation_checkout_view(r) == "popup"]
+    country_breakdown_homepage = _breakdown(homepage_rows, _donation_country_label, reporting_currency)
+    country_breakdown_popup = _breakdown(popup_rows, _donation_country_label, reporting_currency)
 
     sources = sorted(
         {
@@ -556,6 +560,8 @@ def admin_insights(
         "comment_count": sum(1 for r in rows if r.get("comment")),
         "campaign_breakdown": campaign_breakdown,
         "hour_breakdown": hour_breakdown,
+        "country_breakdown_homepage": country_breakdown_homepage,
+        "country_breakdown_popup": country_breakdown_popup,
         "filter_options": {
             "campaigns": campaigns,
             "designations": sorted({c.get("designation") for c in campaigns if c.get("designation")}),
@@ -582,6 +588,8 @@ def _empty_insights(reporting_currency: str, date_preset: str, campaigns: list[d
         "comment_count": 0,
         "campaign_breakdown": [],
         "hour_breakdown": [],
+        "country_breakdown_homepage": [],
+        "country_breakdown_popup": [],
         "filter_options": {
             "campaigns": campaigns,
             "designations": sorted({c.get("designation") for c in campaigns if c.get("designation")}),
@@ -638,6 +646,33 @@ def _hour_label_from_int(hour: int) -> str:
     suffix = "PM" if hour >= 12 else "AM"
     h = hour % 12 or 12
     return f"{h} {suffix}"
+
+
+def _donation_checkout_view(row: dict[str, Any]) -> str:
+    device = row.get("device")
+    if isinstance(device, dict):
+        view = device.get("checkout_view")
+        if view == "popup":
+            return "popup"
+    return "homepage"
+
+
+def _donation_country_label(row: dict[str, Any]) -> str:
+    device = row.get("device")
+    if not isinstance(device, dict):
+        return "Unknown"
+    raw = (
+        device.get("country")
+        or device.get("Country")
+        or device.get("country_code")
+        or device.get("countryCode")
+    )
+    if raw is None:
+        return "Unknown"
+    code = str(raw).strip().upper()
+    if len(code) == 2 and code.isalpha():
+        return code
+    return "Unknown"
 
 
 def _enrich_donation_fees(donation: dict[str, Any]) -> dict[str, Any]:
@@ -753,12 +788,17 @@ def list_supporters(
     limit: int = Query(50, ge=1, le=200),
 ) -> list[dict[str, Any]]:
     require_org_access(org_id, user, min_role="member")
+    org = rest_get_one(
+        "organizations",
+        params={"id": f"eq.{org_id}", "select": "reporting_currency"},
+    )
+    reporting_currency = str((org or {}).get("reporting_currency") or "USD").upper()
     rows = rest_get(
         "donations",
         params={
             "organization_id": f"eq.{org_id}",
             "status": "eq.succeeded",
-            "select": "id,first_name,last_name,email,amount",
+            "select": "id,first_name,last_name,email,amount,currency",
             "order": "created_at.desc",
             "limit": "2000",
         },
@@ -780,9 +820,14 @@ def list_supporters(
                 "email": email or None,
                 "total_donated": 0.0,
                 "donation_count": 0,
+                "reporting_currency": reporting_currency,
             },
         )
-        bucket["total_donated"] = float(bucket["total_donated"]) + float(row.get("amount") or 0)
+        bucket["total_donated"] = float(bucket["total_donated"]) + convert_to_reporting(
+            float(row.get("amount") or 0),
+            str(row.get("currency") or "USD"),
+            reporting_currency,
+        )
         bucket["donation_count"] = int(bucket["donation_count"]) + 1
 
     supporters = sorted(
@@ -837,6 +882,24 @@ def list_tributes(
     ]
 
 
+@router.get("/orgs/{org_id}/problem-reports")
+def list_problem_reports(
+    org_id: str,
+    user: Annotated[AuthUser, Depends(require_auth)],
+    limit: int = Query(100, ge=1, le=200),
+) -> list[dict[str, Any]]:
+    require_org_access(org_id, user, min_role="member")
+    return rest_get(
+        "problem_reports",
+        params={
+            "organization_id": f"eq.{org_id}",
+            "select": "id,description,campaign_id,created_at",
+            "order": "created_at.desc",
+            "limit": str(limit),
+        },
+    )
+
+
 @router.get("/orgs/{org_id}/emails")
 def list_email_logs(
     org_id: str,
@@ -873,6 +936,53 @@ def list_email_logs(
             "limit": str(limit),
         },
     )
+
+
+@router.get("/orgs/{org_id}/reminders")
+def list_email_reminders(
+    org_id: str,
+    user: Annotated[AuthUser, Depends(require_auth)],
+    limit: int = Query(200, ge=1, le=500),
+    source: str | None = Query("popup"),
+) -> list[dict[str, Any]]:
+    require_org_access(org_id, user, min_role="member")
+    params: dict[str, str] = {
+        "organization_id": f"eq.{org_id}",
+        "select": "id,email,campaign_id,donor_name,source,active,last_sent_at,created_at",
+        "order": "created_at.desc",
+        "limit": str(limit),
+    }
+    if source in {"popup", "donor"}:
+        params["source"] = f"eq.{source}"
+    rows = rest_get("email_reminders", params=params)
+    campaign_ids = sorted({str(r.get("campaign_id")) for r in rows if r.get("campaign_id")})
+    campaign_name_by_id: dict[str, str] = {}
+    if campaign_ids:
+        campaigns = rest_get(
+            "campaigns",
+            params={
+                "id": f"in.({','.join(campaign_ids)})",
+                "select": "id,name",
+                "limit": str(len(campaign_ids)),
+            },
+        )
+        campaign_name_by_id = {
+            str(c["id"]): str(c.get("name") or "Campaign") for c in campaigns if c.get("id")
+        }
+    return [
+        {
+            "id": row.get("id"),
+            "email": row.get("email"),
+            "campaign_id": row.get("campaign_id"),
+            "campaign_name": campaign_name_by_id.get(str(row.get("campaign_id") or ""), "Unknown"),
+            "donor_name": row.get("donor_name"),
+            "source": row.get("source") or "popup",
+            "active": bool(row.get("active")),
+            "last_sent_at": row.get("last_sent_at"),
+            "created_at": row.get("created_at"),
+        }
+        for row in rows
+    ]
 
 
 @router.get("/orgs/{org_id}/recurring")
@@ -1086,7 +1196,9 @@ def admin_google_analytics(
         payload["error"] = None
 
         # Today often lags in standard reports — attach realtime (~30 min) so visits appear.
-        if date_preset == "today":
+        if date_preset == "today" or (start == "today" and end == "today") or (
+            date_preset == "day" and start == end == datetime.now(timezone.utc).date().isoformat()
+        ):
             payload["realtime"] = fetch_realtime_snapshot(property_id=resolved_property_id)
             totals = payload.get("totals") or {}
             if not float(totals.get("users") or 0) and not float(totals.get("sessions") or 0):

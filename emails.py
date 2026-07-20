@@ -119,6 +119,16 @@ def _unsubscribe_url(*, email: str, campaign_id: str | None = None) -> str:
     return f"{base}/api/backend/emails/reminders/unsubscribe?{q}"
 
 
+def _org_email_display_name(org: dict[str, Any] | None, fallback: str = "your organization") -> str:
+    if not org:
+        return fallback
+    email_name = str(org.get("email_organization_name") or "").strip()
+    if email_name:
+        return email_name
+    account_name = str(org.get("name") or "").strip()
+    return account_name or fallback
+
+
 def _campaign_branding(campaign_id: str | None) -> dict[str, str]:
     defaults = {
         "title": "our campaign",
@@ -160,10 +170,15 @@ def _campaign_branding(campaign_id: str | None) -> dict[str, str]:
         defaults["organization_id"] = org_id
         org = rest_get_one(
             "organizations",
-            params={"id": f"eq.{org_id}", "select": "name"},
+            params={"id": f"eq.{org_id}", "select": "name,email_organization_name"},
         )
-        if org and org.get("name"):
-            defaults["organization_name"] = str(org["name"])
+        if not org:
+            org = rest_get_one(
+                "organizations",
+                params={"id": f"eq.{org_id}", "select": "name"},
+            )
+        if org:
+            defaults["organization_name"] = _org_email_display_name(org, DEFAULT_BRAND_NAME)
     return defaults
 
 
@@ -636,25 +651,74 @@ def unsubscribe_weekly_reminder(
     return {"unsubscribed": True, "updated": updated}
 
 
+def _org_reminder_interval_days(org_id: str | None) -> int:
+    default = 7
+    if not org_id:
+        return default
+    org = rest_get_one(
+        "organizations",
+        params={"id": f"eq.{org_id}", "select": "reminder_interval_days"},
+    )
+    raw = (org or {}).get("reminder_interval_days")
+    try:
+        days = int(raw if raw is not None else default)
+    except (TypeError, ValueError):
+        return default
+    if days < 1:
+        return 1
+    if days > 365:
+        return 365
+    return days
+
+
+def _reminder_is_due(
+    *,
+    last_sent_at: object,
+    created_at: object,
+    interval_days: int,
+    now: datetime,
+) -> bool:
+    cutoff = now - timedelta(days=interval_days)
+    if last_sent_at:
+        try:
+            return _parse_dt(str(last_sent_at)) <= cutoff
+        except ValueError:
+            return True
+    if created_at:
+        try:
+            return _parse_dt(str(created_at)) <= cutoff
+        except ValueError:
+            return True
+    return True
+
+
 def send_weekly_reminders() -> dict[str, int | str]:
     if not resend_configured():
         return {"sent": 0, "skipped": 0, "reason": "not_configured"}
 
-    week_ago = datetime.now(timezone.utc) - timedelta(days=7)
+    now = datetime.now(timezone.utc)
+    interval_cache: dict[str, int] = {}
     reminders = rest_get(
         "email_reminders",
         params={
             "active": "eq.true",
-            "select": "id,email,campaign_id,donor_name,last_sent_at",
+            "select": "id,email,campaign_id,organization_id,donor_name,last_sent_at,created_at",
             "limit": "200",
         },
     )
-    reminders = [
-        r
-        for r in reminders
-        if not r.get("last_sent_at")
-        or _parse_dt(r["last_sent_at"]) <= week_ago
-    ]
+    due_reminders = []
+    for row in reminders:
+        org_id = str(row.get("organization_id") or "")
+        if org_id not in interval_cache:
+            interval_cache[org_id] = _org_reminder_interval_days(org_id or None)
+        if _reminder_is_due(
+            last_sent_at=row.get("last_sent_at"),
+            created_at=row.get("created_at"),
+            interval_days=interval_cache[org_id],
+            now=now,
+        ):
+            due_reminders.append(row)
+    reminders = due_reminders
 
     sent = 0
     skipped = 0
@@ -714,7 +778,7 @@ def send_weekly_reminders() -> dict[str, int | str]:
             )
             rest_patch(
                 "email_reminders",
-                {"last_sent_at": datetime.now(timezone.utc).isoformat()},
+                {"last_sent_at": now.isoformat()},
                 match={"id": reminder["id"]},
             )
             sent += 1
@@ -744,15 +808,23 @@ def send_weekly_reminders() -> dict[str, int | str]:
             params={
                 "email": f"eq.{email}",
                 "source": "eq.donor",
-                "select": "id,last_sent_at",
+                "select": "id,last_sent_at,created_at,organization_id",
             },
         )
-        if reminder and reminder.get("last_sent_at"):
-            try:
-                if datetime.now(timezone.utc) - _parse_dt(str(reminder["last_sent_at"])) < timedelta(days=7):
-                    continue
-            except ValueError:
-                pass
+        org_id = str(
+            (reminder or {}).get("organization_id")
+            or row.get("organization_id")
+            or ""
+        )
+        if org_id not in interval_cache:
+            interval_cache[org_id] = _org_reminder_interval_days(org_id or None)
+        if reminder and not _reminder_is_due(
+            last_sent_at=reminder.get("last_sent_at"),
+            created_at=reminder.get("created_at"),
+            interval_days=interval_cache[org_id],
+            now=now,
+        ):
+            continue
 
         branding = _campaign_branding(row.get("campaign_id"))
         extras = _email_presentation(
@@ -806,7 +878,7 @@ def send_weekly_reminders() -> dict[str, int | str]:
             if reminder:
                 rest_patch(
                     "email_reminders",
-                    {"last_sent_at": datetime.now(timezone.utc).isoformat()},
+                    {"last_sent_at": now.isoformat()},
                     match={"id": reminder["id"]},
                 )
             else:
@@ -819,7 +891,7 @@ def send_weekly_reminders() -> dict[str, int | str]:
                         "source": "donor",
                         "donor_name": donor_name,
                         "active": True,
-                        "last_sent_at": datetime.now(timezone.utc).isoformat(),
+                        "last_sent_at": now.isoformat(),
                     },
                 )
             seen_emails.add(email)
@@ -880,9 +952,14 @@ def send_donation_alerts_for_row(row: dict[str, Any]) -> int:
 
     org = rest_get_one(
         "organizations",
-        params={"id": f"eq.{org_id}", "select": "name"},
+        params={"id": f"eq.{org_id}", "select": "name,email_organization_name"},
     )
-    organization_name = str((org or {}).get("name") or "your organization")
+    if not org:
+        org = rest_get_one(
+            "organizations",
+            params={"id": f"eq.{org_id}", "select": "name"},
+        )
+    organization_name = _org_email_display_name(org)
     campaign_title = "your campaign"
     campaign_id = row.get("campaign_id")
     if campaign_id:
@@ -959,8 +1036,16 @@ def send_org_weekly_digests() -> dict[str, int]:
     week_ago = datetime.now(timezone.utc) - timedelta(days=7)
     orgs = rest_get(
         "organizations",
-        params={"status": "eq.active", "select": "id,name,notification_prefs,reporting_currency"},
+        params={
+            "status": "eq.active",
+            "select": "id,name,email_organization_name,notification_prefs,reporting_currency",
+        },
     )
+    if not orgs:
+        orgs = rest_get(
+            "organizations",
+            params={"status": "eq.active", "select": "id,name,notification_prefs,reporting_currency"},
+        )
     digests_sent = 0
     skipped = 0
 
@@ -1004,7 +1089,7 @@ def send_org_weekly_digests() -> dict[str, int]:
         logo_url = _brand_logo_url()
         banner_url = _brand_banner_url()
         contact = _contact_email()
-        organization_name = str(org.get("name") or "your organization")
+        organization_name = _org_email_display_name(org)
 
         for recipient in _org_notification_recipients(org_id):
             admin_greeting = f", {recipient['name']}" if recipient.get("name") else ""

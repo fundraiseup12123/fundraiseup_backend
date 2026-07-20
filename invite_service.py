@@ -14,7 +14,7 @@ from db import rest_get_one, rest_insert, rest_patch, supabase_url
 from emails import log_email, send_resend_email
 from email_branding import DEFAULT_EMAIL_BANNER_URL, DEFAULT_EMAIL_LOGO_URL, DEFAULT_PRIMARY_COLOR
 from email_templates import org_admin_invite_email
-from frontend_url import resolve_frontend_url
+from frontend_url import resolve_frontend_url, resolve_invite_frontend_url
 
 logger = logging.getLogger(__name__)
 
@@ -206,6 +206,56 @@ def mark_invite_accepted(invite_id: str) -> None:
     )
 
 
+def update_supabase_user_password(user_id: str, password: str) -> None:
+    url = supabase_url()
+    if not url or not _supabase_secret():
+        raise HTTPException(status_code=503, detail="Supabase admin API is not configured")
+    response = httpx.put(
+        f"{url}/auth/v1/admin/users/{user_id}",
+        headers=_admin_headers(),
+        json={"password": password},
+        timeout=20.0,
+    )
+    if response.status_code not in {200, 201}:
+        raise HTTPException(status_code=400, detail="Unable to set account password")
+
+
+def send_pending_organization_invite(
+    invite: dict[str, Any],
+    *,
+    organization_name: str,
+) -> dict[str, Any]:
+    """Email invite link; account is created when the invitee sets a password."""
+    if invite.get("accepted_at"):
+        raise HTTPException(status_code=400, detail="Invite already accepted")
+
+    email = str(invite.get("email") or "").lower()
+    org_id = str(invite.get("organization_id") or "")
+    role = str(invite.get("role") or "member")
+    token = str(invite.get("token") or "").strip()
+    if not email or not org_id or not token:
+        raise HTTPException(status_code=400, detail="Invalid invite")
+
+    invite_url = f"{resolve_invite_frontend_url().rstrip('/')}/invite/{token}"
+    existing_user = bool(find_user_id_by_email(email))
+    email_result = send_org_invite_email(
+        recipient_email=email,
+        organization_id=org_id,
+        organization_name=organization_name,
+        role=role,
+        login_url=invite_url,
+        temporary_password=None,
+        existing_user=existing_user,
+    )
+    return {
+        "email_sent": bool(email_result.get("sent")),
+        "email_configured": email_result.get("sent") is not False
+        or email_result.get("reason") != "not_configured",
+        "existing_user": existing_user,
+        "invite_url": invite_url,
+    }
+
+
 def send_org_invite_email(
     *,
     recipient_email: str,
@@ -256,7 +306,7 @@ def fulfill_organization_invite(
         raise HTTPException(status_code=400, detail="Invalid invite")
 
     existing_user_id = find_user_id_by_email(email)
-    login_url = f"{resolve_frontend_url().rstrip('/')}/login?next=/admin/insights"
+    login_url = f"{resolve_invite_frontend_url().rstrip('/')}/login?next=/admin/insights"
     password: str | None = None
     created_new = False
 

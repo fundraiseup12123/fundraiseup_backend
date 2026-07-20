@@ -221,6 +221,11 @@ def resolve_nowpayments_account_for_checkout(
         )
         if campaign:
             org_id = campaign["organization_id"]
+            from routers.payment_accounts import org_uses_platform_provider, resolve_root_nowpayments_account
+
+            if org_uses_platform_provider(str(org_id), "nowpayments"):
+                return pick(resolve_root_nowpayments_account("homepage"))
+
             if campaign.get("nowpayments_account_id"):
                 acct = rest_get_one(
                     "nowpayments_accounts",
@@ -309,6 +314,7 @@ def _record_nowpayments_donation(
         row["crypto_amount"] = crypto_amount
     if crypto_currency:
         row["crypto_currency"] = crypto_currency.upper()
+    device = {}
     if payload.device:
         device = {
             k: v
@@ -322,8 +328,9 @@ def _record_nowpayments_donation(
             }.items()
             if v
         }
-        if device:
-            row["device"] = device
+    checkout_view = getattr(payload, "checkout_view", None)
+    device["checkout_view"] = checkout_view if checkout_view in ("homepage", "popup") else "homepage"
+    row["device"] = device
     if payload.utm:
         utm = {
             k: v

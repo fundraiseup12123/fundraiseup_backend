@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from auth import AuthUser, require_auth, require_org_access
 from db import rest_delete, rest_get, rest_get_one, rest_insert, rest_insert_error, rest_patch, select_columns
-from invite_service import fulfill_organization_invite
+from invite_service import send_pending_organization_invite
 from domain_utils import (
     platform_domain_config,
     platform_root_domain,
@@ -1040,18 +1040,27 @@ def verify_domain(
 @router.get("/{org_id}/members")
 def list_members(org_id: str, user: Annotated[AuthUser, Depends(require_auth)]) -> list[dict[str, Any]]:
     _get_org_id(user, org_id)
-    return rest_get(
+    rows = rest_get(
         "organization_members",
         params={
             "organization_id": f"eq.{org_id}",
             "select": "id,user_id,role,created_at,profiles(id,first_name,last_name,role)",
         },
     )
+    from invite_service import get_user_email_by_id
+
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        email = get_user_email_by_id(str(row.get("user_id") or ""))
+        item["email"] = email
+        out.append(item)
+    return out
 
 
 class TeamInviteRequest(BaseModel):
     email: str = Field(min_length=3)
-    role: str = "admin"
+    role: str = "member"
 
 
 @router.post("/{org_id}/invites")
@@ -1064,29 +1073,37 @@ def invite_member(
     org = rest_get_one("organizations", params={"id": f"eq.{org_id}", "select": "id,name"})
     if not org:
         raise HTTPException(status_code=404, detail="Organization not found")
+    role = str(payload.role or "member").strip().lower()
+    if role not in {"owner", "admin", "member"}:
+        raise HTTPException(status_code=400, detail="Invalid role")
     invite = rest_insert(
         "organization_invites",
         {
             "organization_id": org_id,
             "email": payload.email.lower(),
-            "role": payload.role,
+            "role": role,
             "invited_by": user.id,
         },
     )
     if not invite:
         raise HTTPException(status_code=400, detail="Failed to create invite")
-    provisioned = fulfill_organization_invite(
+    if not invite.get("token"):
+        invite = rest_get_one(
+            "organization_invites",
+            params={"id": f"eq.{invite['id']}", "select": "*"},
+        ) or invite
+    provisioned = send_pending_organization_invite(
         invite,
         organization_name=str(org.get("name") or "your organization"),
     )
     return {
         "invite": invite,
         "email_sent": bool(provisioned.get("email_sent")),
-        "login_url": provisioned.get("login_url"),
+        "invite_url": provisioned.get("invite_url"),
         "message": (
-            f"Login details emailed to {payload.email.lower()}."
+            f"Invitation emailed to {payload.email.lower()}."
             if provisioned.get("email_sent")
-            else f"Team member added. Configure RESEND_API_KEY to email login details to {payload.email.lower()}."
+            else f"Invite created. Configure RESEND_API_KEY to email {payload.email.lower()}."
         ),
     }
 
@@ -1098,12 +1115,72 @@ def get_org_settings(org_id: str, user: Annotated[AuthUser, Depends(require_auth
         "organizations",
         params={
             "id": f"eq.{org_id}",
-            "select": "id,name,slug,default_currency,reporting_currency,timezone,payment_methods,notification_prefs",
+            "select": "id,name,slug,default_currency,reporting_currency,timezone,payment_methods,notification_prefs,reminder_interval_days,email_organization_name,payment_account_sources",
         },
     )
     if not org:
+        org = rest_get_one(
+            "organizations",
+            params={
+                "id": f"eq.{org_id}",
+                "select": "id,name,slug,default_currency,reporting_currency,timezone,payment_methods,notification_prefs,reminder_interval_days,email_organization_name",
+            },
+        )
+    if not org:
+        org = rest_get_one(
+            "organizations",
+            params={
+                "id": f"eq.{org_id}",
+                "select": "id,name,slug,default_currency,reporting_currency,timezone,payment_methods,notification_prefs,reminder_interval_days",
+            },
+        )
+    if not org:
+        org = rest_get_one(
+            "organizations",
+            params={
+                "id": f"eq.{org_id}",
+                "select": "id,name,slug,default_currency,reporting_currency,timezone,payment_methods,notification_prefs",
+            },
+        )
+    if not org:
         raise HTTPException(status_code=404, detail="Organization not found")
+    if org.get("reminder_interval_days") is None:
+        org["reminder_interval_days"] = 7
+    if "email_organization_name" not in org:
+        org["email_organization_name"] = None
+    org["payment_account_sources"] = _normalize_payment_account_sources(org.get("payment_account_sources"))
     return org
+
+
+def _normalize_payment_account_sources(raw: object) -> dict[str, str]:
+    defaults = {"stripe": "organization", "paypal": "organization", "nowpayments": "organization"}
+    data = raw
+    if isinstance(data, str):
+        try:
+            import json
+
+            data = json.loads(data)
+        except (TypeError, ValueError):
+            data = None
+    if not isinstance(data, dict):
+        return defaults
+    normalized = dict(defaults)
+    for key in defaults:
+        value = str(data.get(key) or "").strip().lower()
+        if value in {"platform", "organization"}:
+            normalized[key] = value
+    return normalized
+
+
+@router.get("/{org_id}/platform-payment-accounts")
+def get_platform_payment_accounts(
+    org_id: str,
+    user: Annotated[AuthUser, Depends(require_auth)],
+) -> dict[str, Any]:
+    require_org_access(org_id, user, min_role="member")
+    from routers.payment_accounts import homepage_payment_summary
+
+    return homepage_payment_summary()
 
 
 def _cascade_org_default_currency(org_id: str, currency: str) -> int:
@@ -1158,7 +1235,10 @@ def update_org_settings(
     require_org_access(org_id, user, min_role="admin")
     existing = rest_get_one(
         "organizations",
-        params={"id": f"eq.{org_id}", "select": "id,name,slug,default_currency,reporting_currency,timezone"},
+        params={
+            "id": f"eq.{org_id}",
+            "select": "id,name,slug,default_currency,reporting_currency,timezone,reminder_interval_days",
+        },
     )
     if not existing:
         raise HTTPException(status_code=404, detail="Organization not found")
@@ -1171,6 +1251,9 @@ def update_org_settings(
         "timezone",
         "payment_methods",
         "notification_prefs",
+        "reminder_interval_days",
+        "email_organization_name",
+        "payment_account_sources",
     }
     updates: dict[str, Any] = {k: v for k, v in payload.items() if k in allowed}
 
@@ -1214,6 +1297,28 @@ def update_org_settings(
             raise HTTPException(status_code=400, detail="Invalid IANA timezone") from exc
         updates["timezone"] = timezone
 
+    if "reminder_interval_days" in updates:
+        try:
+            days = int(updates["reminder_interval_days"])
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="Reminder interval must be a whole number of days")
+        if days < 1 or days > 365:
+            raise HTTPException(status_code=400, detail="Reminder interval must be between 1 and 365 days")
+        updates["reminder_interval_days"] = days
+
+    if "email_organization_name" in updates:
+        raw = updates["email_organization_name"]
+        if raw is None:
+            updates["email_organization_name"] = None
+        else:
+            name = str(raw).strip()
+            updates["email_organization_name"] = name[:160] if name else None
+
+    if "payment_account_sources" in updates:
+        updates["payment_account_sources"] = _normalize_payment_account_sources(
+            updates["payment_account_sources"]
+        )
+
     if not updates:
         raise HTTPException(status_code=400, detail="No updates provided")
 
@@ -1230,9 +1335,17 @@ def update_org_settings(
         "organizations",
         params={
             "id": f"eq.{org_id}",
-            "select": "id,name,slug,default_currency,reporting_currency,timezone,payment_methods,notification_prefs",
+            "select": "id,name,slug,default_currency,reporting_currency,timezone,payment_methods,notification_prefs,reminder_interval_days,email_organization_name,payment_account_sources",
         },
     ) or updated
+    if isinstance(fresh, dict) and "email_organization_name" not in fresh:
+        fresh = {**fresh, "email_organization_name": None}
     if isinstance(fresh, dict):
-        fresh = {**fresh, "campaigns_currency_updated": campaigns_updated}
+        fresh = {
+            **fresh,
+            "payment_account_sources": _normalize_payment_account_sources(
+                fresh.get("payment_account_sources")
+            ),
+            "campaigns_currency_updated": campaigns_updated,
+        }
     return fresh

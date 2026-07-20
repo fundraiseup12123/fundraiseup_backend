@@ -5,7 +5,7 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
 
-from db import rest_get, rest_get_one, select_columns
+from db import rest_get, rest_get_one, rest_insert, select_columns
 from site_constants import ROOT_CAMPAIGN_ID
 
 router = APIRouter(prefix="/public", tags=["public"])
@@ -104,3 +104,39 @@ def resolve_host(host: str = Query(...)) -> dict[str, Any]:
         "organization_id": campaign.get("organization_id"),
         "slug": campaign["slug"],
     }
+
+
+@router.post("/problem-reports")
+def create_problem_report(payload: dict[str, Any]) -> dict[str, Any]:
+    description = str(payload.get("description") or "").strip()
+    if not description:
+        raise HTTPException(status_code=400, detail="Description is required")
+    if len(description) > 500:
+        description = description[:500]
+
+    organization_id = payload.get("organization_id") or None
+    campaign_id = payload.get("campaign_id") or None
+    if organization_id:
+        organization_id = str(organization_id).strip() or None
+    if campaign_id:
+        campaign_id = str(campaign_id).strip() or None
+
+    if campaign_id and not organization_id:
+        campaign = rest_get_one(
+            "campaigns",
+            params={"id": f"eq.{campaign_id}", "select": "id,organization_id"},
+        )
+        if campaign:
+            organization_id = campaign.get("organization_id")
+
+    row = rest_insert(
+        "problem_reports",
+        {
+            "organization_id": organization_id,
+            "campaign_id": campaign_id,
+            "description": description,
+        },
+    )
+    if not row:
+        raise HTTPException(status_code=400, detail="Unable to save report")
+    return {"ok": True, "id": row.get("id")}

@@ -381,18 +381,20 @@ def org_admin_invite_email(
     banner_url: str | None = None,
     contact_email: str | None = None,
 ) -> tuple[str, str]:
-    subject = f"Your {organization_name} admin access"
+    subject = f"Join {organization_name} on FundraiseUp"
     role_label = escape(role.replace("_", " ").title())
 
-    if existing_user:
-        credentials = f"""
+    if temporary_password:
+        if existing_user:
+            credentials = f"""
           <p style="margin:0 0 12px;">
             Sign in with your existing FundraiseUp password using <strong>{escape(email)}</strong>.
           </p>
         """
-        preheader = f"You now have {role_label} access to {organization_name}."
-    else:
-        credentials = f"""
+            preheader = f"You now have {role_label} access to {organization_name}."
+            cta_label = "Sign in to org console"
+        else:
+            credentials = f"""
           <p style="margin:0 0 12px;">Use these credentials to sign in:</p>
           <table role="presentation" cellspacing="0" cellpadding="0" style="margin:0 0 12px;">
             <tr><td style="padding:4px 0;color:#64748b;">Email</td><td style="padding:4px 0 4px 16px;"><strong>{escape(email)}</strong></td></tr>
@@ -402,26 +404,46 @@ def org_admin_invite_email(
             Change your password after signing in from Profile settings.
           </p>
         """
-        preheader = f"Your {organization_name} admin account is ready."
+            preheader = f"Your {organization_name} admin account is ready."
+            cta_label = "Sign in to org console"
+        body_extra = """
+      <p style="margin:0;">
+        From your organization console you can manage campaigns, donations, team members, and settings
+        for <strong>{org}</strong> only.
+      </p>
+        """.format(org=escape(organization_name))
+        headline = f"Welcome to {organization_name}"
+    else:
+        credentials = f"""
+          <p style="margin:0 0 12px;">
+            Click the button below to set your password for <strong>{escape(email)}</strong>
+            and join <strong>{escape(organization_name)}</strong> as <strong>{role_label}</strong>.
+          </p>
+        """
+        preheader = f"Set your password to join {organization_name}."
+        cta_label = "Set password and join"
+        body_extra = """
+      <p style="margin:0;color:#64748b;font-size:14px;">
+        This invitation link is for your email only. Your email address cannot be changed on the signup page.
+      </p>
+        """
+        headline = f"You're invited to {organization_name}"
 
     body = f"""
       <p style="margin:0 0 12px;">Greetings,</p>
       <p style="margin:0 0 12px;">
-        You have been added as <strong>{role_label}</strong> for
+        You have been invited as <strong>{role_label}</strong> for
         <strong>{escape(organization_name)}</strong> on FundraiseUp.
       </p>
       {credentials}
-      <p style="margin:0;">
-        From your organization console you can manage campaigns, donations, team members, and settings
-        for <strong>{escape(organization_name)}</strong> only.
-      </p>
+      {body_extra}
     """
 
     html = branded_email_html(
         preheader=preheader,
-        headline=f"Welcome to {organization_name}",
+        headline=headline,
         body_html=body,
-        cta_label="Sign in to org console",
+        cta_label=cta_label,
         cta_url=login_url,
         logo_url=logo_url,
         organization_name=organization_name,
