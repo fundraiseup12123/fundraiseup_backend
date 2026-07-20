@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 
-from auth import AuthUser, require_auth, require_org_access
+from auth import AuthUser, deny_platform_admin_payment_writes, require_auth, require_org_access
 from db import rest_delete, rest_get, rest_get_one, rest_insert, rest_insert_result, rest_patch, rest_patch_result
 
 from frontend_url import pack_origin_token, resolve_frontend_url, unpack_origin_token
@@ -99,6 +99,7 @@ def start_connect(
     user: Annotated[AuthUser, Depends(require_auth)],
 ) -> dict[str, str]:
     require_org_access(payload.organization_id, user, min_role="admin")
+    deny_platform_admin_payment_writes(user)
 
     frontend_url = resolve_frontend_url(payload.frontend_origin)
 
@@ -276,6 +277,7 @@ def disconnect_stripe_account(
         raise HTTPException(status_code=404, detail="Stripe account not found")
 
     require_org_access(account["organization_id"], user, min_role="admin")
+    deny_platform_admin_payment_writes(user)
 
     if account.get("campaign_id"):
         campaign = rest_get_one(

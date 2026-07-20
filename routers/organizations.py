@@ -11,7 +11,7 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, field_validator
 
-from auth import AuthUser, require_auth, require_org_access
+from auth import AuthUser, deny_platform_admin_payment_writes, require_auth, require_org_access
 from db import rest_delete, rest_get, rest_get_one, rest_insert, rest_insert_error, rest_patch, select_columns
 from routers.payment_accounts import normalize_payment_account_sources
 from invite_service import send_pending_organization_invite
@@ -619,6 +619,14 @@ def update_campaign(
     user: Annotated[AuthUser, Depends(require_auth)],
 ) -> dict[str, Any]:
     require_org_access(org_id, user, min_role="admin")
+    payment_fields = (
+        "stripe_account_id",
+        "paypal_account_id",
+        "nowpayments_account_id",
+        "payment_account_sources",
+    )
+    if any(field in payload.model_fields_set for field in payment_fields):
+        deny_platform_admin_payment_writes(user)
     existing_campaign = rest_get_one(
         "campaigns",
         params={
@@ -1320,6 +1328,8 @@ def update_org_settings(
     user: Annotated[AuthUser, Depends(require_auth)],
 ) -> dict[str, Any]:
     require_org_access(org_id, user, min_role="admin")
+    if "payment_methods" in payload or "payment_account_sources" in payload:
+        deny_platform_admin_payment_writes(user)
     existing = rest_get_one(
         "organizations",
         params={

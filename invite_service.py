@@ -259,7 +259,7 @@ def send_pending_organization_invite(
 def send_org_invite_email(
     *,
     recipient_email: str,
-    organization_id: str,
+    organization_id: str | None,
     organization_name: str,
     role: str,
     login_url: str,
@@ -280,12 +280,14 @@ def send_org_invite_email(
     )
     result = send_resend_email(to=recipient_email, subject=subject, html=html)
     if result.get("sent"):
-        log_email(
-            recipient_email=recipient_email,
-            subject=subject,
-            template_key="org_admin_invite",
-            organization_id=organization_id,
-        )
+        log_kwargs: dict[str, Any] = {
+            "recipient_email": recipient_email,
+            "subject": subject,
+            "template_key": "org_admin_invite",
+        }
+        if organization_id:
+            log_kwargs["organization_id"] = organization_id
+        log_email(**log_kwargs)
     return result
 
 
@@ -342,4 +344,68 @@ def fulfill_organization_invite(
         "email_configured": email_result.get("sent") is not False or email_result.get("reason") != "not_configured",
         "existing_user": not created_new,
         "login_url": login_url,
+    }
+
+
+def fulfill_platform_admin_invite(
+    *,
+    email: str,
+    invited_by: str | None = None,
+    first_name: str = "",
+    last_name: str = "",
+) -> dict[str, Any]:
+    """Create or upgrade a user to platform_admin (all organizations, payments read-only)."""
+    recipient = str(email or "").strip().lower()
+    if not recipient:
+        raise HTTPException(status_code=400, detail="Email is required")
+
+    existing_user_id = find_user_id_by_email(recipient)
+    login_url = f"{resolve_invite_frontend_url().rstrip('/')}/login?next=/admin/insights"
+    password: str | None = None
+    created_new = False
+
+    if existing_user_id:
+        user_id = existing_user_id
+        profile = rest_get_one("profiles", params={"id": f"eq.{user_id}", "select": "id,role"})
+        if profile and str(profile.get("role") or "") == "super_admin":
+            raise HTTPException(status_code=400, detail="Cannot change a super admin to platform admin")
+    else:
+        password = generate_temp_password()
+        user_id = create_supabase_user(recipient, password, first_name=first_name, last_name=last_name)
+        created_new = True
+
+    profile_updates: dict[str, Any] = {"role": "platform_admin"}
+    if first_name:
+        profile_updates["first_name"] = first_name
+    if last_name:
+        profile_updates["last_name"] = last_name
+    patched = rest_patch("profiles", profile_updates, match={"id": user_id})
+    if not patched:
+        rest_insert(
+            "profiles",
+            {
+                "id": user_id,
+                "role": "platform_admin",
+                "first_name": first_name or None,
+                "last_name": last_name or None,
+            },
+        )
+
+    email_result = send_org_invite_email(
+        recipient_email=recipient,
+        organization_id=None,
+        organization_name="all organizations",
+        role="platform admin",
+        login_url=login_url,
+        temporary_password=password,
+        existing_user=not created_new,
+    )
+
+    return {
+        "user_id": user_id,
+        "email_sent": bool(email_result.get("sent")),
+        "email_configured": email_result.get("sent") is not False or email_result.get("reason") != "not_configured",
+        "existing_user": not created_new,
+        "login_url": login_url,
+        "invited_by": invited_by,
     }

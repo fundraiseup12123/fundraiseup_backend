@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, EmailStr, Field
 
-from auth import AuthUser, require_auth, require_org_access
+from auth import AuthUser, deny_platform_admin_payment_writes, require_auth, require_org_access
 from db import rest_delete, rest_get, rest_get_one, rest_insert, rest_patch
 from frontend_url import resolve_frontend_url
 from paypal_client import (
@@ -75,6 +75,7 @@ def start_paypal_connect(
     user: Annotated[AuthUser, Depends(require_auth)],
 ) -> dict[str, str]:
     require_org_access(payload.organization_id, user, min_role="admin")
+    deny_platform_admin_payment_writes(user)
     state = f"org:{payload.organization_id}:{payload.campaign_id or ''}:{int(payload.is_default)}"
     try:
         url = get_paypal_connect_url(state, payload.frontend_origin)
@@ -118,6 +119,7 @@ def complete_paypal_connect(
     campaign_id = parts[2] or None
     is_default = parts[3] == "1"
     require_org_access(org_id, user, min_role="admin")
+    deny_platform_admin_payment_writes(user)
 
     row = rest_insert(
         "paypal_accounts",
@@ -162,6 +164,7 @@ def disconnect_paypal_account(
         raise HTTPException(status_code=404, detail="PayPal account not found")
 
     require_org_access(account["organization_id"], user, min_role="admin")
+    deny_platform_admin_payment_writes(user)
 
     if account.get("campaign_id"):
         campaign = rest_get_one(

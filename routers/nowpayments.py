@@ -7,7 +7,7 @@ from typing import Annotated, Any, Literal
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
-from auth import AuthUser, require_auth, require_org_access
+from auth import AuthUser, deny_platform_admin_payment_writes, require_auth, require_org_access
 from currency import estimate_processing_fee, format_display_amount
 from db import rest_delete, rest_get, rest_get_one, rest_insert, rest_patch
 from frontend_url import resolve_frontend_url
@@ -371,6 +371,7 @@ def attach_nowpayments_account(
     user: Annotated[AuthUser, Depends(require_auth)],
 ) -> dict[str, Any]:
     require_org_access(org_id, user, min_role="admin")
+    deny_platform_admin_payment_writes(user)
 
     api_key = payload.api_key.strip()
     ipn_secret = payload.ipn_secret.strip()
@@ -426,6 +427,7 @@ def disconnect_nowpayments_account(
         raise HTTPException(status_code=404, detail="NOWPayments account not found")
 
     require_org_access(account["organization_id"], user, min_role="admin")
+    deny_platform_admin_payment_writes(user)
 
     if account.get("campaign_id"):
         campaign = rest_get_one(

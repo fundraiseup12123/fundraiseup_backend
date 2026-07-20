@@ -18,7 +18,7 @@ from routers.organizations import (
     _cascade_org_default_currency,
     _slugify as org_slugify,
 )
-from invite_service import fulfill_organization_invite
+from invite_service import fulfill_organization_invite, fulfill_platform_admin_invite
 
 router = APIRouter(prefix="/super", tags=["super-admin"])
 
@@ -392,9 +392,10 @@ def delete_organization(
 
 
 class OrgAdminInviteRequest(BaseModel):
-    organization_id: str
     email: EmailStr
     role: str = "admin"
+    organization_id: str | None = None
+    access_scope: str = Field(default="organization", pattern="^(organization|all)$")
 
 
 class UpdateOrgAdminRequest(BaseModel):
@@ -449,9 +450,31 @@ def list_organization_admins(
             "organization_slug": org.get("slug", ""),
             "user_id": member["user_id"],
             "role": member["role"],
+            "access_scope": "organization",
             "first_name": profile.get("first_name"),
             "last_name": profile.get("last_name"),
             "created_at": member.get("created_at"),
+        })
+
+    platform_rows = rest_get(
+        "profiles",
+        params={
+            "role": "eq.platform_admin",
+            "select": "id,first_name,last_name,role",
+        },
+    ) or []
+    for profile in platform_rows:
+        result.append({
+            "id": f"platform:{profile['id']}",
+            "organization_id": None,
+            "organization_name": "All organizations",
+            "organization_slug": "",
+            "user_id": profile["id"],
+            "role": "platform_admin",
+            "access_scope": "all",
+            "first_name": profile.get("first_name"),
+            "last_name": profile.get("last_name"),
+            "created_at": None,
         })
     return result
 
@@ -461,6 +484,25 @@ def invite_organization_admin(
     payload: OrgAdminInviteRequest,
     user: Annotated[AuthUser, Depends(require_super_admin)],
 ) -> dict[str, Any]:
+    email = str(payload.email).lower()
+    if payload.access_scope == "all":
+        provisioned = fulfill_platform_admin_invite(
+            email=email,
+            invited_by=user.id,
+        )
+        return {
+            "email_sent": bool(provisioned.get("email_sent")),
+            "login_url": provisioned.get("login_url"),
+            "access_scope": "all",
+            "message": (
+                f"Platform admin login details emailed to {email}."
+                if provisioned.get("email_sent")
+                else f"Platform admin account created. Configure RESEND_API_KEY to email login details to {email}."
+            ),
+        }
+
+    if not payload.organization_id:
+        raise HTTPException(status_code=400, detail="organization_id is required")
     org = rest_get_one("organizations", params={"id": f"eq.{payload.organization_id}", "select": "id,name"})
     if not org:
         raise HTTPException(status_code=404, detail="Organization not found")
@@ -468,7 +510,7 @@ def invite_organization_admin(
         "organization_invites",
         {
             "organization_id": payload.organization_id,
-            "email": payload.email.lower(),
+            "email": email,
             "role": payload.role,
             "invited_by": user.id,
         },
@@ -483,10 +525,11 @@ def invite_organization_admin(
         "invite": invite,
         "email_sent": bool(provisioned.get("email_sent")),
         "login_url": provisioned.get("login_url"),
+        "access_scope": "organization",
         "message": (
-            f"Login details emailed to {payload.email.lower()}."
+            f"Login details emailed to {email}."
             if provisioned.get("email_sent")
-            else f"Admin account created. Configure RESEND_API_KEY to email login details to {payload.email.lower()}."
+            else f"Admin account created. Configure RESEND_API_KEY to email login details to {email}."
         ),
     }
 
@@ -497,6 +540,8 @@ def update_organization_admin(
     payload: UpdateOrgAdminRequest,
     user: Annotated[AuthUser, Depends(require_super_admin)],
 ) -> dict[str, Any]:
+    if member_id.startswith("platform:"):
+        raise HTTPException(status_code=400, detail="Platform admin role cannot be changed here")
     updated = rest_patch("organization_members", {"role": payload.role}, match={"id": member_id})
     if not updated:
         raise HTTPException(status_code=404, detail="Member not found")
@@ -508,6 +553,19 @@ def delete_organization_admin(
     member_id: str,
     user: Annotated[AuthUser, Depends(require_super_admin)],
 ) -> dict[str, str]:
+    if member_id.startswith("platform:"):
+        user_id = member_id.split(":", 1)[1]
+        profile = rest_get_one(
+            "profiles",
+            params={"id": f"eq.{user_id}", "select": "id,role"},
+        )
+        if not profile or str(profile.get("role") or "") != "platform_admin":
+            raise HTTPException(status_code=404, detail="Platform admin not found")
+        updated = rest_patch("profiles", {"role": "org_user"}, match={"id": user_id})
+        if not updated:
+            raise HTTPException(status_code=500, detail="Failed to remove platform admin")
+        return {"status": "deleted"}
+
     deleted = rest_delete("organization_members", match={"id": member_id})
     if not deleted:
         raise HTTPException(status_code=404, detail="Member not found")
@@ -516,17 +574,17 @@ def delete_organization_admin(
 
 @router.get("/me")
 def get_me(user: Annotated[AuthUser, Depends(require_auth)]) -> dict[str, Any]:
-    if user.role == "super_admin":
+    if user.role in ("super_admin", "platform_admin"):
         organizations = rest_get(
             "organizations",
-            params={"select": "id,name", "order": "name.asc"},
+            params={"select": "id,name,slug", "order": "name.asc"},
         )
     elif user.organization_ids:
         organizations = rest_get(
             "organizations",
             params={
                 "id": f"in.({','.join(user.organization_ids)})",
-                "select": "id,name",
+                "select": "id,name,slug",
             },
         )
     else:
@@ -539,5 +597,7 @@ def get_me(user: Annotated[AuthUser, Depends(require_auth)]) -> dict[str, Any]:
         "last_name": user.last_name,
         "organization_ids": user.organization_ids,
         "org_roles": user.org_roles,
+        "is_super_admin": user.role == "super_admin",
+        "is_platform_admin": user.role == "platform_admin",
         "organizations": organizations,
     }

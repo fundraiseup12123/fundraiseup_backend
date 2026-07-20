@@ -115,8 +115,24 @@ def require_super_admin(user: Annotated[AuthUser, Depends(require_auth)]) -> Aut
     return user
 
 
+def is_platform_admin(user: AuthUser) -> bool:
+    return user.role == "platform_admin"
+
+
+def has_global_org_access(user: AuthUser) -> bool:
+    return user.role in ("super_admin", "platform_admin")
+
+
+def deny_platform_admin_payment_writes(user: AuthUser) -> None:
+    if user.role == "platform_admin":
+        raise HTTPException(
+            status_code=403,
+            detail="Payment methods are read-only for platform admins",
+        )
+
+
 def require_org_access(org_id: str, user: AuthUser, min_role: str = "member") -> None:
-    if user.role == "super_admin":
+    if has_global_org_access(user):
         return
     if org_id not in user.organization_ids:
         raise HTTPException(status_code=403, detail="Organization access denied")
