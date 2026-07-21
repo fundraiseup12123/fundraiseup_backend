@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import stripe
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -35,9 +36,10 @@ def admin_list_donations(
     require_org_access(org_id, user, min_role="member")
     org = rest_get_one(
         "organizations",
-        params={"id": f"eq.{org_id}", "select": "reporting_currency"},
+        params={"id": f"eq.{org_id}", "select": "reporting_currency,timezone"},
     )
     reporting_currency = str((org or {}).get("reporting_currency") or "USD").upper()
+    org_timezone = str((org or {}).get("timezone") or "UTC")
     amount_sort = sort in {"asc", "desc"}
     sort_desc = sort == "desc"
     select_cols = (
@@ -61,7 +63,7 @@ def admin_list_donations(
     if frequency and frequency in {"once", "monthly"}:
         params["frequency"] = f"eq.{frequency}"
     if date_preset and date_preset != "all":
-        date_from, date_to = _date_range(date_preset)
+        date_from, date_to = _date_range(date_preset, org_timezone)
         if date_from and date_to:
             params["and"] = f"(created_at.gte.{date_from},created_at.lte.{date_to})"
         elif date_from:
@@ -96,7 +98,7 @@ def admin_list_donations(
             if frequency and frequency in {"once", "monthly"}:
                 orphan_params["frequency"] = f"eq.{frequency}"
             if date_preset and date_preset != "all":
-                date_from, date_to = _date_range(date_preset)
+                date_from, date_to = _date_range(date_preset, org_timezone)
                 if date_from and date_to:
                     orphan_params["and"] = f"(created_at.gte.{date_from},created_at.lte.{date_to})"
                 elif date_from:
@@ -468,15 +470,18 @@ def admin_insights(
 
     org = rest_get_one(
         "organizations",
-        params={"id": f"eq.{org_id}", "select": "reporting_currency"},
+        params={"id": f"eq.{org_id}", "select": "reporting_currency,timezone"},
     )
     reporting_currency = (org or {}).get("reporting_currency") or reporting_currency or "USD"
+    org_timezone = str((org or {}).get("timezone") or "UTC")
 
     campaigns = rest_get(
         "campaigns",
         params={"organization_id": f"eq.{org_id}", "select": "id,name,designation"},
     )
-    resolved_from, resolved_to = _insights_date_range(date_preset, date_from, date_to)
+    resolved_from, resolved_to = _insights_date_range(
+        date_preset, date_from, date_to, org_timezone
+    )
 
     if designation and not campaign_id:
         matching = [c["id"] for c in campaigns if c.get("designation") == designation]
@@ -485,8 +490,9 @@ def admin_insights(
                 reporting_currency,
                 date_preset,
                 campaigns,
-                date_from=resolved_from,
-                date_to=resolved_to,
+                date_from=date_from,
+                date_to=date_to,
+                tz_name=org_timezone,
             )
 
     rows = _admin_org_donation_rows(
@@ -515,7 +521,7 @@ def admin_insights(
     first_installments = sum(_row_amount(r, reporting_currency) for r in recurring)
     one_time_total = sum(_row_amount(r, reporting_currency) for r in one_time)
 
-    chart = _build_chart(rows, interval, reporting_currency)
+    chart = _build_chart(rows, interval, reporting_currency, org_timezone)
     payment_methods = _breakdown(
         rows,
         lambda r: (r.get("payment_method") or "card").replace("_", " "),
@@ -529,7 +535,7 @@ def admin_insights(
     )
     hour_breakdown = _breakdown(
         rows,
-        lambda r: _hour_label(r.get("created_at", "")),
+        lambda r: _hour_label(r.get("created_at", ""), org_timezone),
         reporting_currency,
     )
     homepage_rows = [r for r in rows if _donation_checkout_view(r) == "homepage"]
@@ -556,13 +562,15 @@ def admin_insights(
 
     return {
         "reporting_currency": reporting_currency.upper(),
-        "date_label": _date_label(date_preset, resolved_from, resolved_to),
+        "date_label": _date_label(date_preset, date_from, date_to, org_timezone),
         "raised": {"total": round(total_raised, 2), "count": len(rows)},
         "first_installments": {"total": round(first_installments, 2), "count": len(recurring)},
         "one_time": {"total": round(one_time_total, 2), "count": len(one_time)},
         "chart": chart,
-        "first_installments_chart": _build_chart(recurring, interval, reporting_currency),
-        "one_time_chart": _build_chart(one_time, interval, reporting_currency),
+        "first_installments_chart": _build_chart(
+            recurring, interval, reporting_currency, org_timezone
+        ),
+        "one_time_chart": _build_chart(one_time, interval, reporting_currency, org_timezone),
         "avg_donation": round(total_raised / len(rows), 2) if rows else 0,
         "retention_rate": round((len(recurring) / len(rows)) * 100, 1) if rows else 0,
         "payment_methods": payment_methods,
@@ -588,11 +596,12 @@ def _empty_insights(
     campaigns: list[dict[str, Any]],
     date_from: str | None = None,
     date_to: str | None = None,
+    tz_name: str | None = None,
 ) -> dict[str, Any]:
     empty_chart = [{"hour": h, "amount": 0, "count": 0, "label": _hour_label_from_int(h)} for h in range(24)]
     return {
         "reporting_currency": reporting_currency.upper(),
-        "date_label": _date_label(date_preset, date_from, date_to),
+        "date_label": _date_label(date_preset, date_from, date_to, tz_name),
         "raised": {"total": 0, "count": 0},
         "first_installments": {"total": 0, "count": 0},
         "one_time": {"total": 0, "count": 0},
@@ -618,23 +627,51 @@ def _empty_insights(
     }
 
 
-def _date_range(preset: str) -> tuple[str | None, str | None]:
-    now = datetime.now(timezone.utc)
+def _org_zone(tz_name: str | None) -> ZoneInfo:
+    name = (tz_name or "UTC").strip() or "UTC"
+    try:
+        return ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError):
+        return ZoneInfo("UTC")
+
+
+def _to_utc_iso(dt: datetime) -> str:
+    return dt.astimezone(timezone.utc).isoformat()
+
+
+def _parse_created_at(created_at: str) -> datetime | None:
+    if not created_at:
+        return None
+    raw = str(created_at).strip()
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def _date_range(preset: str, tz_name: str | None = None) -> tuple[str | None, str | None]:
+    tz = _org_zone(tz_name)
+    now = datetime.now(tz)
     start = lambda d: d.replace(hour=0, minute=0, second=0, microsecond=0)
     end = lambda d: d.replace(hour=23, minute=59, second=59, microsecond=999000)
 
     if preset == "today":
-        return start(now).isoformat(), end(now).isoformat()
+        return _to_utc_iso(start(now)), _to_utc_iso(end(now))
     if preset == "yesterday":
         day = now - timedelta(days=1)
-        return start(day).isoformat(), end(day).isoformat()
+        return _to_utc_iso(start(day)), _to_utc_iso(end(day))
     if preset == "7d":
-        return start(now - timedelta(days=6)).isoformat(), end(now).isoformat()
+        return _to_utc_iso(start(now - timedelta(days=6))), _to_utc_iso(end(now))
     if preset == "30d":
-        return start(now - timedelta(days=29)).isoformat(), end(now).isoformat()
+        return _to_utc_iso(start(now - timedelta(days=29))), _to_utc_iso(end(now))
     if preset == "month":
         month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-        return month_start.isoformat(), end(now).isoformat()
+        return _to_utc_iso(month_start), _to_utc_iso(end(now))
     return None, None
 
 
@@ -642,36 +679,39 @@ def _insights_date_range(
     preset: str,
     date_from: str | None,
     date_to: str | None,
+    tz_name: str | None = None,
 ) -> tuple[str | None, str | None]:
+    tz = _org_zone(tz_name)
     start = lambda d: d.replace(hour=0, minute=0, second=0, microsecond=0)
     end = lambda d: d.replace(hour=23, minute=59, second=59, microsecond=999000)
 
     if preset == "day" and date_from:
         try:
-            day = datetime.strptime(date_from[:10], "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            day = datetime.strptime(date_from[:10], "%Y-%m-%d").replace(tzinfo=tz)
         except ValueError:
-            return _date_range(preset)
-        return start(day).isoformat(), end(day).isoformat()
+            return _date_range(preset, tz_name)
+        return _to_utc_iso(start(day)), _to_utc_iso(end(day))
 
     if preset == "custom" and date_from and date_to:
         try:
-            a = datetime.strptime(date_from[:10], "%Y-%m-%d").replace(tzinfo=timezone.utc)
-            b = datetime.strptime(date_to[:10], "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            a = datetime.strptime(date_from[:10], "%Y-%m-%d").replace(tzinfo=tz)
+            b = datetime.strptime(date_to[:10], "%Y-%m-%d").replace(tzinfo=tz)
         except ValueError:
-            return _date_range(preset)
+            return _date_range(preset, tz_name)
         from_day = a if a <= b else b
         to_day = b if a <= b else a
-        return start(from_day).isoformat(), end(to_day).isoformat()
+        return _to_utc_iso(start(from_day)), _to_utc_iso(end(to_day))
 
-    return _date_range(preset)
+    return _date_range(preset, tz_name)
 
 
 def _date_label(
     preset: str,
     date_from: str | None = None,
     date_to: str | None = None,
+    tz_name: str | None = None,
 ) -> str:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(_org_zone(tz_name))
     fmt = "%b %d, %Y"
 
     def _fmt_iso(value: str | None) -> str | None:
@@ -704,11 +744,11 @@ def _date_label(
     return "All time"
 
 
-def _hour_label(created_at: str) -> str:
-    try:
-        hour = int(created_at[11:13])
-    except (ValueError, IndexError):
-        hour = 0
+def _hour_label(created_at: str, tz_name: str | None = None) -> str:
+    dt = _parse_created_at(created_at)
+    if not dt:
+        return _hour_label_from_int(0)
+    hour = dt.astimezone(_org_zone(tz_name)).hour
     return _hour_label_from_int(hour)
 
 
@@ -801,27 +841,34 @@ def _row_amount(row: dict[str, Any], reporting_currency: str) -> float:
     )
 
 
-def _build_chart(rows: list[dict[str, Any]], interval: str, reporting_currency: str) -> list[dict[str, Any]]:
+def _build_chart(
+    rows: list[dict[str, Any]],
+    interval: str,
+    reporting_currency: str,
+    tz_name: str | None = None,
+) -> list[dict[str, Any]]:
+    tz = _org_zone(tz_name)
     if interval == "daily":
         buckets: dict[str, dict[str, float | int]] = {}
         for row in rows:
             created = row.get("created_at", "")
-            if not created:
+            dt = _parse_created_at(str(created or ""))
+            if not dt:
                 continue
-            key = created[:10]
+            key = dt.astimezone(tz).strftime("%Y-%m-%d")
             bucket = buckets.setdefault(key, {"amount": 0.0, "count": 0})
             bucket["amount"] = float(bucket["amount"]) + _row_amount(row, reporting_currency)
             bucket["count"] = int(bucket["count"]) + 1
         keys = sorted(buckets.keys())
         if not keys:
-            today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            today = datetime.now(tz).strftime("%Y-%m-%d")
             return [{"hour": 0, "amount": 0, "count": 0, "label": today}]
         return [
             {
                 "hour": index,
                 "amount": round(float(buckets[key]["amount"]), 2),
                 "count": int(buckets[key]["count"]),
-                "label": datetime.fromisoformat(f"{key}T00:00:00+00:00").strftime("%b %d"),
+                "label": datetime.strptime(key, "%Y-%m-%d").strftime("%b %d"),
             }
             for index, key in enumerate(keys)
         ]
@@ -829,12 +876,8 @@ def _build_chart(rows: list[dict[str, Any]], interval: str, reporting_currency: 
     buckets: dict[int, dict[str, float | int]] = {}
     for row in rows:
         created = row.get("created_at", "")
-        if not created:
-            continue
-        try:
-            hour = int(created[11:13])
-        except (ValueError, IndexError):
-            hour = 0
+        dt = _parse_created_at(str(created or ""))
+        hour = dt.astimezone(tz).hour if dt else 0
         bucket = buckets.setdefault(hour, {"amount": 0.0, "count": 0})
         bucket["amount"] = float(bucket["amount"]) + _row_amount(row, reporting_currency)
         bucket["count"] = int(bucket["count"]) + 1
