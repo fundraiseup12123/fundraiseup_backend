@@ -43,14 +43,20 @@ def _decode_via_supabase(token: str) -> dict:
     api_key = _supabase_api_key()
     if not api_key:
         raise HTTPException(status_code=503, detail="Supabase API key not configured")
-    response = httpx.get(
-        f"{url}/auth/v1/user",
-        headers={
-            "apikey": api_key,
-            "Authorization": f"Bearer {token}",
-        },
-        timeout=15.0,
-    )
+    try:
+        response = httpx.get(
+            f"{url}/auth/v1/user",
+            headers={
+                "apikey": api_key,
+                "Authorization": f"Bearer {token}",
+            },
+            timeout=15.0,
+        )
+    except httpx.HTTPError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Cannot reach auth service. Check your internet connection and try again.",
+        ) from exc
     if response.status_code != 200:
         detail = "Invalid or expired token"
         try:

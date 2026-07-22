@@ -971,6 +971,7 @@ from routers.payment_accounts import router as payment_accounts_router
 from routers.emails import router as emails_router
 from routers.uploads import router as uploads_router
 from routers.donor_portal import router as donor_portal_router
+from routers.ai_content import router as ai_content_router
 
 app.include_router(super_admin_router)
 app.include_router(payment_accounts_router)
@@ -979,6 +980,7 @@ app.include_router(public_router)
 app.include_router(stripe_router)
 app.include_router(invites_router)
 app.include_router(admin_data_router)
+app.include_router(ai_content_router)
 app.include_router(paypal_router)
 app.include_router(paypal_connect_router)
 app.include_router(nowpayments_router)
