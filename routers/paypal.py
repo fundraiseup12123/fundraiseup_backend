@@ -18,7 +18,13 @@ from currency import (
     format_display_amount,
     paypal_checkout_currency,
 )
-from paypal_client import capture_paypal_order, create_paypal_order, paypal_configured, paypal_env
+from paypal_client import (
+    approve_link_from_order,
+    capture_paypal_order,
+    create_paypal_order,
+    paypal_configured,
+    paypal_env,
+)
 from supabase_client import insert_donation, supabase_enabled
 
 router = APIRouter(prefix="/paypal", tags=["paypal"])
@@ -257,15 +263,23 @@ def paypal_checkout_config(
     campaign_id: str | None = Query(None),
     checkout_view: Literal["homepage", "popup"] = Query("homepage"),
 ) -> dict[str, object]:
-    from routers.paypal_connect import resolve_paypal_payee_email_for_checkout
+    from routers.paypal_connect import (
+        _account_has_keys,
+        resolve_paypal_account_for_checkout,
+        resolve_paypal_payee_email_for_checkout,
+    )
 
+    account = resolve_paypal_account_for_checkout(campaign_id, checkout_view)
     payee = resolve_paypal_payee_email_for_checkout(campaign_id, checkout_view)
+    keys_ready = _account_has_keys(account)
+    available = bool(payee or keys_ready)
+    mode = "keys" if keys_ready else ("redirect" if payee else "unavailable")
     return {
-        "available": bool(payee),
-        "merchant_connected": bool(payee),
-        "mode": "redirect" if payee else "unavailable",
+        "available": available,
+        "merchant_connected": available,
+        "mode": mode,
         "currency": paypal_checkout_currency(),
-        "api_configured": paypal_configured(),
+        "api_configured": paypal_configured() or keys_ready,
     }
 
 
@@ -273,7 +287,11 @@ def paypal_checkout_config(
 def paypal_prepare_redirect(payload: PreparePayPalRedirectRequest) -> dict[str, str]:
     from currency import assert_meets_min_donation, resolve_min_donation_for_frequency
     from db import rest_get_one
-    from routers.paypal_connect import resolve_paypal_payee_email_for_checkout
+    from routers.paypal_connect import (
+        _account_has_keys,
+        resolve_paypal_account_for_checkout,
+        resolve_paypal_payee_email_for_checkout,
+    )
 
     if payload.frequency != "once":
         raise HTTPException(status_code=400, detail="PayPal is only available for one-time donations")
@@ -294,8 +312,10 @@ def paypal_prepare_redirect(payload: PreparePayPalRedirectRequest) -> dict[str, 
                 default_currency=campaign.get("default_currency"),
             )
 
+    account = resolve_paypal_account_for_checkout(payload.campaign_id, payload.checkout_view)
     payee = resolve_paypal_payee_email_for_checkout(payload.campaign_id, payload.checkout_view)
-    if not payee:
+    keys_ready = _account_has_keys(account)
+    if not payee and not keys_ready:
         raise HTTPException(
             status_code=400,
             detail="PayPal is not connected for this page. Connect a PayPal account in admin first.",
@@ -305,8 +325,53 @@ def paypal_prepare_redirect(payload: PreparePayPalRedirectRequest) -> dict[str, 
     base_amount, total_display = _resolve_total(payload.amount, display_currency, payload.cover_fees)
     charge_currency_code, charge_amount = convert_for_paypal(total_display, display_currency)
     frontend_url = resolve_frontend_url()
-    payment_ref = str(uuid.uuid4())
 
+    if keys_ready and account:
+        payment_ref = str(uuid.uuid4())
+        return_url = payload.return_url or (
+            f"{frontend_url}/pop-up-view?donation=success&provider=paypal"
+            if payload.checkout_view == "popup"
+            else f"{frontend_url}/?donation=success&provider=paypal"
+        )
+        cancel_url = payload.cancel_url or (
+            f"{frontend_url}/pop-up-view?donation=cancelled&provider=paypal"
+            if payload.checkout_view == "popup"
+            else f"{frontend_url}/?donation=cancelled&provider=paypal"
+        )
+        sep = "&" if "?" in return_url else "?"
+        return_url = f"{return_url}{sep}payment_ref={payment_ref}"
+
+        try:
+            created = create_paypal_order(
+                total_display=total_display,
+                display_currency=display_currency,
+                description="Donation",
+                return_url=return_url,
+                cancel_url=cancel_url,
+                custom_id=payment_ref,
+                client_id=str(account.get("client_id") or ""),
+                client_secret=str(account.get("client_secret") or ""),
+            )
+        except RuntimeError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        order_id = str(created["order_id"])
+        approve_url = created.get("approve_url") or approve_link_from_order(created.get("raw") or {})
+        if not approve_url:
+            raise HTTPException(status_code=502, detail="PayPal did not return an approval link")
+
+        return {
+            "redirect_url": str(approve_url),
+            "payment_ref": payment_ref,
+            "order_id": order_id,
+            "payee_email": payee or "",
+            "charge_currency": charge_currency_code,
+            "charge_amount": f"{charge_amount:.2f}",
+            "display_amount": format_display_amount(total_display, display_currency),
+            "mode": "keys",
+        }
+
+    payment_ref = str(uuid.uuid4())
     return_url = payload.return_url or (
         f"{frontend_url}/pop-up-view?donation=success&provider=paypal&payment_ref={payment_ref}"
         if payload.checkout_view == "popup"
@@ -339,24 +404,56 @@ def paypal_prepare_redirect(payload: PreparePayPalRedirectRequest) -> dict[str, 
     return {
         "redirect_url": f"{_paypal_webscr_base()}?{urlencode(params)}",
         "payment_ref": payment_ref,
-        "payee_email": payee,
+        "payee_email": payee or "",
         "charge_currency": charge_currency_code,
         "charge_amount": f"{charge_amount:.2f}",
         "display_amount": format_display_amount(total_display, display_currency),
+        "mode": "redirect",
     }
 
 
 @router.post("/complete-redirect")
 def paypal_complete_redirect(payload: CompletePayPalRedirectRequest) -> CapturePayPalOrderResponse:
-    from routers.paypal_connect import resolve_paypal_payee_email_for_checkout
+    from routers.paypal_connect import (
+        _account_has_keys,
+        resolve_paypal_account_for_checkout,
+        resolve_paypal_payee_email_for_checkout,
+    )
 
+    account = resolve_paypal_account_for_checkout(payload.campaign_id, payload.checkout_view)
     payee = resolve_paypal_payee_email_for_checkout(payload.campaign_id, payload.checkout_view)
-    if not payee:
+    keys_ready = _account_has_keys(account)
+    if not payee and not keys_ready:
         raise HTTPException(status_code=400, detail="PayPal is not connected for this page")
 
     display_currency = payload.currency.lower()
     base_amount, total_display = _resolve_total(payload.amount, display_currency, payload.cover_fees)
-    order_id = f"paypal:{payload.paypal_txn_id}" if payload.paypal_txn_id else f"paypal:{payload.payment_ref}"
+
+    if keys_ready and account:
+        order_token = (payload.paypal_txn_id or "").strip()
+        if not order_token:
+            raise HTTPException(
+                status_code=400,
+                detail="Missing PayPal order token. Complete payment on PayPal and return to this page.",
+            )
+        try:
+            capture = capture_paypal_order(
+                order_token,
+                client_id=str(account.get("client_id") or ""),
+                client_secret=str(account.get("client_secret") or ""),
+            )
+        except RuntimeError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if str(capture.get("status") or "") != "COMPLETED":
+            raise HTTPException(status_code=400, detail="PayPal payment was not completed")
+        order_id = f"paypal:{order_token}"
+    else:
+        order_id = (
+            f"paypal:{payload.paypal_txn_id}"
+            if payload.paypal_txn_id
+            else f"paypal:{payload.payment_ref}"
+        )
+
     saved = _record_paypal_donation(
         order_id=order_id,
         payload=payload,

@@ -26,7 +26,7 @@ def admin_list_donations(
     org_id: str,
     user: Annotated[AuthUser, Depends(require_auth)],
     campaign_id: str | None = Query(None),
-    limit: int = Query(50, ge=1, le=100),
+    limit: int = Query(10000, ge=1, le=10000),
     offset: int = Query(0, ge=0),
     status: str | None = Query(None),
     frequency: str | None = Query(None),
@@ -48,7 +48,7 @@ def admin_list_donations(
         "organization_id,crypto_amount,crypto_currency"
     )
     # Amount sort loads the filtered set so FX conversion ranks correctly across currencies.
-    fetch_limit = 1000 if amount_sort else limit + 1
+    fetch_limit = limit + 1
     params: dict[str, str] = {
         "organization_id": f"eq.{org_id}",
         "select": select_cols,

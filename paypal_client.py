@@ -57,15 +57,20 @@ def paypal_web_base() -> str:
     return "https://www.sandbox.paypal.com"
 
 
-def _paypal_access_token() -> str:
-    if not paypal_configured():
+def _paypal_access_token(
+    client_id: str | None = None,
+    client_secret: str | None = None,
+) -> str:
+    cid = (client_id or "").strip() or paypal_client_id()
+    secret = (client_secret or "").strip() or paypal_client_secret()
+    if not cid or not secret:
         raise RuntimeError("PayPal is not configured")
 
     try:
         response = httpx.post(
             f"{paypal_api_base()}/v1/oauth2/token",
             data={"grant_type": "client_credentials"},
-            auth=(paypal_client_id(), paypal_client_secret()),
+            auth=(cid, secret),
             headers={"Accept": "application/json"},
             timeout=30.0,
         )
@@ -78,12 +83,39 @@ def _paypal_access_token() -> str:
             pass
         raise RuntimeError(detail or "PayPal credentials rejected") from exc
     except httpx.HTTPError as exc:
-        raise RuntimeError("Unable to reach PayPal API") from exc
+        raise RuntimeError("Unable to reach PayPal") from exc
 
     token = response.json().get("access_token")
     if not token:
-        raise RuntimeError("PayPal auth failed")
-    return token
+        raise RuntimeError("PayPal did not return an access token")
+    return str(token)
+
+
+def verify_paypal_credentials(client_id: str, client_secret: str) -> bool:
+    try:
+        _paypal_access_token(client_id=client_id, client_secret=client_secret)
+        return True
+    except Exception:
+        return False
+
+
+def client_id_hint(client_id: str) -> str:
+    value = (client_id or "").strip()
+    if len(value) <= 8:
+        return value
+    return f"{value[:4]}…{value[-4:]}"
+
+
+def approve_link_from_order(order: dict[str, object]) -> str | None:
+    links = order.get("links")
+    if not isinstance(links, list):
+        return None
+    for link in links:
+        if not isinstance(link, dict):
+            continue
+        if str(link.get("rel") or "").lower() == "approve" and link.get("href"):
+            return str(link["href"])
+    return None
 
 
 def build_paypal_oauth_url(*, state: str, redirect_uri: str) -> str:
@@ -268,6 +300,8 @@ def create_paypal_order(
     cancel_url: str,
     custom_id: str | None = None,
     payee_email: str | None = None,
+    client_id: str | None = None,
+    client_secret: str | None = None,
 ) -> dict[str, object]:
     charge_currency, charge_amount = convert_for_paypal(total_display, display_currency)
     amount_value = f"{charge_amount:.2f}"
@@ -298,7 +332,7 @@ def create_paypal_order(
         },
     }
 
-    token = _paypal_access_token()
+    token = _paypal_access_token(client_id=client_id, client_secret=client_secret)
     response = httpx.post(
         f"{paypal_api_base()}/v2/checkout/orders",
         json=payload,
@@ -325,11 +359,18 @@ def create_paypal_order(
         "charge_currency": charge_currency,
         "charge_amount": charge_amount,
         "display_amount": format_display_amount(total_display, display_currency),
+        "approve_url": approve_link_from_order(body),
+        "raw": body,
     }
 
 
-def capture_paypal_order(order_id: str) -> dict[str, object]:
-    token = _paypal_access_token()
+def capture_paypal_order(
+    order_id: str,
+    *,
+    client_id: str | None = None,
+    client_secret: str | None = None,
+) -> dict[str, object]:
+    token = _paypal_access_token(client_id=client_id, client_secret=client_secret)
     response = httpx.post(
         f"{paypal_api_base()}/v2/checkout/orders/{order_id}/capture",
         headers={
