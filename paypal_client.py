@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
+import time
 from typing import Sequence
 from urllib.parse import quote, urlencode
 
@@ -10,6 +12,12 @@ import httpx
 logger = logging.getLogger(__name__)
 
 from currency import convert_for_paypal, format_display_amount
+
+# Reuse TCP/TLS to PayPal so token + order create are not cold handshakes every click.
+_http = httpx.Client(timeout=15.0)
+_token_lock = threading.Lock()
+# client_id -> (access_token, expires_at_epoch)
+_token_cache: dict[str, tuple[str, float]] = {}
 
 
 def _clean_env(name: str, fallback: str = "") -> str:
@@ -66,13 +74,18 @@ def _paypal_access_token(
     if not cid or not secret:
         raise RuntimeError("PayPal is not configured")
 
+    now = time.time()
+    with _token_lock:
+        cached = _token_cache.get(cid)
+        if cached and cached[1] > now + 60:
+            return cached[0]
+
     try:
-        response = httpx.post(
+        response = _http.post(
             f"{paypal_api_base()}/v1/oauth2/token",
             data={"grant_type": "client_credentials"},
             auth=(cid, secret),
             headers={"Accept": "application/json"},
-            timeout=30.0,
         )
         response.raise_for_status()
     except httpx.HTTPStatusError as exc:
@@ -85,10 +98,27 @@ def _paypal_access_token(
     except httpx.HTTPError as exc:
         raise RuntimeError("Unable to reach PayPal") from exc
 
-    token = response.json().get("access_token")
+    body = response.json()
+    token = body.get("access_token")
     if not token:
         raise RuntimeError("PayPal did not return an access token")
+    expires_in = int(body.get("expires_in") or 28800)
+    # Refresh a couple minutes early so checkout never uses an expired token.
+    expires_at = now + max(120, expires_in - 120)
+    with _token_lock:
+        _token_cache[cid] = (str(token), expires_at)
     return str(token)
+
+
+def warm_paypal_access_token(
+    client_id: str | None = None,
+    client_secret: str | None = None,
+) -> None:
+    """Prefetch/cache OAuth token so the donor click only creates the order."""
+    try:
+        _paypal_access_token(client_id=client_id, client_secret=client_secret)
+    except Exception:
+        logger.debug("PayPal token warm skipped", exc_info=True)
 
 
 def verify_paypal_credentials(client_id: str, client_secret: str) -> bool:
@@ -333,14 +363,13 @@ def create_paypal_order(
     }
 
     token = _paypal_access_token(client_id=client_id, client_secret=client_secret)
-    response = httpx.post(
+    response = _http.post(
         f"{paypal_api_base()}/v2/checkout/orders",
         json=payload,
         headers={
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
         },
-        timeout=30.0,
     )
     if response.status_code >= 400:
         detail = response.text
@@ -371,13 +400,12 @@ def capture_paypal_order(
     client_secret: str | None = None,
 ) -> dict[str, object]:
     token = _paypal_access_token(client_id=client_id, client_secret=client_secret)
-    response = httpx.post(
+    response = _http.post(
         f"{paypal_api_base()}/v2/checkout/orders/{order_id}/capture",
         headers={
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
         },
-        timeout=30.0,
     )
     if response.status_code >= 400:
         detail = response.text

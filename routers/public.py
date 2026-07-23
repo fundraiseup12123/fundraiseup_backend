@@ -4,6 +4,7 @@ import os
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
+from pydantic import BaseModel, Field
 
 from db import rest_get, rest_get_one, rest_insert, select_columns
 from site_constants import ROOT_CAMPAIGN_ID
@@ -140,3 +141,70 @@ def create_problem_report(payload: dict[str, Any]) -> dict[str, Any]:
     if not row:
         raise HTTPException(status_code=400, detail="Unable to save report")
     return {"ok": True, "id": row.get("id")}
+
+
+class _TranslateTexts(BaseModel):
+    title: str = ""
+    titleHtml: str = ""
+    titleHtmlMobile: str = ""
+    caption: str = ""
+    captionMobile: str = ""
+    bodyHtml: str = ""
+    bodyHtmlMobile: str = ""
+    dedicationHint: str = ""
+    landingHeadlineHtml: str = ""
+    landingBodyHtml: str = ""
+    modalTitle: str = ""
+    modalTitleHtml: str = ""
+    modalBodyHtml: str = ""
+    modalTitleMobile: str = ""
+    modalTitleHtmlMobile: str = ""
+    modalBodyHtmlMobile: str = ""
+
+
+class TranslateCampaignBody(BaseModel):
+    campaign_id: str = Field(min_length=1, max_length=80)
+    target_language: str = Field(min_length=2, max_length=16)
+    language_name: str | None = Field(default=None, max_length=80)
+    texts: _TranslateTexts
+    ui_strings: dict[str, str] | None = None
+
+
+@router.post("/translate-campaign")
+def translate_campaign(payload: TranslateCampaignBody) -> dict[str, Any]:
+    from routers.ai_content import localize_campaign_texts
+
+    texts = payload.texts.model_dump()
+    ui_in = {str(k): str(v) for k, v in (payload.ui_strings or {}).items() if str(v).strip()}
+    merged: dict[str, str] = {}
+    for key, value in texts.items():
+        merged[f"c__{key}"] = str(value or "")
+    for key, value in ui_in.items():
+        merged[f"u__{key}"] = value
+
+    localized_merged = localize_campaign_texts(
+        payload.target_language,
+        merged,
+        language_name=payload.language_name,
+    )
+
+    localized: dict[str, str] = {}
+    ui_out: dict[str, str] = {}
+    for key, value in localized_merged.items():
+        if key.startswith("c__"):
+            localized[key[3:]] = str(value)
+        elif key.startswith("u__"):
+            ui_out[key[3:]] = str(value)
+
+    # Preserve any English UI keys the model dropped.
+    for key, value in ui_in.items():
+        ui_out.setdefault(key, value)
+    for key, value in texts.items():
+        localized.setdefault(key, str(value or ""))
+
+    return {
+        "campaign_id": payload.campaign_id,
+        "target_language": payload.target_language,
+        "texts": localized,
+        "ui_strings": ui_out,
+    }

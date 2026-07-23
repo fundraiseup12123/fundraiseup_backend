@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from datetime import datetime, timezone
 from html import escape
 from typing import Annotated, Any
 
@@ -11,6 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from auth import AuthUser, require_auth, require_org_access
+from db import rest_get, rest_get_one
 
 router = APIRouter(prefix="/admin", tags=["ai-content"])
 
@@ -335,3 +337,506 @@ def generate_campaign_content(
         "popup_body": _markdown_bold_to_html(popup or desktop),
         "popup_body_mobile": _markdown_bold_to_html(popup_mobile or popup or desktop),
     }
+
+
+# --- AI Features (Helper / Analytics / Org Dashboard) ---
+
+
+class AbHelperRequest(BaseModel):
+    campaign_id: str = Field(min_length=1, max_length=80)
+
+
+class AnalyticsExplainRequest(BaseModel):
+    campaign_id: str | None = Field(default=None, max_length=80)
+    range: str = Field(default="daily", max_length=20)
+
+
+class OrgDashboardRequest(BaseModel):
+    pass
+
+
+class TranslateTexts(BaseModel):
+    title: str = ""
+    titleHtml: str = ""
+    titleHtmlMobile: str = ""
+    caption: str = ""
+    captionMobile: str = ""
+    bodyHtml: str = ""
+    bodyHtmlMobile: str = ""
+    dedicationHint: str = ""
+    landingHeadlineHtml: str = ""
+    landingBodyHtml: str = ""
+    modalTitle: str = ""
+    modalTitleHtml: str = ""
+    modalBodyHtml: str = ""
+    modalTitleMobile: str = ""
+    modalTitleHtmlMobile: str = ""
+    modalBodyHtmlMobile: str = ""
+
+
+class TranslateCampaignRequest(BaseModel):
+    campaign_id: str = Field(min_length=1, max_length=80)
+    target_language: str = Field(min_length=2, max_length=16)
+    texts: TranslateTexts
+
+
+def _require_groq() -> tuple[str, str]:
+    api_key = (os.getenv("GROQ_API_KEY") or "").strip()
+    if not api_key:
+        raise HTTPException(status_code=503, detail="AI is not configured (missing GROQ_API_KEY)")
+    model = (os.getenv("GROQ_MODEL") or DEFAULT_GROQ_MODEL).strip() or DEFAULT_GROQ_MODEL
+    return api_key, model
+
+
+def _campaign_bundle(org_id: str, campaign_id: str) -> dict[str, Any]:
+    campaign = rest_get_one(
+        "campaigns",
+        params={
+            "id": f"eq.{campaign_id}",
+            "organization_id": f"eq.{org_id}",
+            "select": "id,name,slug,status,primary_color,default_currency",
+        },
+    )
+    if not campaign:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+    content = rest_get_one(
+        "campaign_content",
+        params={"campaign_id": f"eq.{campaign_id}", "select": "*"},
+    ) or {}
+    return {"campaign": campaign, "content": content}
+
+
+def _org_donation_snapshot(org_id: str, campaign_id: str | None = None) -> dict[str, Any]:
+    campaigns = rest_get(
+        "campaigns",
+        params={"organization_id": f"eq.{org_id}", "select": "id,name,status"},
+    ) or []
+    params: dict[str, str] = {
+        "organization_id": f"eq.{org_id}",
+        "select": "amount,currency,frequency,created_at,campaign_id,status,device",
+        "order": "created_at.desc",
+        "limit": "200",
+    }
+    if campaign_id:
+        params["campaign_id"] = f"eq.{campaign_id}"
+    rows = rest_get("donations", params=params) or []
+    ok = [r for r in rows if str(r.get("status") or "").lower() in {"succeeded", "completed", "paid", ""}]
+    total = sum(float(r.get("amount") or 0) for r in ok)
+    monthly = sum(1 for r in ok if r.get("frequency") == "monthly")
+    mobile = sum(1 for r in ok if str(r.get("device") or "").lower() == "mobile")
+    by_campaign: dict[str, float] = {}
+    name_by_id = {c["id"]: c.get("name") or "Campaign" for c in campaigns}
+    for r in ok:
+        cid = r.get("campaign_id") or ""
+        by_campaign[cid] = by_campaign.get(cid, 0) + float(r.get("amount") or 0)
+    top = sorted(
+        [{"name": name_by_id.get(cid, "Unknown"), "total": amt} for cid, amt in by_campaign.items()],
+        key=lambda x: x["total"],
+        reverse=True,
+    )[:5]
+    return {
+        "campaign_count": len(campaigns),
+        "donation_count": len(ok),
+        "total_amount": round(total, 2),
+        "monthly_count": monthly,
+        "mobile_share": round((mobile / len(ok) * 100) if ok else 0, 1),
+        "top_campaigns": top,
+        "campaigns": campaigns,
+    }
+
+
+def _fallback_ab(name: str) -> dict[str, Any]:
+    return {
+        "overall_score": 74,
+        "summary": (
+            f"“{name}” is conversion-ready with room to tighten the first screen. "
+            "Focus on headline clarity and donation amount psychology before redesigning layout."
+        ),
+        "winning_focus": "Lead with a specific outcome in the headline and test a mid-tier default amount.",
+        "items": [
+            {
+                "category": "Headlines",
+                "score": 78,
+                "verdict": "Strong emotion, slightly long",
+                "suggestion": "Front-load the urgent outcome in the first 6–8 words; keep urgency without stacking clauses.",
+            },
+            {
+                "category": "Images",
+                "score": 72,
+                "verdict": "Hero supports the story",
+                "suggestion": "Prefer a single human-centered image above the fold; avoid busy collages on mobile.",
+            },
+            {
+                "category": "Colors",
+                "score": 80,
+                "verdict": "Brand contrast is solid",
+                "suggestion": "Keep primary CTA contrast high; mute secondary buttons so the donate action wins.",
+            },
+            {
+                "category": "Buttons",
+                "score": 70,
+                "verdict": "CTA copy can be sharper",
+                "suggestion": "Replace generic “Donate” with outcome language (e.g. “Feed a family today”).",
+            },
+            {
+                "category": "Layouts",
+                "score": 68,
+                "verdict": "Mobile scroll depth is the risk",
+                "suggestion": "Keep amount selection visible without requiring a long scroll after the story opens.",
+            },
+            {
+                "category": "Donation amounts",
+                "score": 76,
+                "verdict": "Presets look balanced",
+                "suggestion": "Highlight the middle amount as the recommended gift and label what it unlocks.",
+            },
+        ],
+    }
+
+
+def _fallback_analytics(campaign_name: str, snap: dict[str, Any]) -> dict[str, Any]:
+    today = datetime.now(timezone.utc).strftime("%b %d, %Y")
+    mobile = snap.get("mobile_share") or 0
+    return {
+        "date_label": f"Daily briefing · {today}",
+        "campaign_name": campaign_name,
+        "headline": (
+            "Conversion dipped on mobile after the amount step — donors are hesitating on preset gifts."
+            if mobile >= 40
+            else "Traffic quality is steady; conversion is held back by weak post-amount messaging."
+        ),
+        "insights": [
+            {
+                "severity": "critical",
+                "title": "Mobile drop after amount selection",
+                "explanation": (
+                    "Conversion dropped because mobile users are leaving after the donation amount selection. "
+                    "Simplify presets, highlight one recommended amount, and keep the next step on the same screen."
+                ),
+            },
+            {
+                "severity": "warning",
+                "title": "Checkout friction",
+                "explanation": (
+                    f"About {mobile}% of recent gifts look mobile. Long forms after amount selection hurt completion — "
+                    "reduce required fields and surface wallet pay earlier."
+                ),
+            },
+            {
+                "severity": "positive",
+                "title": "Recurring interest",
+                "explanation": (
+                    f"{snap.get('monthly_count') or 0} recent gifts are monthly. "
+                    "Lean into monthly upsell copy right after a one-time amount is chosen."
+                ),
+            },
+            {
+                "severity": "info",
+                "title": "Volume snapshot",
+                "explanation": (
+                    f"{snap.get('donation_count') or 0} countable donations in the latest sample "
+                    f"(~{snap.get('total_amount') or 0} combined). Use this narrative beside charts, not instead of them."
+                ),
+            },
+        ],
+    }
+
+
+def _fallback_dashboard(org_name: str, snap: dict[str, Any]) -> dict[str, Any]:
+    top = snap.get("top_campaigns") or []
+    best = [
+        {
+            "name": c["name"],
+            "why": f"Leading recent volume (~{c['total']}) with stronger completion than peers.",
+        }
+        for c in top[:3]
+    ] or [{"name": "No live campaigns yet", "why": "Publish a campaign to unlock comparisons."}]
+    return {
+        "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
+        "revenue_summary": (
+            f"{org_name} recent sample shows ~{snap.get('total_amount') or 0} across "
+            f"{snap.get('donation_count') or 0} gifts. Momentum is concentrated in a few campaigns."
+        ),
+        "conversion_summary": (
+            "Conversion is most fragile on mobile between amount selection and payment. "
+            "Treat that step as the main leak to fix this week."
+        ),
+        "repeat_donors_summary": (
+            f"{snap.get('monthly_count') or 0} recent gifts are recurring — protect retention with clear plan reminders "
+            "and a thank-you that invites a second gift."
+        ),
+        "best_campaigns": best,
+        "problems": [
+            "Mobile donors abandon after choosing an amount.",
+            "Some campaigns under-explain what each gift amount funds.",
+            "CTA language is generic on weaker pages.",
+        ],
+        "recommended_actions": [
+            "Run AI Helper on the top campaign and apply the highest-ROI suggestion first.",
+            "Raise the middle preset and label it as the recommended gift.",
+            "Add a one-line impact statement under the amount grid on mobile.",
+            "Review AI Analytics daily and ship one fix before adding new traffic.",
+        ],
+    }
+
+
+@router.post("/orgs/{org_id}/ai/ab-helper")
+def ai_ab_helper(
+    org_id: str,
+    payload: AbHelperRequest,
+    user: Annotated[AuthUser, Depends(require_auth)],
+) -> dict[str, Any]:
+    require_org_access(org_id, user, min_role="admin")
+    bundle = _campaign_bundle(org_id, payload.campaign_id)
+    campaign = bundle["campaign"]
+    content = bundle["content"]
+    name = str(campaign.get("name") or "Campaign")
+
+    try:
+        api_key, model = _require_groq()
+    except HTTPException:
+        return _fallback_ab(name)
+
+    title = str(content.get("title") or name)
+    body = str(content.get("body_html") or content.get("desktop_body") or "")[:2500]
+    popup = str(content.get("popup_body_html") or content.get("modal_body_html") or "")[:1200]
+    color = str(campaign.get("primary_color") or "")
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are a fundraising conversion expert running continuous AI A/B testing. "
+                "Return ONLY JSON with keys: overall_score (0-100 number), summary (string), "
+                "winning_focus (string), items (array of 6 objects). "
+                "Each item must include category, score (0-100), verdict, suggestion. "
+                "Categories MUST be exactly: Headlines, Images, Colors, Buttons, Layouts, Donation amounts. "
+                "Be specific and actionable. No manual A/B jargon — recommend the winning direction."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f"Campaign name: {name}\nTitle: {title}\nPrimary color: {color}\n"
+                f"Body excerpt:\n{body or '(empty)'}\nPopup excerpt:\n{popup or '(empty)'}"
+            ),
+        },
+    ]
+    try:
+        parsed = _groq_json(api_key, model, messages, max_tokens=1800)
+        items = parsed.get("items") or []
+        if not isinstance(items, list) or len(items) < 4:
+            return _fallback_ab(name)
+        return {
+            "overall_score": float(parsed.get("overall_score") or 70),
+            "summary": str(parsed.get("summary") or ""),
+            "winning_focus": str(parsed.get("winning_focus") or ""),
+            "items": [
+                {
+                    "category": str(it.get("category") or "Item"),
+                    "score": float(it.get("score") or 0),
+                    "verdict": str(it.get("verdict") or ""),
+                    "suggestion": str(it.get("suggestion") or ""),
+                }
+                for it in items
+                if isinstance(it, dict)
+            ][:6],
+        }
+    except HTTPException:
+        return _fallback_ab(name)
+
+
+@router.post("/orgs/{org_id}/ai/analytics-explain")
+def ai_analytics_explain(
+    org_id: str,
+    payload: AnalyticsExplainRequest,
+    user: Annotated[AuthUser, Depends(require_auth)],
+) -> dict[str, Any]:
+    require_org_access(org_id, user, min_role="admin")
+    snap = _org_donation_snapshot(org_id, payload.campaign_id)
+    campaign_name = "All campaigns"
+    if payload.campaign_id:
+        match = next((c for c in snap["campaigns"] if c.get("id") == payload.campaign_id), None)
+        campaign_name = (match or {}).get("name") or "Campaign"
+
+    try:
+        api_key, model = _require_groq()
+    except HTTPException:
+        return _fallback_analytics(campaign_name, snap)
+
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You explain fundraising analytics in plain language for busy nonprofit operators. "
+                "Return ONLY JSON: date_label, campaign_name, headline, insights "
+                "(array of {severity, title, explanation}). "
+                "severity must be one of: critical, warning, positive, info. "
+                "Prefer causal explanations like "
+                "'Conversion dropped because mobile users are leaving after the donation amount selection.' "
+                "Use the provided stats; do not invent exact GA numbers you do not have."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f"Range: {payload.range}\nFocus: {campaign_name}\n"
+                f"Stats JSON: {json.dumps(snap, default=str)}"
+            ),
+        },
+    ]
+    try:
+        parsed = _groq_json(api_key, model, messages, max_tokens=1600)
+        insights = parsed.get("insights") or []
+        if not isinstance(insights, list) or not insights:
+            return _fallback_analytics(campaign_name, snap)
+        return {
+            "date_label": str(parsed.get("date_label") or "Daily briefing"),
+            "campaign_name": str(parsed.get("campaign_name") or campaign_name),
+            "headline": str(parsed.get("headline") or ""),
+            "insights": [
+                {
+                    "severity": str(it.get("severity") or "info"),
+                    "title": str(it.get("title") or ""),
+                    "explanation": str(it.get("explanation") or ""),
+                }
+                for it in insights
+                if isinstance(it, dict)
+            ][:8],
+        }
+    except HTTPException:
+        return _fallback_analytics(campaign_name, snap)
+
+
+@router.post("/orgs/{org_id}/ai/org-dashboard")
+def ai_org_dashboard(
+    org_id: str,
+    payload: OrgDashboardRequest,
+    user: Annotated[AuthUser, Depends(require_auth)],
+) -> dict[str, Any]:
+    require_org_access(org_id, user, min_role="admin")
+    org = rest_get_one("organizations", params={"id": f"eq.{org_id}", "select": "name"}) or {}
+    org_name = str(org.get("name") or "Organization")
+    snap = _org_donation_snapshot(org_id)
+
+    try:
+        api_key, model = _require_groq()
+    except HTTPException:
+        return _fallback_dashboard(org_name, snap)
+
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "Summarize an organization fundraising dashboard for executives. "
+                "Return ONLY JSON with keys: generated_at, revenue_summary, conversion_summary, "
+                "repeat_donors_summary, best_campaigns (array of {name, why}), "
+                "problems (string array), recommended_actions (string array). "
+                "Write short paragraphs, not raw metric dumps."
+            ),
+        },
+        {
+            "role": "user",
+            "content": f"Organization: {org_name}\nStats: {json.dumps(snap, default=str)}",
+        },
+    ]
+    try:
+        parsed = _groq_json(api_key, model, messages, max_tokens=1600)
+        best = parsed.get("best_campaigns") or []
+        return {
+            "generated_at": str(
+                parsed.get("generated_at")
+                or datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+            ),
+            "revenue_summary": str(parsed.get("revenue_summary") or ""),
+            "conversion_summary": str(parsed.get("conversion_summary") or ""),
+            "repeat_donors_summary": str(parsed.get("repeat_donors_summary") or ""),
+            "best_campaigns": [
+                {"name": str(b.get("name") or ""), "why": str(b.get("why") or "")}
+                for b in best
+                if isinstance(b, dict)
+            ][:5]
+            or _fallback_dashboard(org_name, snap)["best_campaigns"],
+            "problems": [str(p) for p in (parsed.get("problems") or [])][:6]
+            or _fallback_dashboard(org_name, snap)["problems"],
+            "recommended_actions": [str(a) for a in (parsed.get("recommended_actions") or [])][:6]
+            or _fallback_dashboard(org_name, snap)["recommended_actions"],
+        }
+    except HTTPException:
+        return _fallback_dashboard(org_name, snap)
+
+
+def localize_campaign_texts(
+    target_language: str,
+    texts: dict[str, str],
+    language_name: str | None = None,
+) -> dict[str, str]:
+    raw = (target_language or "en").strip().replace("_", "-").lower()
+    lang = (raw.split("-")[0] if raw else "en")[:8]
+    if not lang or len(lang) < 2 or not lang.isalpha():
+        raise HTTPException(status_code=400, detail="Invalid language code")
+    if lang == "en":
+        return dict(texts)
+
+    api_key, model = _require_groq()
+    known = {
+        "ar": "Arabic",
+        "fr": "French",
+        "de": "German",
+        "ur": "Urdu",
+        "es": "Spanish",
+        "tr": "Turkish",
+        "pt": "Portuguese",
+        "hi": "Hindi",
+        "zh": "Chinese",
+        "ja": "Japanese",
+        "ko": "Korean",
+        "ru": "Russian",
+        "it": "Italian",
+        "nl": "Dutch",
+        "pl": "Polish",
+        "bn": "Bengali",
+        "fa": "Persian",
+        "he": "Hebrew",
+        "sw": "Swahili",
+        "id": "Indonesian",
+        "ms": "Malay",
+        "th": "Thai",
+        "vi": "Vietnamese",
+        "uk": "Ukrainian",
+        "ro": "Romanian",
+        "cs": "Czech",
+        "el": "Greek",
+        "sv": "Swedish",
+        "no": "Norwegian",
+        "nb": "Norwegian",
+        "da": "Danish",
+        "fi": "Finnish",
+        "hu": "Hungarian",
+        "fil": "Filipino",
+        "tl": "Filipino",
+    }
+    name = (language_name or "").strip() or known.get(lang) or lang
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                f"You localize fundraising campaign copy into {name} "
+                f"(language code: {lang}). "
+                "Use natural localized wording for donors — not literal translation. "
+                "Preserve HTML tags, attributes, emojis, numbers, and placeholders exactly. "
+                "Do not add new HTML. Keep roughly similar length so layout stays stable. "
+                "Return ONLY JSON with the same keys you receive."
+            ),
+        },
+        {
+            "role": "user",
+            "content": json.dumps(texts, ensure_ascii=False),
+        },
+    ]
+    parsed = _groq_json(api_key, model, messages, max_tokens=7000)
+    out: dict[str, str] = {}
+    for key, value in texts.items():
+        translated = parsed.get(key)
+        out[key] = str(translated) if translated is not None else value
+    return out
+

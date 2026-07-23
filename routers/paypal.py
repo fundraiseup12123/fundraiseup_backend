@@ -24,6 +24,7 @@ from paypal_client import (
     create_paypal_order,
     paypal_configured,
     paypal_env,
+    warm_paypal_access_token,
 )
 from supabase_client import insert_donation, supabase_enabled
 
@@ -274,6 +275,18 @@ def paypal_checkout_config(
     keys_ready = _account_has_keys(account)
     available = bool(payee or keys_ready)
     mode = "keys" if keys_ready else ("redirect" if payee else "unavailable")
+    # Prefetch OAuth token in the background so PayPal click only creates the order.
+    if keys_ready and account:
+        import threading
+
+        threading.Thread(
+            target=warm_paypal_access_token,
+            kwargs={
+                "client_id": str(account.get("client_id") or ""),
+                "client_secret": str(account.get("client_secret") or ""),
+            },
+            daemon=True,
+        ).start()
     return {
         "available": available,
         "merchant_connected": available,
