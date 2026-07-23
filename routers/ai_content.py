@@ -389,21 +389,190 @@ def _require_groq() -> tuple[str, str]:
 
 
 def _campaign_bundle(org_id: str, campaign_id: str) -> dict[str, Any]:
+    cid = (campaign_id or "").strip()
+    oid = (org_id or "").strip()
+    if not cid or not oid:
+        raise HTTPException(status_code=400, detail="Campaign and organization are required")
+
+    # Keep select columns conservative — unknown columns make PostgREST 400 and look like "not found".
     campaign = rest_get_one(
         "campaigns",
         params={
-            "id": f"eq.{campaign_id}",
-            "organization_id": f"eq.{org_id}",
-            "select": "id,name,slug,status,primary_color,default_currency",
+            "id": f"eq.{cid}",
+            "organization_id": f"eq.{oid}",
+            "select": "id,name,slug,status,default_currency,primary_color",
         },
     )
     if not campaign:
-        raise HTTPException(status_code=404, detail="Campaign not found")
+        # Retry without primary_color for schemas that omit branding columns.
+        campaign = rest_get_one(
+            "campaigns",
+            params={
+                "id": f"eq.{cid}",
+                "organization_id": f"eq.{oid}",
+                "select": "id,name,slug,status,default_currency",
+            },
+        )
+    if not campaign:
+        # Last resort: id only, then verify org (helps diagnose mismatches).
+        any_org = rest_get_one(
+            "campaigns",
+            params={"id": f"eq.{cid}", "select": "id,name,slug,status,default_currency,organization_id"},
+        )
+        if any_org and str(any_org.get("organization_id") or "") != oid:
+            raise HTTPException(
+                status_code=404,
+                detail="That campaign belongs to a different organization. Re-select the campaign and try again.",
+            )
+        if not any_org:
+            raise HTTPException(
+                status_code=404,
+                detail="Campaign not found. Refresh the page and pick the campaign again.",
+            )
+        campaign = any_org
+
     content = rest_get_one(
         "campaign_content",
-        params={"campaign_id": f"eq.{campaign_id}", "select": "*"},
+        params={"campaign_id": f"eq.{cid}", "select": "*"},
     ) or {}
     return {"campaign": campaign, "content": content}
+
+
+def _device_type(device: Any) -> str:
+    if isinstance(device, dict):
+        return str(device.get("type") or device.get("Type") or "").strip().lower()
+    return str(device or "").strip().lower()
+
+
+def _is_mobile_device(device: Any) -> bool:
+    t = _device_type(device)
+    return t in {"mobile", "tablet"} or "mobile" in t
+
+
+def _countable_donations(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    excluded = {"failed", "canceled", "cancelled", "refunded", "disputed"}
+    return [r for r in rows if str(r.get("status") or "").lower() not in excluded]
+
+
+def _campaign_amount_presets(campaign_id: str) -> list[dict[str, Any]]:
+    rows = rest_get(
+        "campaign_currencies",
+        params={
+            "campaign_id": f"eq.{campaign_id}",
+            "select": "currency_code,amounts_once,amounts_monthly,is_default",
+            "order": "is_default.desc",
+        },
+    ) or []
+    out: list[dict[str, Any]] = []
+    for row in rows[:4]:
+        out.append(
+            {
+                "currency": row.get("currency_code"),
+                "is_default": bool(row.get("is_default")),
+                "once": row.get("amounts_once") or [],
+                "monthly": row.get("amounts_monthly") or [],
+            }
+        )
+    return out
+
+
+def _campaign_performance(org_id: str, campaign_id: str) -> dict[str, Any]:
+    rows = rest_get(
+        "donations",
+        params={
+            "organization_id": f"eq.{org_id}",
+            "campaign_id": f"eq.{campaign_id}",
+            "select": "amount,currency,frequency,created_at,status,device,payment_method,utm",
+            "order": "created_at.desc",
+            "limit": "300",
+        },
+    ) or []
+    ok = _countable_donations(rows)
+    now = datetime.now(timezone.utc)
+    def _parse_dt(value: Any) -> datetime | None:
+        raw = str(value or "").strip()
+        if not raw:
+            return None
+        try:
+            return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except Exception:
+            return None
+
+    last_7 = 0
+    last_30 = 0
+    amounts: list[float] = []
+    monthly = 0
+    mobile = 0
+    methods: dict[str, int] = {}
+    utm_sources: dict[str, int] = {}
+    for r in ok:
+        amt = float(r.get("amount") or 0)
+        amounts.append(amt)
+        if r.get("frequency") == "monthly":
+            monthly += 1
+        if _is_mobile_device(r.get("device")):
+            mobile += 1
+        method = str(r.get("payment_method") or "unknown")
+        methods[method] = methods.get(method, 0) + 1
+        utm = r.get("utm") if isinstance(r.get("utm"), dict) else {}
+        src = str((utm or {}).get("source") or "").strip()
+        if src:
+            utm_sources[src] = utm_sources.get(src, 0) + 1
+        created = _parse_dt(r.get("created_at"))
+        if created:
+            age = (now - created.astimezone(timezone.utc)).total_seconds()
+            if age <= 7 * 86400:
+                last_7 += 1
+            if age <= 30 * 86400:
+                last_30 += 1
+
+    total = sum(amounts)
+    return {
+        "donation_count": len(ok),
+        "total_amount": round(total, 2),
+        "avg_gift": round(total / len(amounts), 2) if amounts else 0,
+        "monthly_count": monthly,
+        "once_count": max(0, len(ok) - monthly),
+        "mobile_share_pct": round((mobile / len(ok) * 100) if ok else 0, 1),
+        "gifts_last_7_days": last_7,
+        "gifts_last_30_days": last_30,
+        "payment_methods": methods,
+        "top_utm_sources": sorted(
+            [{"source": k, "count": v} for k, v in utm_sources.items()],
+            key=lambda x: x["count"],
+            reverse=True,
+        )[:5],
+        "sample_size": len(rows),
+    }
+
+
+def _optional_ga4_snapshot(org_id: str, campaign_id: str | None = None) -> dict[str, Any] | None:
+    """Best-effort GA4 context — never required for AI Features to run."""
+    try:
+        from ga4_client import fetch_realtime_snapshot, ga4_configured, get_property_id
+    except Exception:
+        return None
+    if not ga4_configured():
+        return None
+
+    property_id = get_property_id()
+    if campaign_id:
+        content = rest_get_one(
+            "campaign_content",
+            params={"campaign_id": f"eq.{campaign_id}", "select": "ga4_property_id"},
+        ) or {}
+        prop = str(content.get("ga4_property_id") or "").replace("properties/", "").strip()
+        if prop:
+            property_id = prop
+    if not property_id:
+        return None
+    try:
+        snap = fetch_realtime_snapshot(property_id=property_id)
+        if not isinstance(snap, dict):
+            return None
+        return {"property_id": property_id, "realtime": snap}
+    except Exception:
+        return None
 
 
 def _org_donation_snapshot(org_id: str, campaign_id: str | None = None) -> dict[str, Any]:
@@ -413,35 +582,72 @@ def _org_donation_snapshot(org_id: str, campaign_id: str | None = None) -> dict[
     ) or []
     params: dict[str, str] = {
         "organization_id": f"eq.{org_id}",
-        "select": "amount,currency,frequency,created_at,campaign_id,status,device",
+        "select": "amount,currency,frequency,created_at,campaign_id,status,device,payment_method,utm",
         "order": "created_at.desc",
-        "limit": "200",
+        "limit": "400",
     }
     if campaign_id:
         params["campaign_id"] = f"eq.{campaign_id}"
     rows = rest_get("donations", params=params) or []
-    ok = [r for r in rows if str(r.get("status") or "").lower() in {"succeeded", "completed", "paid", ""}]
+    ok = _countable_donations(rows)
     total = sum(float(r.get("amount") or 0) for r in ok)
     monthly = sum(1 for r in ok if r.get("frequency") == "monthly")
-    mobile = sum(1 for r in ok if str(r.get("device") or "").lower() == "mobile")
+    mobile = sum(1 for r in ok if _is_mobile_device(r.get("device")))
     by_campaign: dict[str, float] = {}
+    by_campaign_count: dict[str, int] = {}
     name_by_id = {c["id"]: c.get("name") or "Campaign" for c in campaigns}
+    status_by_id = {c["id"]: c.get("status") or "" for c in campaigns}
+    methods: dict[str, int] = {}
+    now = datetime.now(timezone.utc)
+    last_7 = 0
+    last_30 = 0
     for r in ok:
         cid = r.get("campaign_id") or ""
         by_campaign[cid] = by_campaign.get(cid, 0) + float(r.get("amount") or 0)
+        by_campaign_count[cid] = by_campaign_count.get(cid, 0) + 1
+        method = str(r.get("payment_method") or "unknown")
+        methods[method] = methods.get(method, 0) + 1
+        created_raw = str(r.get("created_at") or "")
+        try:
+            created = datetime.fromisoformat(created_raw.replace("Z", "+00:00"))
+            age = (now - created.astimezone(timezone.utc)).total_seconds()
+            if age <= 7 * 86400:
+                last_7 += 1
+            if age <= 30 * 86400:
+                last_30 += 1
+        except Exception:
+            pass
     top = sorted(
-        [{"name": name_by_id.get(cid, "Unknown"), "total": amt} for cid, amt in by_campaign.items()],
+        [
+            {
+                "id": cid,
+                "name": name_by_id.get(cid, "Unknown"),
+                "status": status_by_id.get(cid, ""),
+                "total": round(amt, 2),
+                "count": by_campaign_count.get(cid, 0),
+            }
+            for cid, amt in by_campaign.items()
+        ],
         key=lambda x: x["total"],
         reverse=True,
     )[:5]
     return {
         "campaign_count": len(campaigns),
+        "live_campaign_count": sum(1 for c in campaigns if str(c.get("status") or "").lower() == "live"),
         "donation_count": len(ok),
         "total_amount": round(total, 2),
+        "avg_gift": round(total / len(ok), 2) if ok else 0,
         "monthly_count": monthly,
+        "once_count": max(0, len(ok) - monthly),
         "mobile_share": round((mobile / len(ok) * 100) if ok else 0, 1),
+        "gifts_last_7_days": last_7,
+        "gifts_last_30_days": last_30,
+        "payment_methods": methods,
         "top_campaigns": top,
         "campaigns": campaigns,
+        "focus_campaign_id": campaign_id,
+        "sample_size": len(rows),
+        "generated_at": datetime.now(timezone.utc).isoformat(),
     }
 
 
@@ -591,58 +797,92 @@ def ai_ab_helper(
     campaign = bundle["campaign"]
     content = bundle["content"]
     name = str(campaign.get("name") or "Campaign")
-
-    try:
-        api_key, model = _require_groq()
-    except HTTPException:
-        return _fallback_ab(name)
+    status = str(campaign.get("status") or "")
+    perf = _campaign_performance(org_id, payload.campaign_id)
+    presets = _campaign_amount_presets(payload.campaign_id)
+    api_key, model = _require_groq()
 
     title = str(content.get("title") or name)
-    body = str(content.get("body_html") or content.get("desktop_body") or "")[:2500]
-    popup = str(content.get("popup_body_html") or content.get("modal_body_html") or "")[:1200]
+    body = str(content.get("body_html") or content.get("desktop_body") or "")[:3500]
+    body_mobile = str(content.get("body_html_mobile") or content.get("mobile_body") or "")[:2000]
+    popup = str(
+        content.get("popup_body_html")
+        or content.get("modal_body_html")
+        or content.get("popup_body")
+        or ""
+    )[:1800]
     color = str(campaign.get("primary_color") or "")
+    currency = str(campaign.get("default_currency") or "USD")
+
     messages = [
         {
             "role": "system",
             "content": (
-                "You are a fundraising conversion expert running continuous AI A/B testing. "
+                "You are a fundraising conversion expert. Score THIS campaign using the real "
+                "page copy AND the real donation performance stats provided. "
                 "Return ONLY JSON with keys: overall_score (0-100 number), summary (string), "
-                "winning_focus (string), items (array of 6 objects). "
+                "winning_focus (string), items (array of exactly 6 objects). "
                 "Each item must include category, score (0-100), verdict, suggestion. "
                 "Categories MUST be exactly: Headlines, Images, Colors, Buttons, Layouts, Donation amounts. "
-                "Be specific and actionable. No manual A/B jargon — recommend the winning direction."
+                "Ground every suggestion in the supplied copy or stats. "
+                "If gift volume is low, say so and prioritize clarity/presets over inventing traffic claims. "
+                "Do not invent GA numbers. Do not invent donation counts."
             ),
         },
         {
             "role": "user",
-            "content": (
-                f"Campaign name: {name}\nTitle: {title}\nPrimary color: {color}\n"
-                f"Body excerpt:\n{body or '(empty)'}\nPopup excerpt:\n{popup or '(empty)'}"
+            "content": json.dumps(
+                {
+                    "campaign": {
+                        "name": name,
+                        "status": status,
+                        "title": title,
+                        "primary_color": color,
+                        "default_currency": currency,
+                    },
+                    "copy": {
+                        "desktop_body_excerpt": body or "(empty)",
+                        "mobile_body_excerpt": body_mobile or "(empty)",
+                        "popup_excerpt": popup or "(empty)",
+                    },
+                    "amount_presets": presets,
+                    "live_performance": perf,
+                },
+                ensure_ascii=False,
+                default=str,
             ),
         },
     ]
-    try:
-        parsed = _groq_json(api_key, model, messages, max_tokens=1800)
-        items = parsed.get("items") or []
-        if not isinstance(items, list) or len(items) < 4:
-            return _fallback_ab(name)
-        return {
-            "overall_score": float(parsed.get("overall_score") or 70),
-            "summary": str(parsed.get("summary") or ""),
-            "winning_focus": str(parsed.get("winning_focus") or ""),
-            "items": [
-                {
-                    "category": str(it.get("category") or "Item"),
-                    "score": float(it.get("score") or 0),
-                    "verdict": str(it.get("verdict") or ""),
-                    "suggestion": str(it.get("suggestion") or ""),
-                }
-                for it in items
-                if isinstance(it, dict)
-            ][:6],
-        }
-    except HTTPException:
-        return _fallback_ab(name)
+    parsed = _groq_json(api_key, model, messages, max_tokens=2200)
+    items = parsed.get("items") or []
+    if not isinstance(items, list) or len(items) < 4:
+        raise HTTPException(status_code=502, detail="Groq returned an incomplete conversion review")
+    return {
+        "overall_score": float(parsed.get("overall_score") or 0),
+        "summary": str(parsed.get("summary") or ""),
+        "winning_focus": str(parsed.get("winning_focus") or ""),
+        "items": [
+            {
+                "category": str(it.get("category") or "Item"),
+                "score": float(it.get("score") or 0),
+                "verdict": str(it.get("verdict") or ""),
+                "suggestion": str(it.get("suggestion") or ""),
+            }
+            for it in items
+            if isinstance(it, dict)
+        ][:6],
+        "source": "groq",
+        "live": True,
+        "model": model,
+        "based_on": {
+            "campaign_name": name,
+            "campaign_status": status,
+            "donation_count": perf.get("donation_count"),
+            "gifts_last_30_days": perf.get("gifts_last_30_days"),
+            "avg_gift": perf.get("avg_gift"),
+            "mobile_share_pct": perf.get("mobile_share_pct"),
+        },
+    }
 
 
 @router.post("/orgs/{org_id}/ai/analytics-explain")
@@ -657,11 +897,14 @@ def ai_analytics_explain(
     if payload.campaign_id:
         match = next((c for c in snap["campaigns"] if c.get("id") == payload.campaign_id), None)
         campaign_name = (match or {}).get("name") or "Campaign"
+        snap["focus_performance"] = _campaign_performance(org_id, payload.campaign_id)
 
-    try:
-        api_key, model = _require_groq()
-    except HTTPException:
-        return _fallback_analytics(campaign_name, snap)
+    ga4 = _optional_ga4_snapshot(org_id, payload.campaign_id)
+    if ga4:
+        snap["ga4"] = ga4
+
+    api_key, model = _require_groq()
+    today = datetime.now(timezone.utc).strftime("%b %d, %Y")
 
     messages = [
         {
@@ -671,40 +914,55 @@ def ai_analytics_explain(
                 "Return ONLY JSON: date_label, campaign_name, headline, insights "
                 "(array of {severity, title, explanation}). "
                 "severity must be one of: critical, warning, positive, info. "
-                "Prefer causal explanations like "
-                "'Conversion dropped because mobile users are leaving after the donation amount selection.' "
-                "Use the provided stats; do not invent exact GA numbers you do not have."
+                "Use ONLY the provided donation stats (and GA4 if present). "
+                "Do not invent pageviews, bounce rates, or donation counts. "
+                "If volume is thin, say the sample is small and give cautious recommendations. "
+                "Prefer causal explanations tied to real metrics like mobile share, recurring share, "
+                "7/30-day gift counts, and top campaigns."
             ),
         },
         {
             "role": "user",
-            "content": (
-                f"Range: {payload.range}\nFocus: {campaign_name}\n"
-                f"Stats JSON: {json.dumps(snap, default=str)}"
+            "content": json.dumps(
+                {
+                    "range": payload.range,
+                    "focus": campaign_name,
+                    "today_utc": today,
+                    "stats": snap,
+                },
+                ensure_ascii=False,
+                default=str,
             ),
         },
     ]
-    try:
-        parsed = _groq_json(api_key, model, messages, max_tokens=1600)
-        insights = parsed.get("insights") or []
-        if not isinstance(insights, list) or not insights:
-            return _fallback_analytics(campaign_name, snap)
-        return {
-            "date_label": str(parsed.get("date_label") or "Daily briefing"),
-            "campaign_name": str(parsed.get("campaign_name") or campaign_name),
-            "headline": str(parsed.get("headline") or ""),
-            "insights": [
-                {
-                    "severity": str(it.get("severity") or "info"),
-                    "title": str(it.get("title") or ""),
-                    "explanation": str(it.get("explanation") or ""),
-                }
-                for it in insights
-                if isinstance(it, dict)
-            ][:8],
-        }
-    except HTTPException:
-        return _fallback_analytics(campaign_name, snap)
+    parsed = _groq_json(api_key, model, messages, max_tokens=1800)
+    insights = parsed.get("insights") or []
+    if not isinstance(insights, list) or not insights:
+        raise HTTPException(status_code=502, detail="Groq returned an empty analytics briefing")
+    return {
+        "date_label": str(parsed.get("date_label") or f"Daily briefing · {today}"),
+        "campaign_name": str(parsed.get("campaign_name") or campaign_name),
+        "headline": str(parsed.get("headline") or ""),
+        "insights": [
+            {
+                "severity": str(it.get("severity") or "info"),
+                "title": str(it.get("title") or ""),
+                "explanation": str(it.get("explanation") or ""),
+            }
+            for it in insights
+            if isinstance(it, dict)
+        ][:8],
+        "source": "groq",
+        "live": True,
+        "model": model,
+        "based_on": {
+            "donation_count": snap.get("donation_count"),
+            "gifts_last_7_days": snap.get("gifts_last_7_days"),
+            "gifts_last_30_days": snap.get("gifts_last_30_days"),
+            "mobile_share": snap.get("mobile_share"),
+            "ga4_included": bool(ga4),
+        },
+    }
 
 
 @router.post("/orgs/{org_id}/ai/org-dashboard")
@@ -717,52 +975,67 @@ def ai_org_dashboard(
     org = rest_get_one("organizations", params={"id": f"eq.{org_id}", "select": "name"}) or {}
     org_name = str(org.get("name") or "Organization")
     snap = _org_donation_snapshot(org_id)
+    ga4 = _optional_ga4_snapshot(org_id)
+    if ga4:
+        snap["ga4"] = ga4
 
-    try:
-        api_key, model = _require_groq()
-    except HTTPException:
-        return _fallback_dashboard(org_name, snap)
+    api_key, model = _require_groq()
 
     messages = [
         {
             "role": "system",
             "content": (
-                "Summarize an organization fundraising dashboard for executives. "
+                "Summarize an organization fundraising dashboard for executives using REAL stats only. "
                 "Return ONLY JSON with keys: generated_at, revenue_summary, conversion_summary, "
                 "repeat_donors_summary, best_campaigns (array of {name, why}), "
                 "problems (string array), recommended_actions (string array). "
-                "Write short paragraphs, not raw metric dumps."
+                "Write short paragraphs. Cite the actual gift counts / amounts from the stats. "
+                "Do not invent campaigns, revenue, or GA metrics that are not in the payload. "
+                "If data is sparse, say so and recommend measuring next."
             ),
         },
         {
             "role": "user",
-            "content": f"Organization: {org_name}\nStats: {json.dumps(snap, default=str)}",
+            "content": json.dumps(
+                {"organization": org_name, "stats": snap},
+                ensure_ascii=False,
+                default=str,
+            ),
         },
     ]
-    try:
-        parsed = _groq_json(api_key, model, messages, max_tokens=1600)
-        best = parsed.get("best_campaigns") or []
-        return {
-            "generated_at": str(
-                parsed.get("generated_at")
-                or datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-            ),
-            "revenue_summary": str(parsed.get("revenue_summary") or ""),
-            "conversion_summary": str(parsed.get("conversion_summary") or ""),
-            "repeat_donors_summary": str(parsed.get("repeat_donors_summary") or ""),
-            "best_campaigns": [
-                {"name": str(b.get("name") or ""), "why": str(b.get("why") or "")}
-                for b in best
-                if isinstance(b, dict)
-            ][:5]
-            or _fallback_dashboard(org_name, snap)["best_campaigns"],
-            "problems": [str(p) for p in (parsed.get("problems") or [])][:6]
-            or _fallback_dashboard(org_name, snap)["problems"],
-            "recommended_actions": [str(a) for a in (parsed.get("recommended_actions") or [])][:6]
-            or _fallback_dashboard(org_name, snap)["recommended_actions"],
-        }
-    except HTTPException:
-        return _fallback_dashboard(org_name, snap)
+    parsed = _groq_json(api_key, model, messages, max_tokens=1800)
+    best = parsed.get("best_campaigns") or []
+    problems = parsed.get("problems") or []
+    actions = parsed.get("recommended_actions") or []
+    if not str(parsed.get("revenue_summary") or "").strip():
+        raise HTTPException(status_code=502, detail="Groq returned an incomplete organization summary")
+
+    return {
+        "generated_at": str(
+            parsed.get("generated_at")
+            or datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        ),
+        "revenue_summary": str(parsed.get("revenue_summary") or ""),
+        "conversion_summary": str(parsed.get("conversion_summary") or ""),
+        "repeat_donors_summary": str(parsed.get("repeat_donors_summary") or ""),
+        "best_campaigns": [
+            {"name": str(b.get("name") or ""), "why": str(b.get("why") or "")}
+            for b in best
+            if isinstance(b, dict)
+        ][:5],
+        "problems": [str(p) for p in problems][:6],
+        "recommended_actions": [str(a) for a in actions][:6],
+        "source": "groq",
+        "live": True,
+        "model": model,
+        "based_on": {
+            "donation_count": snap.get("donation_count"),
+            "total_amount": snap.get("total_amount"),
+            "live_campaign_count": snap.get("live_campaign_count"),
+            "gifts_last_30_days": snap.get("gifts_last_30_days"),
+            "ga4_included": bool(ga4),
+        },
+    }
 
 
 def localize_campaign_texts(

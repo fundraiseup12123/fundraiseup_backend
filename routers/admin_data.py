@@ -374,6 +374,29 @@ def admin_donation_detail(
     if not donation:
         raise HTTPException(status_code=404, detail="Donation not found")
 
+    org_role = user.org_roles.get(org_id, "member")
+    limited_member = org_role == "member" and user.role not in ("super_admin", "platform_admin")
+    if limited_member:
+        # Members may inspect attribution only — strip amounts and PII from the payload.
+        return {
+            "donation": {
+                "id": donation.get("id"),
+                "created_at": donation.get("created_at"),
+                "utm": donation.get("utm"),
+                "amount": 0,
+                "currency": donation.get("currency") or "USD",
+                "first_name": "",
+                "last_name": "",
+                "email": None,
+                "status": donation.get("status") or "succeeded",
+                "frequency": donation.get("frequency") or "once",
+                "payment_method": None,
+                "device": None,
+            },
+            "campaign": None,
+            "emails": [],
+        }
+
     donation = _enrich_donation_fees(donation)
 
     campaign = None
