@@ -216,12 +216,16 @@ def translate_and_cache(
     language_name: str | None = None,
     force: bool = False,
     priority_only: bool = False,
+    bodies_only: bool = False,
 ) -> dict[str, Any]:
     """Return cached translation or generate via OpenAI and store.
 
     priority_only=True translates short headlines/captions only (fast first paint).
-    Long body fields stay English until a full pass runs and is cached.
+    bodies_only=True translates long HTML bodies in parallel (follow-up fill).
+    Full pass translates everything and writes the server cache.
     """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     from routers.ai_content import localize_campaign_texts
 
     lang = normalize_lang(target_language)
@@ -231,7 +235,7 @@ def translate_and_cache(
     fp = content_fingerprint(clean_texts)
     ui_in = {str(k): str(v) for k, v in (ui_strings or {}).items() if str(v).strip()}
 
-    if not force:
+    if not force and not bodies_only:
         cached = get_cached_translation(campaign_id, lang, fp)
         if cached:
             return cached
@@ -247,17 +251,22 @@ def translate_and_cache(
             "partial": False,
         }
 
+    def _localize(chunk: dict[str, str], max_tokens: int) -> dict[str, str]:
+        if not chunk:
+            return {}
+        return localize_campaign_texts(
+            lang,
+            chunk,
+            language_name=language_name,
+            max_tokens=max_tokens,
+        )
+
     if priority_only:
         priority_src = {
             k: clean_texts[k] for k in PRIORITY_KEYS if str(clean_texts.get(k) or "").strip()
         }
         merged = {f"c__{k}": v for k, v in priority_src.items()}
-        localized_merged = localize_campaign_texts(
-            lang,
-            merged,
-            language_name=language_name,
-            max_tokens=1800,
-        )
+        localized_merged = _localize(merged, 1800)
         localized = dict(clean_texts)  # body stays English for now
         for key, value in localized_merged.items():
             if key.startswith("c__"):
@@ -274,29 +283,85 @@ def translate_and_cache(
             "partial": True,
         }
 
-    merged: dict[str, str] = {}
-    for key, value in clean_texts.items():
-        if str(value or "").strip():
-            merged[f"c__{key}"] = value
-    for key, value in ui_in.items():
-        merged[f"u__{key}"] = value
+    if bodies_only:
+        body_src = {
+            k: clean_texts[k] for k in BODY_KEYS if str(clean_texts.get(k) or "").strip()
+        }
+        localized = dict(clean_texts)
+        if body_src:
+            # Parallel per-field calls — much faster wall-clock than one giant body blob.
+            with ThreadPoolExecutor(max_workers=min(4, len(body_src))) as pool:
+                futures = {
+                    pool.submit(
+                        _localize,
+                        {f"c__{key}": value},
+                        2800 if len(value) < 4000 else 4500,
+                    ): key
+                    for key, value in body_src.items()
+                }
+                for fut in as_completed(futures):
+                    key = futures[fut]
+                    try:
+                        chunk_out = fut.result()
+                        translated = chunk_out.get(f"c__{key}")
+                        if translated is not None and str(translated).strip():
+                            localized[key] = str(translated)
+                    except Exception as exc:
+                        logger.warning("Body field %s translate failed: %s", key, exc)
+        return {
+            "campaign_id": campaign_id,
+            "target_language": lang,
+            "content_fp": fp,
+            "texts": localized,
+            "ui_strings": ui_in,
+            "cached": False,
+            "partial": True,
+            "bodies_only": True,
+        }
 
-    # Prefer two-step when bodies are large: priority already may have run client-side.
-    # Full pass still one call for warm/cache completeness.
-    localized_merged = localize_campaign_texts(
-        lang,
-        merged,
-        language_name=language_name,
-        max_tokens=4500 if sum(len(v) for v in clean_texts.values()) < 6000 else 7000,
-    )
-
+    # Full pass: short fields + bodies in parallel, then cache.
+    short_src = {
+        k: clean_texts[k]
+        for k in TEXT_KEYS
+        if k not in BODY_KEYS and str(clean_texts.get(k) or "").strip()
+    }
+    body_src = {
+        k: clean_texts[k] for k in BODY_KEYS if str(clean_texts.get(k) or "").strip()
+    }
     localized: dict[str, str] = {}
     ui_out: dict[str, str] = {}
-    for key, value in localized_merged.items():
-        if key.startswith("c__"):
-            localized[key[3:]] = str(value)
-        elif key.startswith("u__"):
-            ui_out[key[3:]] = str(value)
+
+    jobs: list[tuple[str, dict[str, str], int]] = []
+    short_chunk: dict[str, str] = {f"c__{k}": v for k, v in short_src.items()}
+    for key, value in ui_in.items():
+        short_chunk[f"u__{key}"] = value
+    if short_chunk:
+        jobs.append(("short", short_chunk, 2200))
+    for key, value in body_src.items():
+        jobs.append(
+            (
+                key,
+                {f"c__{key}": value},
+                2800 if len(value) < 4000 else 4500,
+            )
+        )
+
+    with ThreadPoolExecutor(max_workers=min(5, max(1, len(jobs)))) as pool:
+        futures = {
+            pool.submit(_localize, chunk, tokens): label for label, chunk, tokens in jobs
+        }
+        for fut in as_completed(futures):
+            label = futures[fut]
+            try:
+                chunk_out = fut.result()
+            except Exception as exc:
+                logger.warning("Translate chunk %s failed: %s", label, exc)
+                continue
+            for key, value in chunk_out.items():
+                if key.startswith("c__"):
+                    localized[key[3:]] = str(value)
+                elif key.startswith("u__"):
+                    ui_out[key[3:]] = str(value)
 
     for key, value in ui_in.items():
         ui_out.setdefault(key, value)

@@ -237,8 +237,9 @@ class TranslateCampaignBody(BaseModel):
     language_name: str | None = Field(default=None, max_length=80)
     texts: _TranslateTexts
     ui_strings: dict[str, str] | None = None
-    # Fast first paint: headlines/captions only; body filled by a follow-up full request.
+    # Fast first paint: headlines/captions only; body filled by a follow-up bodies_only request.
     priority_only: bool = False
+    bodies_only: bool = False
 
 
 @router.get("/campaign-translation")
@@ -267,6 +268,7 @@ def translate_campaign(payload: TranslateCampaignBody) -> dict[str, Any]:
         ui_strings=payload.ui_strings,
         language_name=payload.language_name,
         priority_only=bool(payload.priority_only),
+        bodies_only=bool(payload.bodies_only),
     )
     return {
         "campaign_id": result["campaign_id"],
