@@ -266,6 +266,9 @@ def send_org_invite_email(
     temporary_password: str | None,
     existing_user: bool,
 ) -> dict[str, Any]:
+    # Org members / admins never receive invite or credentials emails.
+    return {"sent": False, "reason": "member_emails_disabled"}
+
     subject, html = org_admin_invite_email(
         organization_name=organization_name,
         role=role,

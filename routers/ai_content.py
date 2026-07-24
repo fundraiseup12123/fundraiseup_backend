@@ -11,13 +11,14 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from auth import AuthUser, require_auth, require_org_access
+from auth import AuthUser, has_global_org_access, require_auth, require_org_access
 from db import rest_get, rest_get_one
 
 router = APIRouter(prefix="/admin", tags=["ai-content"])
 
-GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
-DEFAULT_GROQ_MODEL = "llama-3.3-70b-versatile"
+OPENAI_API_URL = "https://api.openai.com/v1/chat/completions"
+# Cheapest solid OpenAI chat model (override with OPENAI_MODEL).
+DEFAULT_OPENAI_MODEL = "gpt-4.1-nano"
 ROOT_TARGET = 1700
 ROOT_MAX = 1750
 POPUP_TARGET = 375
@@ -194,18 +195,27 @@ def _build_messages(payload: CampaignContentAiRequest) -> list[dict[str, str]]:
     ]
 
 
-def _groq_json(api_key: str, model: str, messages: list[dict[str, str]], *, max_tokens: int = 1200) -> dict[str, Any]:
-    body = {
+def _openai_chat(
+    api_key: str,
+    model: str,
+    messages: list[dict[str, str]],
+    *,
+    max_tokens: int = 1200,
+    temperature: float = 0.45,
+    json_mode: bool = True,
+) -> str:
+    body: dict[str, Any] = {
         "model": model,
         "messages": messages,
-        "temperature": 0.55,
+        "temperature": temperature,
         "max_tokens": max_tokens,
-        "response_format": {"type": "json_object"},
     }
+    if json_mode:
+        body["response_format"] = {"type": "json_object"}
     try:
         with httpx.Client(timeout=90.0) as client:
             response = client.post(
-                GROQ_API_URL,
+                OPENAI_API_URL,
                 headers={
                     "Authorization": f"Bearer {api_key}",
                     "Content-Type": "application/json",
@@ -215,11 +225,11 @@ def _groq_json(api_key: str, model: str, messages: list[dict[str, str]], *, max_
     except httpx.HTTPError as exc:
         raise HTTPException(
             status_code=502,
-            detail="Cannot reach AI provider (Groq). Check your internet/DNS and try again.",
+            detail="Cannot reach OpenAI. Check your internet/DNS and try again.",
         ) from exc
 
     if response.status_code >= 400:
-        detail = "AI provider error"
+        detail = "OpenAI API error"
         try:
             err = response.json()
             detail = str((err.get("error") or {}).get("message") or err.get("message") or detail)
@@ -229,7 +239,28 @@ def _groq_json(api_key: str, model: str, messages: list[dict[str, str]], *, max_
 
     try:
         data = response.json()
-        raw = (((data.get("choices") or [{}])[0].get("message") or {}).get("content")) or ""
+        return str((((data.get("choices") or [{}])[0].get("message") or {}).get("content")) or "")
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail="OpenAI returned unreadable content") from exc
+
+
+def _openai_json(
+    api_key: str,
+    model: str,
+    messages: list[dict[str, str]],
+    *,
+    max_tokens: int = 1200,
+    temperature: float = 0.45,
+) -> dict[str, Any]:
+    raw = _openai_chat(
+        api_key,
+        model,
+        messages,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        json_mode=True,
+    )
+    try:
         return _extract_json(raw)
     except Exception as exc:
         raise HTTPException(status_code=502, detail="AI returned unreadable content") from exc
@@ -277,7 +308,7 @@ def _expand_short_popup(
             ),
         },
     ]
-    parsed = _groq_json(api_key, model, messages, max_tokens=800)
+    parsed = _openai_json(api_key, model, messages, max_tokens=800)
     expanded = str(parsed.get("popup_body") or "").strip()
     return expanded or draft
 
@@ -290,12 +321,8 @@ def generate_campaign_content(
 ) -> dict[str, str]:
     require_org_access(org_id, user, min_role="admin")
 
-    api_key = (os.getenv("GROQ_API_KEY") or "").strip()
-    if not api_key:
-        raise HTTPException(status_code=503, detail="AI writing is not configured (missing GROQ_API_KEY)")
-
-    model = (os.getenv("GROQ_MODEL") or DEFAULT_GROQ_MODEL).strip() or DEFAULT_GROQ_MODEL
-    parsed = _groq_json(api_key, model, _build_messages(payload), max_tokens=4500)
+    api_key, model = _require_openai()
+    parsed = _openai_json(api_key, model, _build_messages(payload), max_tokens=4500)
 
     desktop = _fit_marked_text(str(parsed.get("desktop_body") or ""), ROOT_MAX)
     mobile = _fit_marked_text(str(parsed.get("mobile_body") or ""), ROOT_MAX)
@@ -355,6 +382,18 @@ class OrgDashboardRequest(BaseModel):
     pass
 
 
+class InsightsChatMessage(BaseModel):
+    role: str = Field(min_length=1, max_length=20)
+    content: str = Field(min_length=1, max_length=4000)
+
+
+class InsightsChatRequest(BaseModel):
+    message: str = Field(min_length=1, max_length=2000)
+    campaign_id: str | None = Field(default=None, max_length=80)
+    history: list[InsightsChatMessage] = Field(default_factory=list, max_length=20)
+    include_cross_check: bool = False
+
+
 class TranslateTexts(BaseModel):
     title: str = ""
     titleHtml: str = ""
@@ -380,11 +419,11 @@ class TranslateCampaignRequest(BaseModel):
     texts: TranslateTexts
 
 
-def _require_groq() -> tuple[str, str]:
-    api_key = (os.getenv("GROQ_API_KEY") or "").strip()
+def _require_openai() -> tuple[str, str]:
+    api_key = (os.getenv("OPENAI_API_KEY") or "").strip()
     if not api_key:
-        raise HTTPException(status_code=503, detail="AI is not configured (missing GROQ_API_KEY)")
-    model = (os.getenv("GROQ_MODEL") or DEFAULT_GROQ_MODEL).strip() or DEFAULT_GROQ_MODEL
+        raise HTTPException(status_code=503, detail="AI is not configured (missing OPENAI_API_KEY)")
+    model = (os.getenv("OPENAI_MODEL") or DEFAULT_OPENAI_MODEL).strip() or DEFAULT_OPENAI_MODEL
     return api_key, model
 
 
@@ -800,7 +839,7 @@ def ai_ab_helper(
     status = str(campaign.get("status") or "")
     perf = _campaign_performance(org_id, payload.campaign_id)
     presets = _campaign_amount_presets(payload.campaign_id)
-    api_key, model = _require_groq()
+    api_key, model = _require_openai()
 
     title = str(content.get("title") or name)
     body = str(content.get("body_html") or content.get("desktop_body") or "")[:3500]
@@ -818,12 +857,15 @@ def ai_ab_helper(
         {
             "role": "system",
             "content": (
-                "You are a fundraising conversion expert. Score THIS campaign using the real "
-                "page copy AND the real donation performance stats provided. "
-                "Return ONLY JSON with keys: overall_score (0-100 number), summary (string), "
-                "winning_focus (string), items (array of exactly 6 objects). "
-                "Each item must include category, score (0-100), verdict, suggestion. "
+                "You are a fundraising conversion coach. Score THIS campaign using real page copy "
+                "AND real donation stats. Optimize for higher gift completion and average gift size. "
+                "Return ONLY JSON with keys: overall_score (0-100 number), summary (2 short sentences), "
+                "winning_focus (one concrete next edit a busy fundraiser can ship today), "
+                "items (array of exactly 6 objects). "
+                "Each item must include category, score (0-100), verdict (short), suggestion "
+                "(one clear action with expected conversion benefit). "
                 "Categories MUST be exactly: Headlines, Images, Colors, Buttons, Layouts, Donation amounts. "
+                "Write plain language — no jargon. Prefer specific copy/amount changes over vague advice. "
                 "Ground every suggestion in the supplied copy or stats. "
                 "If gift volume is low, say so and prioritize clarity/presets over inventing traffic claims. "
                 "Do not invent GA numbers. Do not invent donation counts."
@@ -853,10 +895,10 @@ def ai_ab_helper(
             ),
         },
     ]
-    parsed = _groq_json(api_key, model, messages, max_tokens=2200)
+    parsed = _openai_json(api_key, model, messages, max_tokens=2200)
     items = parsed.get("items") or []
     if not isinstance(items, list) or len(items) < 4:
-        raise HTTPException(status_code=502, detail="Groq returned an incomplete conversion review")
+        raise HTTPException(status_code=502, detail="AI returned an incomplete conversion review")
     return {
         "overall_score": float(parsed.get("overall_score") or 0),
         "summary": str(parsed.get("summary") or ""),
@@ -871,7 +913,7 @@ def ai_ab_helper(
             for it in items
             if isinstance(it, dict)
         ][:6],
-        "source": "groq",
+        "source": "openai",
         "live": True,
         "model": model,
         "based_on": {
@@ -903,22 +945,24 @@ def ai_analytics_explain(
     if ga4:
         snap["ga4"] = ga4
 
-    api_key, model = _require_groq()
+    api_key, model = _require_openai()
     today = datetime.now(timezone.utc).strftime("%b %d, %Y")
 
     messages = [
         {
             "role": "system",
             "content": (
-                "You explain fundraising analytics in plain language for busy nonprofit operators. "
-                "Return ONLY JSON: date_label, campaign_name, headline, insights "
-                "(array of {severity, title, explanation}). "
+                "You write a daily fundraising briefing for busy nonprofit operators. "
+                "Keep it easy to skim and focused on what to fix today to raise more. "
+                "Return ONLY JSON: date_label, campaign_name, headline (one punchy sentence), "
+                "insights (array of 4-6 objects: {severity, title, explanation}). "
                 "severity must be one of: critical, warning, positive, info. "
+                "Each explanation: 1-2 plain sentences ending with a concrete next step when useful. "
                 "Use ONLY the provided donation stats (and GA4 if present). "
                 "Do not invent pageviews, bounce rates, or donation counts. "
                 "If volume is thin, say the sample is small and give cautious recommendations. "
                 "Prefer causal explanations tied to real metrics like mobile share, recurring share, "
-                "7/30-day gift counts, and top campaigns."
+                "payment methods, 7/30-day gift counts, and top campaigns."
             ),
         },
         {
@@ -935,10 +979,10 @@ def ai_analytics_explain(
             ),
         },
     ]
-    parsed = _groq_json(api_key, model, messages, max_tokens=1800)
+    parsed = _openai_json(api_key, model, messages, max_tokens=1800)
     insights = parsed.get("insights") or []
     if not isinstance(insights, list) or not insights:
-        raise HTTPException(status_code=502, detail="Groq returned an empty analytics briefing")
+        raise HTTPException(status_code=502, detail="AI returned an empty analytics briefing")
     return {
         "date_label": str(parsed.get("date_label") or f"Daily briefing · {today}"),
         "campaign_name": str(parsed.get("campaign_name") or campaign_name),
@@ -952,7 +996,7 @@ def ai_analytics_explain(
             for it in insights
             if isinstance(it, dict)
         ][:8],
-        "source": "groq",
+        "source": "openai",
         "live": True,
         "model": model,
         "based_on": {
@@ -979,17 +1023,19 @@ def ai_org_dashboard(
     if ga4:
         snap["ga4"] = ga4
 
-    api_key, model = _require_groq()
+    api_key, model = _require_openai()
 
     messages = [
         {
             "role": "system",
             "content": (
-                "Summarize an organization fundraising dashboard for executives using REAL stats only. "
+                "Summarize an organization fundraising dashboard for busy operators using REAL stats only. "
+                "Write plain, conversion-focused language. "
                 "Return ONLY JSON with keys: generated_at, revenue_summary, conversion_summary, "
                 "repeat_donors_summary, best_campaigns (array of {name, why}), "
-                "problems (string array), recommended_actions (string array). "
-                "Write short paragraphs. Cite the actual gift counts / amounts from the stats. "
+                "problems (string array of specific risks), "
+                "recommended_actions (string array of high-ROI next steps, most important first). "
+                "Each summary field: 2 short sentences max. Cite actual gift counts / amounts. "
                 "Do not invent campaigns, revenue, or GA metrics that are not in the payload. "
                 "If data is sparse, say so and recommend measuring next."
             ),
@@ -1003,12 +1049,12 @@ def ai_org_dashboard(
             ),
         },
     ]
-    parsed = _groq_json(api_key, model, messages, max_tokens=1800)
+    parsed = _openai_json(api_key, model, messages, max_tokens=1800)
     best = parsed.get("best_campaigns") or []
     problems = parsed.get("problems") or []
     actions = parsed.get("recommended_actions") or []
     if not str(parsed.get("revenue_summary") or "").strip():
-        raise HTTPException(status_code=502, detail="Groq returned an incomplete organization summary")
+        raise HTTPException(status_code=502, detail="AI returned an incomplete organization summary")
 
     return {
         "generated_at": str(
@@ -1025,7 +1071,7 @@ def ai_org_dashboard(
         ][:5],
         "problems": [str(p) for p in problems][:6],
         "recommended_actions": [str(a) for a in actions][:6],
-        "source": "groq",
+        "source": "openai",
         "live": True,
         "model": model,
         "based_on": {
@@ -1036,6 +1082,392 @@ def ai_org_dashboard(
             "ga4_included": bool(ga4),
         },
     }
+
+
+def _parse_donation_dt(value: Any) -> datetime | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+
+def _normalize_payment_method(value: Any) -> str:
+    method = str(value or "unknown").strip().lower().replace(" ", "_").replace("-", "_")
+    aliases = {
+        "credit_card": "card",
+        "debit_card": "card",
+        "creditcard": "card",
+        "stripe": "card",
+        "googlepay": "google_pay",
+        "applepay": "apple_pay",
+        "gpay": "google_pay",
+        "crypto": "nowpayments",
+        "now_payments": "nowpayments",
+    }
+    return aliases.get(method, method or "unknown")
+
+
+def _utm_field(utm: Any, *keys: str) -> str:
+    if not isinstance(utm, dict):
+        return ""
+    for key in keys:
+        value = str(utm.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _bump_count(bucket: dict[str, int], key: str) -> None:
+    label = key or "(none)"
+    bucket[label] = bucket.get(label, 0) + 1
+
+
+def _top_counts(bucket: dict[str, int], *, limit: int = 12) -> list[dict[str, Any]]:
+    return [
+        {"label": k, "count": v}
+        for k, v in sorted(bucket.items(), key=lambda x: x[1], reverse=True)[:limit]
+    ]
+
+
+def _insights_chat_context(org_id: str, campaign_id: str | None = None) -> dict[str, Any]:
+    """Donation rollups for freeform analytics Q&A (counts, UTM, methods, campaigns)."""
+    campaigns = rest_get(
+        "campaigns",
+        params={"organization_id": f"eq.{org_id}", "select": "id,name,status,slug"},
+    ) or []
+    name_by_id = {str(c["id"]): str(c.get("name") or "Campaign") for c in campaigns}
+    params: dict[str, str] = {
+        "organization_id": f"eq.{org_id}",
+        "select": "amount,currency,frequency,created_at,campaign_id,status,device,payment_method,utm",
+        "order": "created_at.desc",
+        "limit": "800",
+    }
+    if campaign_id:
+        params["campaign_id"] = f"eq.{campaign_id}"
+    rows = rest_get("donations", params=params) or []
+    ok = _countable_donations(rows)
+    now = datetime.now(timezone.utc)
+
+    by_method: dict[str, dict[str, float | int]] = {}
+    by_day: dict[str, dict[str, Any]] = {}
+    by_campaign: dict[str, dict[str, Any]] = {}
+    utm_source: dict[str, int] = {}
+    utm_medium: dict[str, int] = {}
+    utm_campaign: dict[str, int] = {}
+    utm_term: dict[str, int] = {}
+    utm_content: dict[str, int] = {}
+    utm_combo: dict[str, int] = {}
+    with_utm = 0
+    without_utm = 0
+    monthly = 0
+    mobile = 0
+    total = 0.0
+    last_7 = 0
+    last_30 = 0
+
+    for r in ok:
+        amt = float(r.get("amount") or 0)
+        total += amt
+        method = _normalize_payment_method(r.get("payment_method"))
+        method_bucket = by_method.setdefault(method, {"count": 0, "total": 0.0})
+        method_bucket["count"] = int(method_bucket["count"]) + 1
+        method_bucket["total"] = round(float(method_bucket["total"]) + amt, 2)
+
+        if r.get("frequency") == "monthly":
+            monthly += 1
+        if _is_mobile_device(r.get("device")):
+            mobile += 1
+
+        cid = str(r.get("campaign_id") or "")
+        camp = by_campaign.setdefault(
+            cid,
+            {"id": cid, "name": name_by_id.get(cid, "Unknown"), "count": 0, "total": 0.0},
+        )
+        camp["count"] = int(camp["count"]) + 1
+        camp["total"] = round(float(camp["total"]) + amt, 2)
+
+        utm = r.get("utm") if isinstance(r.get("utm"), dict) else {}
+        source = _utm_field(utm, "source", "utm_source")
+        medium = _utm_field(utm, "medium", "utm_medium")
+        campaign = _utm_field(utm, "campaign", "utm_campaign")
+        term = _utm_field(utm, "term", "utm_term")
+        content = _utm_field(utm, "content", "utm_content")
+        if source or medium or campaign or term or content:
+            with_utm += 1
+            _bump_count(utm_source, source)
+            _bump_count(utm_medium, medium)
+            _bump_count(utm_campaign, campaign)
+            _bump_count(utm_term, term)
+            _bump_count(utm_content, content)
+            combo = "|".join(
+                [
+                    f"source={source or '-'}",
+                    f"medium={medium or '-'}",
+                    f"campaign={campaign or '-'}",
+                ]
+            )
+            _bump_count(utm_combo, combo)
+        else:
+            without_utm += 1
+
+        created = _parse_donation_dt(r.get("created_at"))
+        if not created:
+            continue
+        created_utc = created.astimezone(timezone.utc)
+        day = created_utc.strftime("%Y-%m-%d")
+        day_bucket = by_day.setdefault(
+            day,
+            {"date": day, "count": 0, "total": 0.0, "by_method": {}, "by_utm_source": {}},
+        )
+        day_bucket["count"] = int(day_bucket["count"]) + 1
+        day_bucket["total"] = round(float(day_bucket["total"]) + amt, 2)
+        day_methods: dict[str, Any] = day_bucket["by_method"]  # type: ignore[assignment]
+        day_methods[method] = int(day_methods.get(method) or 0) + 1
+        if source:
+            day_sources: dict[str, Any] = day_bucket["by_utm_source"]  # type: ignore[assignment]
+            day_sources[source] = int(day_sources.get(source) or 0) + 1
+
+        age = (now - created_utc).total_seconds()
+        if age <= 7 * 86400:
+            last_7 += 1
+        if age <= 30 * 86400:
+            last_30 += 1
+
+    days_sorted = sorted(by_day.values(), key=lambda x: str(x["date"]), reverse=True)[:45]
+    campaigns_sorted = sorted(by_campaign.values(), key=lambda x: int(x["count"]), reverse=True)[:12]
+
+    return {
+        "timezone": "UTC",
+        "generated_at": now.isoformat(),
+        "focus_campaign_id": campaign_id,
+        "focus_campaign_name": name_by_id.get(str(campaign_id or ""), None),
+        "campaigns": [
+            {"id": c.get("id"), "name": c.get("name"), "status": c.get("status")} for c in campaigns
+        ],
+        "totals": {
+            "result_count": len(ok),
+            "donation_count": len(ok),
+            "total_amount": round(total, 2),
+            "avg_gift": round(total / len(ok), 2) if ok else 0,
+            "monthly_count": monthly,
+            "once_count": max(0, len(ok) - monthly),
+            "mobile_share_pct": round((mobile / len(ok) * 100) if ok else 0, 1),
+            "gifts_last_7_days": last_7,
+            "gifts_last_30_days": last_30,
+            "with_utm_count": with_utm,
+            "without_utm_count": without_utm,
+            "sample_size": len(rows),
+        },
+        "utm": {
+            "by_source": _top_counts(utm_source),
+            "by_medium": _top_counts(utm_medium),
+            "by_campaign": _top_counts(utm_campaign),
+            "by_term": _top_counts(utm_term),
+            "by_content": _top_counts(utm_content),
+            "top_combos": _top_counts(utm_combo, limit=15),
+        },
+        "by_payment_method": [
+            {"method": k, "count": int(v["count"]), "total": float(v["total"])}
+            for k, v in sorted(by_method.items(), key=lambda x: int(x[1]["count"]), reverse=True)
+        ],
+        "by_day": days_sorted,
+        "by_campaign": campaigns_sorted,
+        "notes": (
+            "result_count/donation_count = countable gift rows in sample. "
+            "UTM fields come from donation.utm (source/medium/campaign/term/content). "
+            "payment_method values include card, google_pay, apple_pay, paypal, nowpayments. "
+            "'card' means Stripe card checkout. Dates are UTC calendar days (YYYY-MM-DD)."
+        ),
+    }
+
+
+def _member_safe_chat_context(full: dict[str, Any]) -> dict[str, Any]:
+    """Members may see UTM + result counts + insight mix — never donation amounts."""
+    totals = full.get("totals") or {}
+    return {
+        "audience": "member",
+        "timezone": full.get("timezone"),
+        "generated_at": full.get("generated_at"),
+        "focus_campaign_id": full.get("focus_campaign_id"),
+        "focus_campaign_name": full.get("focus_campaign_name"),
+        "campaigns": full.get("campaigns") or [],
+        "totals": {
+            "result_count": totals.get("result_count") or totals.get("donation_count") or 0,
+            "monthly_count": totals.get("monthly_count") or 0,
+            "once_count": totals.get("once_count") or 0,
+            "mobile_share_pct": totals.get("mobile_share_pct") or 0,
+            "results_last_7_days": totals.get("gifts_last_7_days") or 0,
+            "results_last_30_days": totals.get("gifts_last_30_days") or 0,
+            "with_utm_count": totals.get("with_utm_count") or 0,
+            "without_utm_count": totals.get("without_utm_count") or 0,
+            "sample_size": totals.get("sample_size") or 0,
+        },
+        "utm": full.get("utm") or {},
+        "by_payment_method": [
+            {"method": row.get("method"), "count": row.get("count")}
+            for row in (full.get("by_payment_method") or [])
+            if isinstance(row, dict)
+        ],
+        "by_day": [
+            {
+                "date": row.get("date"),
+                "count": row.get("count"),
+                "by_method": row.get("by_method") or {},
+                "by_utm_source": row.get("by_utm_source") or {},
+            }
+            for row in (full.get("by_day") or [])
+            if isinstance(row, dict)
+        ],
+        "by_campaign": [
+            {"id": row.get("id"), "name": row.get("name"), "count": row.get("count")}
+            for row in (full.get("by_campaign") or [])
+            if isinstance(row, dict)
+        ],
+        "notes": (
+            "MEMBER MODE: answer with UTM breakdowns, result counts, and insight analytics only. "
+            "Never mention donation amounts, totals raised, average gift, currency, or revenue. "
+            "If asked for money/donation values, refuse and explain that members only see counts and UTM."
+        ),
+    }
+
+
+def _chat_access_mode(org_id: str, user: AuthUser) -> str:
+    """admin = full money + counts; member = UTM/counts only."""
+    if has_global_org_access(user):
+        return "admin"
+    role = str(user.org_roles.get(org_id) or "member").lower()
+    if role in {"admin", "owner"}:
+        return "admin"
+    return "member"
+
+
+def _cross_check_stats(context: dict[str, Any], *, mode: str) -> dict[str, Any]:
+    """Compact numbers for humans to verify the bot against Insights/Donations."""
+    totals = context.get("totals") or {}
+    utm = context.get("utm") or {}
+    check: dict[str, Any] = {
+        "mode": mode,
+        "generated_at": context.get("generated_at"),
+        "focus_campaign_name": context.get("focus_campaign_name"),
+        "result_count": totals.get("result_count") or totals.get("donation_count") or 0,
+        "with_utm_count": totals.get("with_utm_count") or 0,
+        "without_utm_count": totals.get("without_utm_count") or 0,
+        "results_last_7_days": totals.get("results_last_7_days")
+        or totals.get("gifts_last_7_days")
+        or 0,
+        "results_last_30_days": totals.get("results_last_30_days")
+        or totals.get("gifts_last_30_days")
+        or 0,
+        "top_utm_sources": (utm.get("by_source") or [])[:5],
+        "top_campaigns_by_count": (context.get("by_campaign") or [])[:5],
+        "by_payment_method": (context.get("by_payment_method") or [])[:6],
+        "recent_days": (context.get("by_day") or [])[:7],
+    }
+    if mode == "admin":
+        check["total_amount"] = totals.get("total_amount")
+        check["avg_gift"] = totals.get("avg_gift")
+        check["donation_count"] = totals.get("donation_count")
+    return check
+
+
+@router.post("/orgs/{org_id}/ai/insights-chat")
+def ai_insights_chat(
+    org_id: str,
+    payload: InsightsChatRequest,
+    user: Annotated[AuthUser, Depends(require_auth)],
+) -> dict[str, Any]:
+    """Ask plain-language questions about UTM, result counts, and (admins) donation money."""
+    require_org_access(org_id, user, min_role="member")
+    question = payload.message.strip()
+    if not question:
+        raise HTTPException(status_code=400, detail="Message is required")
+
+    mode = _chat_access_mode(org_id, user)
+
+    if payload.campaign_id:
+        _campaign_bundle(org_id, payload.campaign_id)
+
+    full_context = _insights_chat_context(org_id, payload.campaign_id)
+    context = full_context if mode == "admin" else _member_safe_chat_context(full_context)
+    api_key, model = _require_openai()
+
+    history_msgs: list[dict[str, str]] = []
+    for item in payload.history[-12:]:
+        role = str(item.role or "").strip().lower()
+        if role not in {"user", "assistant"}:
+            continue
+        content = str(item.content or "").strip()
+        if not content:
+            continue
+        history_msgs.append({"role": role, "content": content[:2000]})
+
+    if mode == "admin":
+        system = (
+            "You are an analytics assistant for a nonprofit fundraising ADMIN. "
+            "Answer ONLY from the provided stats JSON. "
+            "Be concise and specific with counts, amounts, UTM, payment methods, and dates. "
+            "If asked about card gifts on a date, use by_day[].by_method.card for that YYYY-MM-DD. "
+            "Cross-check yourself against totals/utm/by_day before answering. "
+            "Never invent metrics. If data is thin, say so. "
+            "Return ONLY JSON: {\"answer\": \"...\", \"highlights\": [\"optional short bullets\"]}."
+        )
+        context_label = "Full admin analytics context (JSON)"
+    else:
+        system = (
+            "You are an analytics assistant for a nonprofit fundraising TEAM MEMBER. "
+            "Answer ONLY from the provided MEMBER stats JSON. "
+            "You may discuss: UTM parameters (source/medium/campaign/term/content), result counts, "
+            "campaign result rankings by count, payment-method counts, device mix, and date counts. "
+            "NEVER mention donation amounts, money raised, average gift, currency, revenue, or fees. "
+            "If the user asks for donation amounts or money, refuse politely and offer count/UTM insights instead. "
+            "Cross-check counts against totals/utm/by_day before answering. Never invent metrics. "
+            "Return ONLY JSON: {\"answer\": \"...\", \"highlights\": [\"optional short bullets\"]}."
+        )
+        context_label = "Member-safe analytics context (JSON — counts & UTM only)"
+
+    messages: list[dict[str, str]] = [
+        {"role": "system", "content": system},
+        {
+            "role": "user",
+            "content": (
+                f"{context_label}:\n"
+                + json.dumps(context, ensure_ascii=False, default=str)
+                + "\n\nUse this data for all answers."
+            ),
+        },
+        *history_msgs,
+        {"role": "user", "content": question},
+    ]
+    parsed = _openai_json(api_key, model, messages, max_tokens=900, temperature=0.2)
+    answer = str(parsed.get("answer") or "").strip()
+    if not answer:
+        raise HTTPException(status_code=502, detail="AI returned an empty answer")
+    highlights = parsed.get("highlights") or []
+    if not isinstance(highlights, list):
+        highlights = []
+
+    response: dict[str, Any] = {
+        "answer": answer,
+        "highlights": [str(h) for h in highlights if str(h).strip()][:6],
+        "source": "openai",
+        "live": True,
+        "model": model,
+        "access_mode": mode,
+        "based_on": {
+            "result_count": (context.get("totals") or {}).get("result_count")
+            or (context.get("totals") or {}).get("donation_count"),
+            "days_covered": len(context.get("by_day") or []),
+            "focus_campaign_id": payload.campaign_id,
+            "focus_campaign_name": context.get("focus_campaign_name"),
+            "with_utm_count": (context.get("totals") or {}).get("with_utm_count"),
+        },
+    }
+    if payload.include_cross_check:
+        response["stats_check"] = _cross_check_stats(context, mode=mode)
+    return response
 
 
 def localize_campaign_texts(
@@ -1050,7 +1482,7 @@ def localize_campaign_texts(
     if lang == "en":
         return dict(texts)
 
-    api_key, model = _require_groq()
+    api_key, model = _require_openai()
     known = {
         "ar": "Arabic",
         "fr": "French",
@@ -1106,7 +1538,7 @@ def localize_campaign_texts(
             "content": json.dumps(texts, ensure_ascii=False),
         },
     ]
-    parsed = _groq_json(api_key, model, messages, max_tokens=7000)
+    parsed = _openai_json(api_key, model, messages, max_tokens=7000)
     out: dict[str, str] = {}
     for key, value in texts.items():
         translated = parsed.get(key)

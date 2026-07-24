@@ -939,6 +939,9 @@ def _org_notification_recipients(org_id: str) -> list[dict[str, str]]:
 
 
 def send_donation_alerts_for_row(row: dict[str, Any]) -> int:
+    # Org members never receive email alerts (donor receipts stay enabled).
+    return 0
+
     if not resend_configured():
         return 0
 
@@ -1030,6 +1033,9 @@ def send_donation_alerts_for_row(row: dict[str, Any]) -> int:
 
 
 def send_org_weekly_digests() -> dict[str, int]:
+    # Org members never receive weekly digest emails.
+    return {"digests_sent": 0, "skipped": 0}
+
     if not resend_configured():
         return {"digests_sent": 0, "skipped": 0}
 
