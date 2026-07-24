@@ -712,18 +712,6 @@ def _fallback_ab(name: str) -> dict[str, Any]:
                 "suggestion": "Front-load the urgent outcome in the first 6–8 words; keep urgency without stacking clauses.",
             },
             {
-                "category": "Images",
-                "score": 72,
-                "verdict": "Hero supports the story",
-                "suggestion": "Prefer a single human-centered image above the fold; avoid busy collages on mobile.",
-            },
-            {
-                "category": "Colors",
-                "score": 80,
-                "verdict": "Brand contrast is solid",
-                "suggestion": "Keep primary CTA contrast high; mute secondary buttons so the donate action wins.",
-            },
-            {
                 "category": "Buttons",
                 "score": 70,
                 "verdict": "CTA copy can be sharper",
@@ -740,6 +728,30 @@ def _fallback_ab(name: str) -> dict[str, Any]:
                 "score": 76,
                 "verdict": "Presets look balanced",
                 "suggestion": "Highlight the middle amount as the recommended gift and label what it unlocks.",
+            },
+            {
+                "category": "Mobile experience",
+                "score": 66,
+                "verdict": "Most gifts look mobile",
+                "suggestion": "Shorten the mobile form and keep wallet pay visible above the fold.",
+            },
+            {
+                "category": "Payment methods",
+                "score": 72,
+                "verdict": "Method mix is uneven",
+                "suggestion": "Surface the top-performing methods first and remove friction on weaker ones.",
+            },
+            {
+                "category": "Recurring gifts",
+                "score": 64,
+                "verdict": "Monthly share is thin",
+                "suggestion": "Add a one-line monthly upsell right after the one-time amount is chosen.",
+            },
+            {
+                "category": "Traffic & UTM",
+                "score": 70,
+                "verdict": "A few sources drive most gifts",
+                "suggestion": "Match landing copy to your top utm_source and send weaker traffic to a clearer offer.",
             },
         ],
     }
@@ -901,10 +913,16 @@ def ai_ab_helper(
                 "Optimize for higher gift completion and average gift size. "
                 "Return ONLY JSON with keys: overall_score (0-100 number), summary (2 short sentences), "
                 "winning_focus (one concrete next edit a busy fundraiser can ship today), "
-                "items (array of exactly 6 objects). "
+                "items (array of exactly 8 objects). "
                 "Each item must include category, score (0-100), verdict (short), suggestion "
                 "(one clear action that cites a real metric from insights/analytics, then the edit). "
-                "Categories MUST be exactly: Headlines, Images, Colors, Buttons, Layouts, Donation amounts. "
+                "Categories MUST be exactly, in this order: "
+                "Headlines, Buttons, Layouts, Donation amounts, Mobile experience, "
+                "Payment methods, Recurring gifts, Traffic & UTM. "
+                "Do not score Images or Colors. "
+                "Map categories to data: Mobile experience ← mobile_share_pct / device mix; "
+                "Payment methods ← by_payment_method; Recurring gifts ← monthly_count vs once_count; "
+                "Traffic & UTM ← utm by_source/by_medium and with_utm_count. "
                 "Write plain language — no jargon. "
                 "If gift volume is low, say the sample is small and prioritize clarity/presets — "
                 "do not invent traffic, bounce, or conversion rates. "
@@ -937,24 +955,42 @@ def ai_ab_helper(
             ),
         },
     ]
-    parsed = _openai_json(api_key, model, messages, max_tokens=2200)
+    parsed = _openai_json(api_key, model, messages, max_tokens=3200)
+    category_order = [
+        "Headlines",
+        "Buttons",
+        "Layouts",
+        "Donation amounts",
+        "Mobile experience",
+        "Payment methods",
+        "Recurring gifts",
+        "Traffic & UTM",
+    ]
+    allowed_categories = set(category_order)
     items = parsed.get("items") or []
-    if not isinstance(items, list) or len(items) < 4:
+    if not isinstance(items, list):
+        items = []
+    by_category: dict[str, dict[str, Any]] = {}
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        cat = str(it.get("category") or "")
+        if cat not in allowed_categories or cat in by_category:
+            continue
+        by_category[cat] = {
+            "category": cat,
+            "score": float(it.get("score") or 0),
+            "verdict": str(it.get("verdict") or ""),
+            "suggestion": str(it.get("suggestion") or ""),
+        }
+    normalized = [by_category[cat] for cat in category_order if cat in by_category]
+    if len(normalized) < 6:
         raise HTTPException(status_code=502, detail="AI returned an incomplete conversion review")
     return {
         "overall_score": float(parsed.get("overall_score") or 0),
         "summary": str(parsed.get("summary") or ""),
         "winning_focus": str(parsed.get("winning_focus") or ""),
-        "items": [
-            {
-                "category": str(it.get("category") or "Item"),
-                "score": float(it.get("score") or 0),
-                "verdict": str(it.get("verdict") or ""),
-                "suggestion": str(it.get("suggestion") or ""),
-            }
-            for it in items
-            if isinstance(it, dict)
-        ][:6],
+        "items": normalized,
         "source": "openai",
         "live": True,
         "model": model,
