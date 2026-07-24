@@ -1102,6 +1102,7 @@ def get_donations(
     from currency import convert_to_reporting
     from db import rest_get as db_rest_get
     from db import rest_get_one as db_rest_get_one
+    from site_constants import ROOT_CAMPAIGN_ID, ROOT_ORG_ID
 
     select_cols = (
         "id,first_name,last_name,amount,currency,frequency,honoree_name,created_at,device,"
@@ -1115,19 +1116,82 @@ def get_donations(
         "id,first_name,last_name,amount,currency,frequency,honoree_name,created_at"
     )
     amount_sort = sort == "descending"
-    fetch_limit = 200 if amount_sort else limit + 1
+    # Org-wide feed merges multiple campaigns, so page in memory after fetch.
+    fetch_limit = max(200, offset + limit + 1)
+
+    def _resolve_org_id() -> str | None:
+        if not campaign_id or not _is_uuid(campaign_id):
+            return None
+        if campaign_id == ROOT_CAMPAIGN_ID:
+            return ROOT_ORG_ID
+        campaign = db_rest_get_one(
+            "campaigns",
+            params={"id": f"eq.{campaign_id}", "select": "organization_id"},
+        )
+        org_id = str((campaign or {}).get("organization_id") or "").strip()
+        return org_id or None
+
+    def _org_campaign_ids(org_id: str) -> list[str]:
+        rows = db_rest_get(
+            "campaigns",
+            params={
+                "organization_id": f"eq.{org_id}",
+                "select": "id",
+                "limit": "300",
+            },
+        ) or []
+        ids = [str(c["id"]) for c in rows if c.get("id")]
+        if org_id == ROOT_ORG_ID and ROOT_CAMPAIGN_ID not in ids:
+            ids.append(ROOT_CAMPAIGN_ID)
+        return ids
+
+    def _fetch_org_wide(select: str, org_id: str) -> list:
+        params = {
+            "organization_id": f"eq.{org_id}",
+            "select": select,
+            "order": "created_at.desc",
+            "limit": str(fetch_limit),
+            "offset": "0",
+        }
+        rows = db_rest_get("donations", params=params) or []
+        campaign_ids = _org_campaign_ids(org_id)
+        if not campaign_ids:
+            return rows
+        orphan_params = {
+            "organization_id": "is.null",
+            "campaign_id": f"in.({','.join(campaign_ids)})",
+            "select": select,
+            "order": "created_at.desc",
+            "limit": str(fetch_limit),
+            "offset": "0",
+        }
+        orphans = db_rest_get("donations", params=orphan_params) or []
+        if not orphans:
+            return rows
+        seen = {str(r.get("id")) for r in rows if r.get("id")}
+        for row in orphans:
+            row_id = str(row.get("id") or "")
+            if row_id and row_id not in seen:
+                rows.append(row)
+                seen.add(row_id)
+        rows.sort(key=lambda r: str(r.get("created_at") or ""), reverse=True)
+        return rows
 
     def _fetch(select: str) -> list:
-        if campaign_id and _is_uuid(campaign_id) and supabase_enabled():
+        org_id = _resolve_org_id()
+        if org_id:
+            return _fetch_org_wide(select, org_id)
+        if campaign_id and _is_uuid(campaign_id):
+            # Campaign without org still falls back to that campaign only.
             params = {
                 "campaign_id": f"eq.{campaign_id}",
                 "select": select,
                 "order": "created_at.desc",
                 "limit": str(fetch_limit),
-                "offset": str(0 if amount_sort else offset),
+                "offset": "0",
             }
-            return db_rest_get("donations", params=params)
-        return list_donations(limit=fetch_limit, offset=0 if amount_sort else offset)
+            return db_rest_get("donations", params=params) or []
+        return list_donations(limit=fetch_limit, offset=0)
 
     rows = _fetch(select_cols)
     if not rows:
@@ -1135,9 +1199,20 @@ def get_donations(
     if not rows:
         rows = _fetch(select_cols_basic)
 
-    if amount_sort:
-        reporting_currency = "USD"
-        if campaign_id and _is_uuid(campaign_id):
+    reporting_currency = "USD"
+    org_id = _resolve_org_id()
+    if org_id or (campaign_id and _is_uuid(campaign_id)):
+        if org_id:
+            org = db_rest_get_one(
+                "organizations",
+                params={"id": f"eq.{org_id}", "select": "reporting_currency,default_currency"},
+            )
+            reporting_currency = str(
+                (org or {}).get("reporting_currency")
+                or (org or {}).get("default_currency")
+                or "USD"
+            ).upper()
+        else:
             campaign = db_rest_get_one(
                 "campaigns",
                 params={"id": f"eq.{campaign_id}", "select": "default_currency,organization_id"},
@@ -1157,6 +1232,7 @@ def get_donations(
                     or "USD"
                 ).upper()
 
+    if amount_sort:
         rows.sort(key=lambda r: str(r.get("created_at") or ""), reverse=True)
         rows.sort(
             key=lambda r: convert_to_reporting(
@@ -1166,11 +1242,11 @@ def get_donations(
             ),
             reverse=True,
         )
-        page = rows[offset : offset + limit]
-        has_more = len(rows) > offset + limit
     else:
-        has_more = len(rows) > limit
-        page = rows[:limit]
+        rows.sort(key=lambda r: str(r.get("created_at") or ""), reverse=True)
+
+    page = rows[offset : offset + limit]
+    has_more = len(rows) > offset + limit
 
     donations = [_feed_item_from_row(row) for row in page]
     return DonationFeedResponse(donations=donations, has_more=has_more)

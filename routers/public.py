@@ -77,18 +77,87 @@ def get_campaign_donations(
     limit: int = Query(20, ge=1, le=50),
     offset: int = Query(0, ge=0),
 ) -> dict[str, Any]:
-    rows = rest_get(
-        "donations",
-        params={
-            "campaign_id": f"eq.{campaign_id}",
-            "select": select_columns("id", "first_name", "last_name", "amount", "currency", "frequency", "honoree_name", "created_at", "device", "crypto_amount", "crypto_currency"),
-            "order": "created_at.desc",
-            "limit": str(limit + 1),
-            "offset": str(offset),
-        },
+    """Recent donations for the campaign's organization (all campaigns in the org)."""
+    from site_constants import ROOT_CAMPAIGN_ID, ROOT_ORG_ID
+
+    select = select_columns(
+        "id",
+        "first_name",
+        "last_name",
+        "amount",
+        "currency",
+        "frequency",
+        "honoree_name",
+        "created_at",
+        "device",
+        "crypto_amount",
+        "crypto_currency",
     )
-    has_more = len(rows) > limit
-    return {"donations": rows[:limit], "has_more": has_more}
+    fetch_limit = max(200, offset + limit + 1)
+
+    org_id: str | None = None
+    if campaign_id == ROOT_CAMPAIGN_ID:
+        org_id = ROOT_ORG_ID
+    else:
+        campaign = rest_get_one(
+            "campaigns",
+            params={"id": f"eq.{campaign_id}", "select": "organization_id"},
+        )
+        org_id = str((campaign or {}).get("organization_id") or "").strip() or None
+
+    rows: list[dict[str, Any]] = []
+    if org_id:
+        rows = rest_get(
+            "donations",
+            params={
+                "organization_id": f"eq.{org_id}",
+                "select": select,
+                "order": "created_at.desc",
+                "limit": str(fetch_limit),
+                "offset": "0",
+            },
+        ) or []
+        org_campaigns = rest_get(
+            "campaigns",
+            params={"organization_id": f"eq.{org_id}", "select": "id", "limit": "300"},
+        ) or []
+        campaign_ids = [str(c["id"]) for c in org_campaigns if c.get("id")]
+        if org_id == ROOT_ORG_ID and ROOT_CAMPAIGN_ID not in campaign_ids:
+            campaign_ids.append(ROOT_CAMPAIGN_ID)
+        if campaign_ids:
+            orphans = rest_get(
+                "donations",
+                params={
+                    "organization_id": "is.null",
+                    "campaign_id": f"in.({','.join(campaign_ids)})",
+                    "select": select,
+                    "order": "created_at.desc",
+                    "limit": str(fetch_limit),
+                    "offset": "0",
+                },
+            ) or []
+            seen = {str(r.get("id")) for r in rows if r.get("id")}
+            for row in orphans:
+                row_id = str(row.get("id") or "")
+                if row_id and row_id not in seen:
+                    rows.append(row)
+                    seen.add(row_id)
+        rows.sort(key=lambda r: str(r.get("created_at") or ""), reverse=True)
+    else:
+        rows = rest_get(
+            "donations",
+            params={
+                "campaign_id": f"eq.{campaign_id}",
+                "select": select,
+                "order": "created_at.desc",
+                "limit": str(fetch_limit),
+                "offset": "0",
+            },
+        ) or []
+
+    page = rows[offset : offset + limit]
+    has_more = len(rows) > offset + limit
+    return {"donations": page, "has_more": has_more}
 
 
 @router.get("/resolve-host")
