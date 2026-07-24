@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from typing import Any
 
@@ -279,3 +280,105 @@ def translate_campaign(payload: TranslateCampaignBody) -> dict[str, Any]:
         "cached": bool(result.get("cached")),
         "partial": bool(result.get("partial")),
     }
+
+
+class TransliterateNamesBody(BaseModel):
+    target_language: str = Field(min_length=2, max_length=16)
+    language_name: str | None = Field(default=None, max_length=80)
+    names: list[str] = Field(default_factory=list, max_length=60)
+
+
+_NAME_CACHE: dict[str, str] = {}
+
+
+@router.post("/transliterate-names")
+def transliterate_names(payload: TransliterateNamesBody) -> dict[str, Any]:
+    """Convert Latin personal names into the native script for a language (cached)."""
+    from campaign_translations import normalize_lang
+    from routers.ai_content import _openai_json, _require_openai
+
+    lang = normalize_lang(payload.target_language)
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for raw in payload.names:
+        name = " ".join(str(raw or "").strip().split())
+        if not name or len(name) > 60:
+            continue
+        key = name.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        cleaned.append(name)
+        if len(cleaned) >= 40:
+            break
+
+    if lang == "en" or not cleaned:
+        return {"target_language": lang, "names": {n: n for n in cleaned}}
+
+    out: dict[str, str] = {}
+    missing: list[str] = []
+    for name in cleaned:
+        cache_key = f"{lang}:{name.casefold()}"
+        cached = _NAME_CACHE.get(cache_key)
+        if cached:
+            out[name] = cached
+            out[name.casefold()] = cached
+        else:
+            missing.append(name)
+
+    if missing:
+        try:
+            api_key, model = _require_openai()
+        except HTTPException:
+            for name in missing:
+                out[name] = name
+                out[name.casefold()] = name
+            return {"target_language": lang, "names": out}
+
+        known = {
+            "ar": "Arabic",
+            "ur": "Urdu",
+            "fa": "Persian",
+            "hi": "Hindi",
+            "bn": "Bengali",
+            "tr": "Turkish",
+            "ps": "Pashto",
+        }
+        lang_name = (payload.language_name or "").strip() or known.get(lang) or lang
+
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    f"You transliterate personal given names into {lang_name} "
+                    f"(language code: {lang}) native script. "
+                    "These are PEOPLE'S NAMES — use standard native orthography "
+                    "(e.g. Muhammad→محمد, Sarah→سارہ for Urdu). "
+                    "Do not translate meanings into common nouns. "
+                    "Keep multi-word names as multi-word. "
+                    "Return ONLY JSON: {\"names\": {\"Input\":\"Native\", ...}}. "
+                    "Every input name must appear as a key."
+                ),
+            },
+            {
+                "role": "user",
+                "content": json.dumps({"names": missing}, ensure_ascii=False),
+            },
+        ]
+        try:
+            parsed = _openai_json(api_key, model, messages, max_tokens=1200, temperature=0)
+            mapping = parsed.get("names") if isinstance(parsed.get("names"), dict) else parsed
+            if not isinstance(mapping, dict):
+                mapping = {}
+            for name in missing:
+                value = mapping.get(name) or mapping.get(name.casefold()) or name
+                text = str(value or name).strip() or name
+                _NAME_CACHE[f"{lang}:{name.casefold()}"] = text
+                out[name] = text
+                out[name.casefold()] = text
+        except Exception:
+            for name in missing:
+                out[name] = name
+                out[name.casefold()] = name
+
+    return {"target_language": lang, "names": out}
