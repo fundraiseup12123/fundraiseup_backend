@@ -12,6 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from auth import AuthUser, has_global_org_access, require_auth, require_org_access
+from currency import convert_to_reporting
 from db import rest_get, rest_get_one
 
 router = APIRouter(prefix="/admin", tags=["ai-content"])
@@ -392,6 +393,11 @@ class InsightsChatRequest(BaseModel):
     campaign_id: str | None = Field(default=None, max_length=80)
     history: list[InsightsChatMessage] = Field(default_factory=list, max_length=20)
     include_cross_check: bool = False
+
+
+class InsightsChatAccuracyRequest(BaseModel):
+    campaign_id: str | None = Field(default=None, max_length=80)
+    run_ai: bool = True
 
 
 class TranslateTexts(BaseModel):
@@ -825,6 +831,35 @@ def _fallback_dashboard(org_name: str, snap: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _conversion_tips_evidence(org_id: str, campaign_id: str) -> dict[str, Any]:
+    """Insights + analytics payloads that conversion tips must be grounded in."""
+    insights = _insights_chat_context(org_id, campaign_id)
+    # Keep token size practical for scoring while preserving the signal Insights/chat uses.
+    by_day = insights.get("by_day") or []
+    if isinstance(by_day, list) and len(by_day) > 14:
+        by_day = by_day[:14]
+    insights_compact = {
+        "totals": insights.get("totals") or {},
+        "utm": insights.get("utm") or {},
+        "by_payment_method": insights.get("by_payment_method") or [],
+        "by_day": by_day,
+        "by_campaign": insights.get("by_campaign") or [],
+        "notes": insights.get("notes"),
+    }
+    analytics = _org_donation_snapshot(org_id, campaign_id)
+    analytics["focus_performance"] = _campaign_performance(org_id, campaign_id)
+    ga4 = _optional_ga4_snapshot(org_id, campaign_id)
+    if ga4:
+        analytics["ga4"] = ga4
+    totals = insights_compact["totals"] if isinstance(insights_compact["totals"], dict) else {}
+    return {
+        "insights": insights_compact,
+        "analytics": analytics,
+        "ga4_included": bool(ga4),
+        "totals": totals,
+    }
+
+
 @router.post("/orgs/{org_id}/ai/ab-helper")
 def ai_ab_helper(
     org_id: str,
@@ -837,7 +872,8 @@ def ai_ab_helper(
     content = bundle["content"]
     name = str(campaign.get("name") or "Campaign")
     status = str(campaign.get("status") or "")
-    perf = _campaign_performance(org_id, payload.campaign_id)
+    evidence = _conversion_tips_evidence(org_id, payload.campaign_id)
+    totals = evidence.get("totals") or {}
     presets = _campaign_amount_presets(payload.campaign_id)
     api_key, model = _require_openai()
 
@@ -857,18 +893,23 @@ def ai_ab_helper(
         {
             "role": "system",
             "content": (
-                "You are a fundraising conversion coach. Score THIS campaign using real page copy "
-                "AND real donation stats. Optimize for higher gift completion and average gift size. "
+                "You are a fundraising conversion coach. EVERY tip must come from the supplied "
+                "INSIGHTS DATA and ANALYTICS DATA (donation rollups, UTM, payment methods, "
+                "device/mobile share, 7/30-day volume, day trends, and GA4 when present). "
+                "Page copy and amount presets are only the place to apply the fix — not a source "
+                "of invented performance claims. "
+                "Optimize for higher gift completion and average gift size. "
                 "Return ONLY JSON with keys: overall_score (0-100 number), summary (2 short sentences), "
                 "winning_focus (one concrete next edit a busy fundraiser can ship today), "
                 "items (array of exactly 6 objects). "
                 "Each item must include category, score (0-100), verdict (short), suggestion "
-                "(one clear action with expected conversion benefit). "
+                "(one clear action that cites a real metric from insights/analytics, then the edit). "
                 "Categories MUST be exactly: Headlines, Images, Colors, Buttons, Layouts, Donation amounts. "
-                "Write plain language — no jargon. Prefer specific copy/amount changes over vague advice. "
-                "Ground every suggestion in the supplied copy or stats. "
-                "If gift volume is low, say so and prioritize clarity/presets over inventing traffic claims. "
-                "Do not invent GA numbers. Do not invent donation counts."
+                "Write plain language — no jargon. "
+                "If gift volume is low, say the sample is small and prioritize clarity/presets — "
+                "do not invent traffic, bounce, or conversion rates. "
+                "Do not invent GA numbers. Do not invent donation counts, UTM shares, or payment-method mixes. "
+                "When GA4 is missing, say so implicitly by relying on donation insights only."
             ),
         },
         {
@@ -888,7 +929,8 @@ def ai_ab_helper(
                         "popup_excerpt": popup or "(empty)",
                     },
                     "amount_presets": presets,
-                    "live_performance": perf,
+                    "insights_data": evidence.get("insights"),
+                    "analytics_data": evidence.get("analytics"),
                 },
                 ensure_ascii=False,
                 default=str,
@@ -919,10 +961,12 @@ def ai_ab_helper(
         "based_on": {
             "campaign_name": name,
             "campaign_status": status,
-            "donation_count": perf.get("donation_count"),
-            "gifts_last_30_days": perf.get("gifts_last_30_days"),
-            "avg_gift": perf.get("avg_gift"),
-            "mobile_share_pct": perf.get("mobile_share_pct"),
+            "donation_count": totals.get("donation_count"),
+            "gifts_last_30_days": totals.get("gifts_last_30_days"),
+            "avg_gift": totals.get("avg_gift"),
+            "mobile_share_pct": totals.get("mobile_share_pct"),
+            "insights_included": True,
+            "ga4_included": bool(evidence.get("ga4_included")),
         },
     }
 
@@ -1133,7 +1177,19 @@ def _top_counts(bucket: dict[str, int], *, limit: int = 12) -> list[dict[str, An
 
 
 def _insights_chat_context(org_id: str, campaign_id: str | None = None) -> dict[str, Any]:
-    """Donation rollups for freeform analytics Q&A (counts, UTM, methods, campaigns)."""
+    """Donation rollups for freeform analytics Q&A (counts, UTM, methods, campaigns).
+
+    All money fields are converted into the organization's reporting currency
+    (same rules as Insights / Donations), never assumed to be USD.
+    """
+    org = rest_get_one(
+        "organizations",
+        params={"id": f"eq.{org_id}", "select": "reporting_currency,timezone,name"},
+    ) or {}
+    reporting_currency = str(org.get("reporting_currency") or "USD").upper()
+    org_timezone = str(org.get("timezone") or "UTC")
+    org_name = str(org.get("name") or "Organization")
+
     campaigns = rest_get(
         "campaigns",
         params={"organization_id": f"eq.{org_id}", "select": "id,name,status,slug"},
@@ -1143,7 +1199,7 @@ def _insights_chat_context(org_id: str, campaign_id: str | None = None) -> dict[
         "organization_id": f"eq.{org_id}",
         "select": "amount,currency,frequency,created_at,campaign_id,status,device,payment_method,utm",
         "order": "created_at.desc",
-        "limit": "800",
+        "limit": "2000",
     }
     if campaign_id:
         params["campaign_id"] = f"eq.{campaign_id}"
@@ -1154,6 +1210,7 @@ def _insights_chat_context(org_id: str, campaign_id: str | None = None) -> dict[
     by_method: dict[str, dict[str, float | int]] = {}
     by_day: dict[str, dict[str, Any]] = {}
     by_campaign: dict[str, dict[str, Any]] = {}
+    by_native_currency: dict[str, dict[str, float | int]] = {}
     utm_source: dict[str, int] = {}
     utm_medium: dict[str, int] = {}
     utm_campaign: dict[str, int] = {}
@@ -1167,10 +1224,24 @@ def _insights_chat_context(org_id: str, campaign_id: str | None = None) -> dict[
     total = 0.0
     last_7 = 0
     last_30 = 0
+    last_7_amount = 0.0
+    last_30_amount = 0.0
 
     for r in ok:
-        amt = float(r.get("amount") or 0)
+        native_code = str(r.get("currency") or reporting_currency).upper()
+        amt = convert_to_reporting(
+            float(r.get("amount") or 0),
+            native_code,
+            reporting_currency,
+        )
         total += amt
+        native_bucket = by_native_currency.setdefault(native_code, {"count": 0, "native_total": 0.0})
+        native_bucket["count"] = int(native_bucket["count"]) + 1
+        native_bucket["native_total"] = round(
+            float(native_bucket["native_total"]) + float(r.get("amount") or 0),
+            2,
+        )
+
         method = _normalize_payment_method(r.get("payment_method"))
         method_bucket = by_method.setdefault(method, {"count": 0, "total": 0.0})
         method_bucket["count"] = int(method_bucket["count"]) + 1
@@ -1233,14 +1304,21 @@ def _insights_chat_context(org_id: str, campaign_id: str | None = None) -> dict[
         age = (now - created_utc).total_seconds()
         if age <= 7 * 86400:
             last_7 += 1
+            last_7_amount += amt
         if age <= 30 * 86400:
             last_30 += 1
+            last_30_amount += amt
 
     days_sorted = sorted(by_day.values(), key=lambda x: str(x["date"]), reverse=True)[:45]
-    campaigns_sorted = sorted(by_campaign.values(), key=lambda x: int(x["count"]), reverse=True)[:12]
+    campaigns_by_count = sorted(by_campaign.values(), key=lambda x: int(x["count"]), reverse=True)[:12]
+    campaigns_by_total = sorted(by_campaign.values(), key=lambda x: float(x["total"]), reverse=True)[:12]
 
     return {
-        "timezone": "UTC",
+        "organization_name": org_name,
+        "reporting_currency": reporting_currency,
+        "currency": reporting_currency,
+        "amount_unit": reporting_currency,
+        "timezone": org_timezone or "UTC",
         "generated_at": now.isoformat(),
         "focus_campaign_id": campaign_id,
         "focus_campaign_name": name_by_id.get(str(campaign_id or ""), None),
@@ -1252,11 +1330,15 @@ def _insights_chat_context(org_id: str, campaign_id: str | None = None) -> dict[
             "donation_count": len(ok),
             "total_amount": round(total, 2),
             "avg_gift": round(total / len(ok), 2) if ok else 0,
+            "currency": reporting_currency,
+            "reporting_currency": reporting_currency,
             "monthly_count": monthly,
             "once_count": max(0, len(ok) - monthly),
             "mobile_share_pct": round((mobile / len(ok) * 100) if ok else 0, 1),
             "gifts_last_7_days": last_7,
             "gifts_last_30_days": last_30,
+            "amount_last_7_days": round(last_7_amount, 2),
+            "amount_last_30_days": round(last_30_amount, 2),
             "with_utm_count": with_utm,
             "without_utm_count": without_utm,
             "sample_size": len(rows),
@@ -1270,17 +1352,324 @@ def _insights_chat_context(org_id: str, campaign_id: str | None = None) -> dict[
             "top_combos": _top_counts(utm_combo, limit=15),
         },
         "by_payment_method": [
-            {"method": k, "count": int(v["count"]), "total": float(v["total"])}
+            {
+                "method": k,
+                "count": int(v["count"]),
+                "total": float(v["total"]),
+                "currency": reporting_currency,
+            }
             for k, v in sorted(by_method.items(), key=lambda x: int(x[1]["count"]), reverse=True)
         ],
-        "by_day": days_sorted,
-        "by_campaign": campaigns_sorted,
+        "by_native_currency": [
+            {
+                "currency": code,
+                "count": int(v["count"]),
+                "native_total": float(v["native_total"]),
+            }
+            for code, v in sorted(
+                by_native_currency.items(), key=lambda x: int(x[1]["count"]), reverse=True
+            )
+        ],
+        "by_day": [
+            {**row, "currency": reporting_currency}
+            for row in days_sorted
+        ],
+        "by_campaign": [
+            {**row, "currency": reporting_currency}
+            for row in campaigns_by_count
+        ],
+        "by_campaign_amount": [
+            {**row, "currency": reporting_currency}
+            for row in campaigns_by_total
+        ],
         "notes": (
+            f"ALL money fields (total_amount, avg_gift, by_campaign.total, by_day.total, "
+            f"by_payment_method.total) are already converted to reporting_currency={reporting_currency}. "
+            f"When stating any amount you MUST suffix {reporting_currency} — never say USD unless "
+            f"reporting_currency is USD. "
             "result_count/donation_count = countable gift rows in sample. "
             "UTM fields come from donation.utm (source/medium/campaign/term/content). "
             "payment_method values include card, google_pay, apple_pay, paypal, nowpayments. "
-            "'card' means Stripe card checkout. Dates are UTC calendar days (YYYY-MM-DD)."
+            "'card' means Stripe card checkout. Dates are calendar days in org timezone when available "
+            "(otherwise UTC YYYY-MM-DD)."
         ),
+    }
+
+
+def _money_label(amount: float | int | None, currency: str) -> str:
+    try:
+        value = float(amount or 0)
+    except (TypeError, ValueError):
+        value = 0.0
+    code = (currency or "USD").upper()
+    if abs(value - round(value)) < 1e-9:
+        return f"{value:,.0f} {code}"
+    return f"{value:,.2f} {code}"
+
+
+def _method_count(context: dict[str, Any], method: str) -> int:
+    for row in context.get("by_payment_method") or []:
+        if isinstance(row, dict) and str(row.get("method") or "") == method:
+            return int(row.get("count") or 0)
+    return 0
+
+
+def _method_total(context: dict[str, Any], method: str) -> float:
+    for row in context.get("by_payment_method") or []:
+        if isinstance(row, dict) and str(row.get("method") or "") == method:
+            return float(row.get("total") or 0)
+    return 0.0
+
+
+def _insights_chat_ground_truth(context: dict[str, Any], *, mode: str) -> list[dict[str, Any]]:
+    """20 deterministic Q&A pairs from the same live rollups the chatbot receives."""
+    totals = context.get("totals") or {}
+    currency = str(
+        context.get("reporting_currency")
+        or totals.get("reporting_currency")
+        or totals.get("currency")
+        or "USD"
+    ).upper()
+    utm = context.get("utm") or {}
+    sources = utm.get("by_source") or []
+    mediums = utm.get("by_medium") or []
+    camps_count = context.get("by_campaign") or []
+    camps_amount = context.get("by_campaign_amount") or camps_count
+    days = context.get("by_day") or []
+    methods = context.get("by_payment_method") or []
+
+    top_source = sources[0] if sources else {"label": "(none)", "count": 0}
+    top_medium = mediums[0] if mediums else {"label": "(none)", "count": 0}
+    top_camp_count = camps_count[0] if camps_count else {"name": "(none)", "count": 0, "total": 0}
+    top_camp_amount = camps_amount[0] if camps_amount else {"name": "(none)", "count": 0, "total": 0}
+    top_method = methods[0] if methods else {"method": "(none)", "count": 0, "total": 0}
+    best_day_count = max(days, key=lambda d: int(d.get("count") or 0), default=None) if days else None
+    best_day_amount = max(days, key=lambda d: float(d.get("total") or 0), default=None) if days else None
+
+    probes: list[dict[str, Any]] = [
+        {
+            "id": 1,
+            "prompt": "What is the donation count in the sample?",
+            "expected": str(int(totals.get("donation_count") or totals.get("result_count") or 0)),
+            "keys": ["donation_count"],
+        },
+        {
+            "id": 2,
+            "prompt": "What is the total amount raised, with currency?",
+            "expected": _money_label(totals.get("total_amount"), currency),
+            "keys": ["total_amount", "currency"],
+            "admin_only": True,
+        },
+        {
+            "id": 3,
+            "prompt": "What is the average gift size, with currency?",
+            "expected": _money_label(totals.get("avg_gift"), currency),
+            "keys": ["avg_gift", "currency"],
+            "admin_only": True,
+        },
+        {
+            "id": 4,
+            "prompt": "Which campaign has the highest total donations (amount)? Include the amount and currency.",
+            "expected": (
+                f"{top_camp_amount.get('name') or 'Unknown'} · "
+                f"{_money_label(top_camp_amount.get('total'), currency)}"
+            ),
+            "keys": ["top_campaign_amount"],
+            "admin_only": True,
+        },
+        {
+            "id": 5,
+            "prompt": "Which campaign has the most donations by count? Include the count.",
+            "expected": f"{top_camp_count.get('name') or 'Unknown'} · {int(top_camp_count.get('count') or 0)}",
+            "keys": ["top_campaign_count"],
+        },
+        {
+            "id": 6,
+            "prompt": "What is the top utm_source by result count? Include the count.",
+            "expected": f"{top_source.get('label')} · {int(top_source.get('count') or 0)}",
+            "keys": ["utm_source"],
+        },
+        {
+            "id": 7,
+            "prompt": "What is the top utm_medium by result count? Include the count.",
+            "expected": f"{top_medium.get('label')} · {int(top_medium.get('count') or 0)}",
+            "keys": ["utm_medium"],
+        },
+        {
+            "id": 8,
+            "prompt": "How many card donations are in the sample?",
+            "expected": str(_method_count(context, "card")),
+            "keys": ["card_count"],
+        },
+        {
+            "id": 9,
+            "prompt": "How many PayPal donations are in the sample?",
+            "expected": str(_method_count(context, "paypal")),
+            "keys": ["paypal_count"],
+        },
+        {
+            "id": 10,
+            "prompt": "How many Apple Pay donations are in the sample?",
+            "expected": str(_method_count(context, "apple_pay")),
+            "keys": ["apple_pay_count"],
+        },
+        {
+            "id": 11,
+            "prompt": "How many Google Pay donations are in the sample?",
+            "expected": str(_method_count(context, "google_pay")),
+            "keys": ["google_pay_count"],
+        },
+        {
+            "id": 12,
+            "prompt": "How many crypto (NOWPayments) donations are in the sample?",
+            "expected": str(_method_count(context, "nowpayments")),
+            "keys": ["crypto_count"],
+        },
+        {
+            "id": 13,
+            "prompt": "How many monthly vs once donations?",
+            "expected": (
+                f"monthly={int(totals.get('monthly_count') or 0)}, "
+                f"once={int(totals.get('once_count') or 0)}"
+            ),
+            "keys": ["monthly_once"],
+        },
+        {
+            "id": 14,
+            "prompt": "What is the mobile share percentage?",
+            "expected": f"{float(totals.get('mobile_share_pct') or 0)}%",
+            "keys": ["mobile_share"],
+        },
+        {
+            "id": 15,
+            "prompt": "How many gifts in the last 7 days?",
+            "expected": str(int(totals.get("gifts_last_7_days") or totals.get("results_last_7_days") or 0)),
+            "keys": ["last_7"],
+        },
+        {
+            "id": 16,
+            "prompt": "How many gifts in the last 30 days?",
+            "expected": str(int(totals.get("gifts_last_30_days") or totals.get("results_last_30_days") or 0)),
+            "keys": ["last_30"],
+        },
+        {
+            "id": 17,
+            "prompt": "How many results have UTM vs no UTM?",
+            "expected": (
+                f"with_utm={int(totals.get('with_utm_count') or 0)}, "
+                f"without_utm={int(totals.get('without_utm_count') or 0)}"
+            ),
+            "keys": ["utm_coverage"],
+        },
+        {
+            "id": 18,
+            "prompt": "What is the top payment method by count, and its total amount with currency?",
+            "expected": (
+                f"{top_method.get('method')} · count={int(top_method.get('count') or 0)} · "
+                f"{_money_label(top_method.get('total'), currency)}"
+            ),
+            "keys": ["top_method"],
+            "admin_only": True,
+        },
+        {
+            "id": 19,
+            "prompt": "Which day had the most donations by count? Include the date and count.",
+            "expected": (
+                f"{best_day_count.get('date')} · {int(best_day_count.get('count') or 0)}"
+                if best_day_count
+                else "none"
+            ),
+            "keys": ["best_day_count"],
+        },
+        {
+            "id": 20,
+            "prompt": "Which day raised the most amount? Include the date, amount, and currency.",
+            "expected": (
+                f"{best_day_amount.get('date')} · {_money_label(best_day_amount.get('total'), currency)}"
+                if best_day_amount
+                else "none"
+            ),
+            "keys": ["best_day_amount"],
+            "admin_only": True,
+        },
+    ]
+
+    if mode != "admin":
+        filtered: list[dict[str, Any]] = []
+        for probe in probes:
+            if probe.get("admin_only"):
+                filtered.append(
+                    {
+                        **probe,
+                        "expected": "Members cannot see donation amounts — answer with counts/UTM only.",
+                        "skip_amount_check": True,
+                    }
+                )
+            else:
+                filtered.append(probe)
+        return filtered
+    return probes
+
+
+def _answer_matches_expected(answer: str, expected: str, *, currency: str, admin_only: bool) -> dict[str, Any]:
+    text = (answer or "").lower()
+    currency_l = (currency or "").lower()
+    issues: list[str] = []
+
+    ans_compact = text.replace(",", "")
+    expected_nums = re.findall(r"\d+(?:\.\d+)?", expected.replace(",", ""))
+    hits = 0
+    for num in expected_nums:
+        compact = num.replace(",", "")
+        variants = {compact}
+        try:
+            as_float = float(compact)
+            if abs(as_float - round(as_float)) < 1e-9:
+                variants.add(str(int(round(as_float))))
+            else:
+                variants.add(f"{as_float:.2f}")
+                variants.add(f"{as_float:.1f}")
+        except Exception:
+            pass
+        if any(v and v in ans_compact for v in variants):
+            hits += 1
+        elif compact in {"0", "0.0", "0.00"} and re.search(
+            r"\b(no|none|zero|n/?a)\b", text
+        ):
+            hits += 1
+        else:
+            issues.append(f"missing number {num}")
+
+    required_hits = 1 if len(expected_nums) <= 1 else max(1, (len(expected_nums) + 1) // 2)
+    numbers_ok = (not expected_nums) or hits >= required_hits
+
+    currency_ok = True
+    if admin_only and currency_l:
+        if currency_l != "usd":
+            if currency_l not in text:
+                currency_ok = False
+                issues.append(f"missing currency {currency}")
+            if re.search(r"\busd\b", text) or ("$" in (answer or "") and currency_l != "usd"):
+                currency_ok = False
+                issues.append("incorrectly labeled as USD")
+        else:
+            currency_ok = ("usd" in text) or ("$" in (answer or ""))
+
+    # Soft campaign/day/utm label check
+    name_part = expected.split("·")[0].strip()
+    if name_part and name_part.lower() not in {"(none)", "none", "unknown"}:
+        tokens = [t for t in re.findall(r"[A-Za-z]{4,}", name_part)]
+        if tokens and not any(t.lower() in text for t in tokens):
+            issues.append(f"missing label {name_part}")
+
+    passed = numbers_ok and currency_ok
+    return {
+        "passed": passed,
+        "numbers_ok": numbers_ok,
+        "currency_ok": currency_ok,
+        "issues": issues,
+        "numbers_hit": hits,
+        "numbers_expected": len(expected_nums),
     }
 
 
@@ -1291,6 +1680,7 @@ def _member_safe_chat_context(full: dict[str, Any]) -> dict[str, Any]:
         "audience": "member",
         "timezone": full.get("timezone"),
         "generated_at": full.get("generated_at"),
+        "reporting_currency": full.get("reporting_currency"),
         "focus_campaign_id": full.get("focus_campaign_id"),
         "focus_campaign_name": full.get("focus_campaign_name"),
         "campaigns": full.get("campaigns") or [],
@@ -1348,10 +1738,17 @@ def _cross_check_stats(context: dict[str, Any], *, mode: str) -> dict[str, Any]:
     """Compact numbers for humans to verify the bot against Insights/Donations."""
     totals = context.get("totals") or {}
     utm = context.get("utm") or {}
+    currency = str(
+        context.get("reporting_currency")
+        or totals.get("reporting_currency")
+        or totals.get("currency")
+        or "USD"
+    ).upper()
     check: dict[str, Any] = {
         "mode": mode,
         "generated_at": context.get("generated_at"),
         "focus_campaign_name": context.get("focus_campaign_name"),
+        "reporting_currency": currency,
         "result_count": totals.get("result_count") or totals.get("donation_count") or 0,
         "with_utm_count": totals.get("with_utm_count") or 0,
         "without_utm_count": totals.get("without_utm_count") or 0,
@@ -1363,6 +1760,7 @@ def _cross_check_stats(context: dict[str, Any], *, mode: str) -> dict[str, Any]:
         or 0,
         "top_utm_sources": (utm.get("by_source") or [])[:5],
         "top_campaigns_by_count": (context.get("by_campaign") or [])[:5],
+        "top_campaigns_by_amount": (context.get("by_campaign_amount") or [])[:5],
         "by_payment_method": (context.get("by_payment_method") or [])[:6],
         "recent_days": (context.get("by_day") or [])[:7],
     }
@@ -1370,7 +1768,76 @@ def _cross_check_stats(context: dict[str, Any], *, mode: str) -> dict[str, Any]:
         check["total_amount"] = totals.get("total_amount")
         check["avg_gift"] = totals.get("avg_gift")
         check["donation_count"] = totals.get("donation_count")
+        check["amount_last_7_days"] = totals.get("amount_last_7_days")
+        check["amount_last_30_days"] = totals.get("amount_last_30_days")
     return check
+
+
+def _ask_insights_llm(
+    *,
+    mode: str,
+    context: dict[str, Any],
+    question: str,
+    history_msgs: list[dict[str, str]] | None = None,
+    api_key: str,
+    model: str,
+) -> dict[str, Any]:
+    currency = str(context.get("reporting_currency") or (context.get("totals") or {}).get("currency") or "USD").upper()
+    if mode == "admin":
+        system = (
+            "You are a precise fundraising analytics assistant (ChatGPT-style: clear, direct, helpful). "
+            "Answer ONLY from the provided stats JSON. "
+            f"CRITICAL: every money amount is already in reporting_currency={currency}. "
+            f"Always write amounts as numbers followed by {currency} (example: 12,500 {currency}). "
+            f"Never say USD or use $ unless reporting_currency is USD. "
+            "Always include the key number(s) in the first sentence — never answer with only a name/label. "
+            "For rankings, format like: '<Name> with <N> gifts' or '<Name> with <amount> {currency}'. "
+            "When ranking campaigns by money raised, use by_campaign_amount (sorted by total). "
+            "When ranking by gift count, use by_campaign. "
+            "Be concise: lead with the answer, then one short supporting line if useful. "
+            "If asked about card gifts on a date, use by_day[].by_method.card for that YYYY-MM-DD. "
+            "Cross-check yourself against totals/utm/by_day before answering. "
+            "Never invent metrics. If data is thin, say so. "
+            "Return ONLY JSON: {\"answer\": \"...\", \"highlights\": [\"optional short bullets\"]}."
+        )
+        context_label = f"Full admin analytics context (amounts in {currency})"
+    else:
+        system = (
+            "You are a precise fundraising analytics assistant for a TEAM MEMBER (ChatGPT-style). "
+            "Answer ONLY from the provided MEMBER stats JSON. "
+            "You may discuss: UTM parameters, result counts, campaign rankings by count, "
+            "payment-method counts, device mix, and date counts. "
+            "NEVER mention donation amounts, money raised, average gift, currency, revenue, or fees. "
+            "If asked for donation amounts or money, refuse politely and offer count/UTM insights instead. "
+            "Cross-check counts against totals/utm/by_day before answering. Never invent metrics. "
+            "Return ONLY JSON: {\"answer\": \"...\", \"highlights\": [\"optional short bullets\"]}."
+        )
+        context_label = "Member-safe analytics context (JSON — counts & UTM only)"
+
+    messages: list[dict[str, str]] = [
+        {"role": "system", "content": system},
+        {
+            "role": "user",
+            "content": (
+                f"{context_label}:\n"
+                + json.dumps(context, ensure_ascii=False, default=str)
+                + "\n\nUse this data for all answers."
+            ),
+        },
+        *(history_msgs or []),
+        {"role": "user", "content": question},
+    ]
+    parsed = _openai_json(api_key, model, messages, max_tokens=900, temperature=0.1)
+    answer = str(parsed.get("answer") or "").strip()
+    if not answer:
+        raise HTTPException(status_code=502, detail="AI returned an empty answer")
+    highlights = parsed.get("highlights") or []
+    if not isinstance(highlights, list):
+        highlights = []
+    return {
+        "answer": answer,
+        "highlights": [str(h) for h in highlights if str(h).strip()][:6],
+    }
 
 
 @router.post("/orgs/{org_id}/ai/insights-chat")
@@ -1404,58 +1871,23 @@ def ai_insights_chat(
             continue
         history_msgs.append({"role": role, "content": content[:2000]})
 
-    if mode == "admin":
-        system = (
-            "You are an analytics assistant for a nonprofit fundraising ADMIN. "
-            "Answer ONLY from the provided stats JSON. "
-            "Be concise and specific with counts, amounts, UTM, payment methods, and dates. "
-            "If asked about card gifts on a date, use by_day[].by_method.card for that YYYY-MM-DD. "
-            "Cross-check yourself against totals/utm/by_day before answering. "
-            "Never invent metrics. If data is thin, say so. "
-            "Return ONLY JSON: {\"answer\": \"...\", \"highlights\": [\"optional short bullets\"]}."
-        )
-        context_label = "Full admin analytics context (JSON)"
-    else:
-        system = (
-            "You are an analytics assistant for a nonprofit fundraising TEAM MEMBER. "
-            "Answer ONLY from the provided MEMBER stats JSON. "
-            "You may discuss: UTM parameters (source/medium/campaign/term/content), result counts, "
-            "campaign result rankings by count, payment-method counts, device mix, and date counts. "
-            "NEVER mention donation amounts, money raised, average gift, currency, revenue, or fees. "
-            "If the user asks for donation amounts or money, refuse politely and offer count/UTM insights instead. "
-            "Cross-check counts against totals/utm/by_day before answering. Never invent metrics. "
-            "Return ONLY JSON: {\"answer\": \"...\", \"highlights\": [\"optional short bullets\"]}."
-        )
-        context_label = "Member-safe analytics context (JSON — counts & UTM only)"
-
-    messages: list[dict[str, str]] = [
-        {"role": "system", "content": system},
-        {
-            "role": "user",
-            "content": (
-                f"{context_label}:\n"
-                + json.dumps(context, ensure_ascii=False, default=str)
-                + "\n\nUse this data for all answers."
-            ),
-        },
-        *history_msgs,
-        {"role": "user", "content": question},
-    ]
-    parsed = _openai_json(api_key, model, messages, max_tokens=900, temperature=0.2)
-    answer = str(parsed.get("answer") or "").strip()
-    if not answer:
-        raise HTTPException(status_code=502, detail="AI returned an empty answer")
-    highlights = parsed.get("highlights") or []
-    if not isinstance(highlights, list):
-        highlights = []
+    parsed = _ask_insights_llm(
+        mode=mode,
+        context=context,
+        question=question,
+        history_msgs=history_msgs,
+        api_key=api_key,
+        model=model,
+    )
 
     response: dict[str, Any] = {
-        "answer": answer,
-        "highlights": [str(h) for h in highlights if str(h).strip()][:6],
+        "answer": parsed["answer"],
+        "highlights": parsed["highlights"],
         "source": "openai",
         "live": True,
         "model": model,
         "access_mode": mode,
+        "reporting_currency": full_context.get("reporting_currency"),
         "based_on": {
             "result_count": (context.get("totals") or {}).get("result_count")
             or (context.get("totals") or {}).get("donation_count"),
@@ -1463,6 +1895,10 @@ def ai_insights_chat(
             "focus_campaign_id": payload.campaign_id,
             "focus_campaign_name": context.get("focus_campaign_name"),
             "with_utm_count": (context.get("totals") or {}).get("with_utm_count"),
+            "reporting_currency": full_context.get("reporting_currency"),
+            "total_amount": (full_context.get("totals") or {}).get("total_amount")
+            if mode == "admin"
+            else None,
         },
     }
     if payload.include_cross_check:
@@ -1470,10 +1906,93 @@ def ai_insights_chat(
     return response
 
 
+@router.post("/orgs/{org_id}/ai/insights-chat/accuracy")
+def ai_insights_chat_accuracy(
+    org_id: str,
+    payload: InsightsChatAccuracyRequest,
+    user: Annotated[AuthUser, Depends(require_auth)],
+) -> dict[str, Any]:
+    """Run 20 ground-truth prompts against live donation data (optionally score the LLM)."""
+    require_org_access(org_id, user, min_role="member")
+    mode = _chat_access_mode(org_id, user)
+    if payload.campaign_id:
+        _campaign_bundle(org_id, payload.campaign_id)
+
+    full_context = _insights_chat_context(org_id, payload.campaign_id)
+    context = full_context if mode == "admin" else _member_safe_chat_context(full_context)
+    currency = str(full_context.get("reporting_currency") or "USD").upper()
+    probes = _insights_chat_ground_truth(full_context if mode == "admin" else context, mode=mode)
+
+    results: list[dict[str, Any]] = []
+    passed = 0
+    api_key = ""
+    model = ""
+    if payload.run_ai:
+        api_key, model = _require_openai()
+
+    for probe in probes:
+        row: dict[str, Any] = {
+            "id": probe["id"],
+            "prompt": probe["prompt"],
+            "expected": probe["expected"],
+            "admin_only": bool(probe.get("admin_only")),
+        }
+        if payload.run_ai:
+            try:
+                parsed = _ask_insights_llm(
+                    mode=mode,
+                    context=context,
+                    question=str(probe["prompt"]),
+                    history_msgs=[],
+                    api_key=api_key,
+                    model=model,
+                )
+                answer = parsed["answer"]
+                check = _answer_matches_expected(
+                    answer,
+                    str(probe["expected"]),
+                    currency=currency,
+                    admin_only=bool(probe.get("admin_only")) and mode == "admin",
+                )
+                row["answer"] = answer
+                row["passed"] = check["passed"]
+                row["check"] = check
+                if check["passed"]:
+                    passed += 1
+            except Exception as exc:  # noqa: BLE001 — surface per-probe failures
+                row["answer"] = ""
+                row["passed"] = False
+                row["error"] = str(exc)
+        else:
+            row["passed"] = True
+            passed += 1
+        results.append(row)
+
+    return {
+        "reporting_currency": currency,
+        "access_mode": mode,
+        "sample_size": (full_context.get("totals") or {}).get("sample_size"),
+        "donation_count": (full_context.get("totals") or {}).get("donation_count"),
+        "total_amount": (full_context.get("totals") or {}).get("total_amount") if mode == "admin" else None,
+        "run_ai": payload.run_ai,
+        "model": model or None,
+        "passed": passed,
+        "total": len(results),
+        "score_pct": round((passed / len(results) * 100) if results else 0, 1),
+        "probes": results,
+        "ground_truth_preview": {
+            "top_campaign_by_amount": (full_context.get("by_campaign_amount") or [])[:1],
+            "totals": full_context.get("totals"),
+        },
+    }
+
+
 def localize_campaign_texts(
     target_language: str,
     texts: dict[str, str],
     language_name: str | None = None,
+    *,
+    max_tokens: int = 7000,
 ) -> dict[str, str]:
     raw = (target_language or "en").strip().replace("_", "-").lower()
     lang = (raw.split("-")[0] if raw else "en")[:8]
@@ -1538,7 +2057,7 @@ def localize_campaign_texts(
             "content": json.dumps(texts, ensure_ascii=False),
         },
     ]
-    parsed = _openai_json(api_key, model, messages, max_tokens=7000)
+    parsed = _openai_json(api_key, model, messages, max_tokens=max_tokens, temperature=0.3)
     out: dict[str, str] = {}
     for key, value in texts.items():
         translated = parsed.get(key)

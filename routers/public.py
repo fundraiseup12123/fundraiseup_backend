@@ -168,43 +168,43 @@ class TranslateCampaignBody(BaseModel):
     language_name: str | None = Field(default=None, max_length=80)
     texts: _TranslateTexts
     ui_strings: dict[str, str] | None = None
+    # Fast first paint: headlines/captions only; body filled by a follow-up full request.
+    priority_only: bool = False
+
+
+@router.get("/campaign-translation")
+def get_campaign_translation(
+    campaign_id: str = Query(..., min_length=1, max_length=80),
+    lang: str = Query(..., min_length=2, max_length=16),
+    content_fp: str | None = Query(None, max_length=64),
+) -> dict[str, Any]:
+    """Fast cache lookup — no OpenAI. 404 when missing or fingerprint stale."""
+    from campaign_translations import get_cached_translation, normalize_lang
+
+    cached = get_cached_translation(campaign_id, normalize_lang(lang), content_fp)
+    if not cached:
+        raise HTTPException(status_code=404, detail="Translation not cached")
+    return cached
 
 
 @router.post("/translate-campaign")
 def translate_campaign(payload: TranslateCampaignBody) -> dict[str, Any]:
-    from routers.ai_content import localize_campaign_texts
+    from campaign_translations import translate_and_cache
 
-    texts = payload.texts.model_dump()
-    ui_in = {str(k): str(v) for k, v in (payload.ui_strings or {}).items() if str(v).strip()}
-    merged: dict[str, str] = {}
-    for key, value in texts.items():
-        merged[f"c__{key}"] = str(value or "")
-    for key, value in ui_in.items():
-        merged[f"u__{key}"] = value
-
-    localized_merged = localize_campaign_texts(
-        payload.target_language,
-        merged,
+    result = translate_and_cache(
+        campaign_id=payload.campaign_id,
+        target_language=payload.target_language,
+        texts=payload.texts.model_dump(),
+        ui_strings=payload.ui_strings,
         language_name=payload.language_name,
+        priority_only=bool(payload.priority_only),
     )
-
-    localized: dict[str, str] = {}
-    ui_out: dict[str, str] = {}
-    for key, value in localized_merged.items():
-        if key.startswith("c__"):
-            localized[key[3:]] = str(value)
-        elif key.startswith("u__"):
-            ui_out[key[3:]] = str(value)
-
-    # Preserve any English UI keys the model dropped.
-    for key, value in ui_in.items():
-        ui_out.setdefault(key, value)
-    for key, value in texts.items():
-        localized.setdefault(key, str(value or ""))
-
     return {
-        "campaign_id": payload.campaign_id,
-        "target_language": payload.target_language,
-        "texts": localized,
-        "ui_strings": ui_out,
+        "campaign_id": result["campaign_id"],
+        "target_language": result["target_language"],
+        "content_fp": result.get("content_fp"),
+        "texts": result["texts"],
+        "ui_strings": result.get("ui_strings") or {},
+        "cached": bool(result.get("cached")),
+        "partial": bool(result.get("partial")),
     }

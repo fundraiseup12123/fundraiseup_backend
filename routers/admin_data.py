@@ -30,6 +30,7 @@ def admin_list_donations(
     offset: int = Query(0, ge=0),
     status: str | None = Query(None),
     frequency: str | None = Query(None),
+    payment_method: str | None = Query(None),
     date_preset: str | None = Query(None),
     sort: str = Query("date_desc", pattern="^(date_desc|asc|desc)$"),
 ) -> dict[str, Any]:
@@ -47,6 +48,11 @@ def admin_list_donations(
         "honoree_name,created_at,campaign_id,platform_fee,processing_fee,payout_amount,"
         "organization_id,crypto_amount,crypto_currency"
     )
+    allowed_methods = {"card", "paypal", "apple_pay", "google_pay", "nowpayments"}
+    method_filter = (payment_method or "").strip().lower()
+    if method_filter not in allowed_methods:
+        method_filter = ""
+
     # Amount sort loads the filtered set so FX conversion ranks correctly across currencies.
     fetch_limit = limit + 1
     params: dict[str, str] = {
@@ -62,6 +68,11 @@ def admin_list_donations(
         params["status"] = f"eq.{status}"
     if frequency and frequency in {"once", "monthly"}:
         params["frequency"] = f"eq.{frequency}"
+    if method_filter == "card":
+        # Older rows may have null payment_method; treat those as card.
+        params["or"] = "(payment_method.eq.card,payment_method.is.null)"
+    elif method_filter:
+        params["payment_method"] = f"eq.{method_filter}"
     if date_preset and date_preset != "all":
         date_from, date_to = _date_range(date_preset, org_timezone)
         if date_from and date_to:
@@ -97,6 +108,10 @@ def admin_list_donations(
                 orphan_params["status"] = f"eq.{status}"
             if frequency and frequency in {"once", "monthly"}:
                 orphan_params["frequency"] = f"eq.{frequency}"
+            if method_filter == "card":
+                orphan_params["or"] = "(payment_method.eq.card,payment_method.is.null)"
+            elif method_filter:
+                orphan_params["payment_method"] = f"eq.{method_filter}"
             if date_preset and date_preset != "all":
                 date_from, date_to = _date_range(date_preset, org_timezone)
                 if date_from and date_to:

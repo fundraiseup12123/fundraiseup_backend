@@ -268,6 +268,14 @@ def update_root_branding(
                 )
         if not inserted:
             raise HTTPException(status_code=500, detail="Failed to create root branding content")
+
+    try:
+        from campaign_translations import warm_campaign_translations_async
+
+        warm_campaign_translations_async(ROOT_CAMPAIGN_ID)
+    except Exception:
+        pass
+
     return _root_campaign_bundle()
 
 

@@ -847,6 +847,14 @@ def update_campaign(
             if not inserted:
                 raise HTTPException(status_code=500, detail="Failed to create campaign content")
 
+        # Pre-warm Urdu/Arabic story translations in the background (non-blocking).
+        try:
+            from campaign_translations import warm_campaign_translations_async
+
+            warm_campaign_translations_async(campaign_id)
+        except Exception:
+            pass
+
     return get_campaign(org_id, campaign_id, user)
 
 
