@@ -268,11 +268,16 @@ def translate_and_cache(
         merged = {f"c__{k}": v for k, v in priority_src.items()}
         localized_merged = _localize(merged, 1800)
         localized = dict(clean_texts)  # body stays English for now
+        # Clear priority keys so omitted AI fields stay empty — client falls back to
+        # related translated fields (e.g. mobile title → desktop title) instead of
+        # treating leftover English as a successful translation.
+        for key in priority_src:
+            localized[key] = ""
         for key, value in localized_merged.items():
             if key.startswith("c__"):
-                localized[key[3:]] = str(value)
-        for key, value in priority_src.items():
-            localized.setdefault(key, value)
+                text = str(value or "").strip()
+                if text:
+                    localized[key[3:]] = text
         return {
             "campaign_id": campaign_id,
             "target_language": lang,
