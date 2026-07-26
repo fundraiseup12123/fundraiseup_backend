@@ -1177,8 +1177,37 @@ def get_donations(
         rows.sort(key=lambda r: str(r.get("created_at") or ""), reverse=True)
         return rows
 
+    def _fetch_all_organizations(select: str) -> list:
+        params = {
+            "select": select,
+            "order": "created_at.desc",
+            "limit": str(fetch_limit),
+            "offset": "0",
+        }
+        return db_rest_get("donations", params=params) or []
+
+    def _recent_donations_all_organizations(cid: str | None) -> bool:
+        """Yes (default): all orgs. No: this organization only."""
+        if not cid or not _is_uuid(cid):
+            return True
+        try:
+            content = db_rest_get_one(
+                "campaign_content",
+                params={
+                    "campaign_id": f"eq.{cid}",
+                    "select": "recent_donations_all_organizations",
+                },
+            )
+        except Exception:
+            return True
+        if not content or content.get("recent_donations_all_organizations") is None:
+            return True
+        return bool(content.get("recent_donations_all_organizations"))
+
     def _fetch(select: str) -> list:
         org_id = _resolve_org_id()
+        if campaign_id and _is_uuid(campaign_id) and _recent_donations_all_organizations(campaign_id):
+            return _fetch_all_organizations(select)
         if org_id:
             return _fetch_org_wide(select, org_id)
         if campaign_id and _is_uuid(campaign_id):

@@ -628,6 +628,103 @@ def admin_insights(
     }
 
 
+def _utm_campaign_label(utm: Any) -> str:
+    """Return utm_campaign value, or empty string when missing."""
+    if not isinstance(utm, dict):
+        return ""
+    for key in ("campaign", "utm_campaign"):
+        value = str(utm.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+@router.get("/orgs/{org_id}/utm-report")
+def admin_utm_report(
+    org_id: str,
+    user: Annotated[AuthUser, Depends(require_auth)],
+    campaign_id: str | None = Query(None),
+    date_preset: str = Query("7d"),
+    date_from: str | None = Query(None),
+    date_to: str | None = Query(None),
+) -> dict[str, Any]:
+    """Group donation results by utm_campaign for the org console UTM tab."""
+    require_org_access(org_id, user, min_role="member")
+
+    org = rest_get_one(
+        "organizations",
+        params={"id": f"eq.{org_id}", "select": "reporting_currency,timezone"},
+    )
+    org_timezone = str((org or {}).get("timezone") or "UTC")
+    reporting_currency = str((org or {}).get("reporting_currency") or "USD").upper()
+
+    campaigns = rest_get(
+        "campaigns",
+        params={"organization_id": f"eq.{org_id}", "select": "id,name,slug,status,designation"},
+    ) or []
+    resolved_from, resolved_to = _insights_date_range(
+        date_preset, date_from, date_to, org_timezone
+    )
+
+    rows = _admin_org_donation_rows(
+        org_id,
+        select="amount,currency,created_at,campaign_id,utm,status",
+        campaigns=campaigns,
+        campaign_id=campaign_id,
+        date_from=resolved_from,
+        date_to=resolved_to,
+        limit=10000,
+    )
+    rows = _insights_countable(rows)
+
+    counts: dict[str, int] = {}
+    amounts: dict[str, float] = {}
+    for row in rows:
+        label = _utm_campaign_label(row.get("utm"))
+        counts[label] = counts.get(label, 0) + 1
+        amounts[label] = round(
+            amounts.get(label, 0.0)
+            + convert_to_reporting(
+                float(row.get("amount") or 0),
+                str(row.get("currency") or reporting_currency).upper(),
+                reporting_currency,
+            ),
+            2,
+        )
+
+    table_rows = [
+        {
+            "campaign": label,
+            "results": counts[label],
+            "amount": amounts.get(label, 0.0),
+        }
+        for label in sorted(counts.keys(), key=lambda key: (-counts[key], key.lower()))
+    ]
+
+    empty_results = counts.get("", 0)
+    named_results = sum(count for label, count in counts.items() if label)
+    return {
+        "reporting_currency": reporting_currency,
+        "date_preset": date_preset,
+        "date_from": date_from or (resolved_from[:10] if resolved_from else None),
+        "date_to": date_to or (resolved_to[:10] if resolved_to else None),
+        "date_label": _date_label(date_preset, date_from, date_to, org_timezone),
+        "selected_campaign_id": campaign_id or "all",
+        "campaigns": [
+            {"id": c.get("id"), "name": c.get("name") or "Campaign", "slug": c.get("slug") or ""}
+            for c in campaigns
+        ],
+        "summary": {
+            "total_results": len(rows),
+            "utm_campaign_values": len([label for label in counts if label]),
+            "named_campaign_results": named_results,
+            "empty_campaign_results": empty_results,
+            "unique_rows": len(table_rows),
+        },
+        "rows": table_rows,
+    }
+
+
 def _empty_insights(
     reporting_currency: str,
     date_preset: str,

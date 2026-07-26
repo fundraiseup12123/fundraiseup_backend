@@ -147,6 +147,11 @@ def _default_campaign_content(name: str) -> dict[str, Any]:
                 if root.get("recent_donations_sort") in {"recent", "descending"}
                 else "recent"
             ),
+            "recent_donations_all_organizations": bool(
+                True
+                if root.get("recent_donations_all_organizations") is None
+                else root.get("recent_donations_all_organizations")
+            ),
             "ga4_measurement_id": root.get("ga4_measurement_id") or None,
             "gtm_container_id": root.get("gtm_container_id") or None,
             "ga4_property_id": root.get("ga4_property_id") or None,
@@ -169,6 +174,7 @@ def _default_campaign_content(name: str) -> dict[str, Any]:
         "title_font_size": None,
         "body_font_size": None,
         "recent_donations_sort": "recent",
+        "recent_donations_all_organizations": True,
     }
 
 
@@ -320,6 +326,7 @@ class CampaignContentPayload(BaseModel):
     popup_view_json: str | None = None
     show_donor_country: bool = False
     recent_donations_sort: str = Field(default="recent", pattern="^(recent|descending)$")
+    recent_donations_all_organizations: bool = True
     ga4_measurement_id: str | None = None
     gtm_container_id: str | None = None
     ga4_property_id: str | None = None
@@ -711,6 +718,7 @@ def update_campaign(
         feed_keys = (
             "show_donor_country",
             "recent_donations_sort",
+            "recent_donations_all_organizations",
             "ga4_measurement_id",
             "gtm_container_id",
             "ga4_property_id",
@@ -724,6 +732,7 @@ def update_campaign(
             "title_font_size_mobile",
             "body_font_size_mobile",
         )
+        all_orgs_feed_key = ("recent_donations_all_organizations",)
         mobile_landing_keys = (
             "title_html_mobile",
             "body_html_mobile",
@@ -771,6 +780,16 @@ def update_campaign(
                     raise HTTPException(
                         status_code=503,
                         detail="Content saved but title formatting/text sizes failed: run backend/sql/023_campaign_text_font_sizes.sql and 024_campaign_title_html.sql on Supabase.",
+                    )
+            if not updated and any(k in content_data for k in all_orgs_feed_key):
+                without_all_orgs = {
+                    k: v for k, v in content_data.items() if k not in all_orgs_feed_key
+                }
+                updated = rest_patch("campaign_content", without_all_orgs, match={"campaign_id": campaign_id})
+                if updated:
+                    raise HTTPException(
+                        status_code=503,
+                        detail="Content saved but all-organizations recent donations failed: run backend/sql/034_recent_donations_all_organizations.sql on Supabase.",
                     )
             if not updated and any(k in content_data for k in feed_keys):
                 fallback = {k: v for k, v in content_data.items() if k not in feed_keys}
@@ -827,6 +846,16 @@ def update_campaign(
                     raise HTTPException(
                         status_code=503,
                         detail="Content saved but title formatting/text sizes failed: run backend/sql/023_campaign_text_font_sizes.sql and 024_campaign_title_html.sql on Supabase.",
+                    )
+            if not inserted and any(k in content_data for k in all_orgs_feed_key):
+                without_all_orgs = {
+                    k: v for k, v in content_data.items() if k not in all_orgs_feed_key
+                }
+                inserted = rest_insert("campaign_content", {"campaign_id": campaign_id, **without_all_orgs})
+                if inserted:
+                    raise HTTPException(
+                        status_code=503,
+                        detail="Content saved but all-organizations recent donations failed: run backend/sql/034_recent_donations_all_organizations.sql on Supabase.",
                     )
             if not inserted and any(k in content_data for k in feed_keys):
                 fallback = {k: v for k, v in content_data.items() if k not in feed_keys}

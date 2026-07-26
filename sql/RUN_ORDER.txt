@@ -45,3 +45,4 @@
 --   031_platform_admin_role.sql
 --   032_paypal_account_keys.sql
 --   033_campaign_translations.sql
+--   034_recent_donations_all_organizations.sql
