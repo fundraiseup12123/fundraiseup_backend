@@ -265,6 +265,7 @@ def send_org_invite_email(
     login_url: str,
     temporary_password: str | None,
     existing_user: bool,
+    recipient_name: str | None = None,
 ) -> dict[str, Any]:
     """Send invite / login-details email for org or platform team additions."""
     subject, html = org_admin_invite_email(
@@ -274,6 +275,7 @@ def send_org_invite_email(
         email=recipient_email,
         temporary_password=temporary_password,
         existing_user=existing_user,
+        recipient_name=recipient_name,
         logo_url=os.getenv("EMAIL_LOGO_URL", "").strip() or DEFAULT_EMAIL_LOGO_URL,
         primary_color=DEFAULT_PRIMARY_COLOR,
         banner_url=os.getenv("EMAIL_BANNER_URL", "").strip() or DEFAULT_EMAIL_BANNER_URL,
@@ -305,8 +307,12 @@ def fulfill_organization_invite(
     email = str(invite.get("email") or "").lower()
     org_id = str(invite.get("organization_id") or "")
     role = str(invite.get("role") or "admin")
+    first_name = (first_name or "").strip()
+    last_name = (last_name or "").strip()
     if not email or not org_id:
         raise HTTPException(status_code=400, detail="Invalid invite")
+    if not first_name:
+        raise HTTPException(status_code=400, detail="First name is required")
 
     existing_user_id = find_user_id_by_email(email)
     login_url = f"{resolve_invite_frontend_url().rstrip('/')}/login?next=/admin/insights"
@@ -321,12 +327,22 @@ def fulfill_organization_invite(
         created_new = True
 
     ensure_org_member(user_id, org_id, role)
+    display_name = " ".join(part for part in (first_name.strip(), last_name.strip()) if part).strip()
     if first_name or last_name:
-        rest_patch(
-            "profiles",
-            {"first_name": first_name, "last_name": last_name},
-            match={"id": user_id},
-        )
+        profile_updates = {
+            "first_name": first_name or None,
+            "last_name": last_name or None,
+        }
+        patched = rest_patch("profiles", profile_updates, match={"id": user_id})
+        if not patched:
+            rest_insert(
+                "profiles",
+                {
+                    "id": user_id,
+                    "first_name": first_name or None,
+                    "last_name": last_name or None,
+                },
+            )
     mark_invite_accepted(str(invite["id"]))
 
     email_result = send_org_invite_email(
@@ -337,6 +353,7 @@ def fulfill_organization_invite(
         login_url=login_url,
         temporary_password=password,
         existing_user=not created_new,
+        recipient_name=display_name or None,
     )
 
     return {
@@ -357,8 +374,12 @@ def fulfill_platform_admin_invite(
 ) -> dict[str, Any]:
     """Create or upgrade a user to platform_admin (all organizations, payments read-only)."""
     recipient = str(email or "").strip().lower()
+    first_name = (first_name or "").strip()
+    last_name = (last_name or "").strip()
     if not recipient:
         raise HTTPException(status_code=400, detail="Email is required")
+    if not first_name:
+        raise HTTPException(status_code=400, detail="First name is required")
 
     existing_user_id = find_user_id_by_email(recipient)
     login_url = f"{resolve_invite_frontend_url().rstrip('/')}/login?next=/admin/insights"
@@ -375,11 +396,11 @@ def fulfill_platform_admin_invite(
         user_id = create_supabase_user(recipient, password, first_name=first_name, last_name=last_name)
         created_new = True
 
-    profile_updates: dict[str, Any] = {"role": "platform_admin"}
-    if first_name:
-        profile_updates["first_name"] = first_name
-    if last_name:
-        profile_updates["last_name"] = last_name
+    profile_updates: dict[str, Any] = {
+        "role": "platform_admin",
+        "first_name": first_name,
+        "last_name": last_name or None,
+    }
     patched = rest_patch("profiles", profile_updates, match={"id": user_id})
     if not patched:
         rest_insert(
@@ -387,11 +408,12 @@ def fulfill_platform_admin_invite(
             {
                 "id": user_id,
                 "role": "platform_admin",
-                "first_name": first_name or None,
+                "first_name": first_name,
                 "last_name": last_name or None,
             },
         )
 
+    display_name = " ".join(part for part in (first_name.strip(), last_name.strip()) if part).strip()
     email_result = send_org_invite_email(
         recipient_email=recipient,
         organization_id=None,
@@ -400,6 +422,7 @@ def fulfill_platform_admin_invite(
         login_url=login_url,
         temporary_password=password,
         existing_user=not created_new,
+        recipient_name=display_name or None,
     )
 
     return {

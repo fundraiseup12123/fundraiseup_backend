@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field, field_validator
 from auth import AuthUser, deny_platform_admin_payment_writes, require_auth, require_org_access
 from db import rest_delete, rest_get, rest_get_one, rest_insert, rest_insert_error, rest_patch, select_columns
 from routers.payment_accounts import normalize_payment_account_sources
-from invite_service import send_pending_organization_invite
+from invite_service import fulfill_organization_invite
 from domain_utils import (
     platform_domain_config,
     platform_root_domain,
@@ -1183,6 +1183,8 @@ def list_members(org_id: str, user: Annotated[AuthUser, Depends(require_auth)]) 
 
 class TeamInviteRequest(BaseModel):
     email: str = Field(min_length=3)
+    first_name: str = Field(min_length=1, max_length=80)
+    last_name: str = Field(default="", max_length=80)
     role: str = "member"
 
 
@@ -1199,6 +1201,10 @@ def invite_member(
     role = str(payload.role or "member").strip().lower()
     if role not in {"owner", "admin", "member"}:
         raise HTTPException(status_code=400, detail="Invalid role")
+    first_name = str(payload.first_name or "").strip()
+    last_name = str(payload.last_name or "").strip()
+    if not first_name:
+        raise HTTPException(status_code=400, detail="First name is required")
     invite = rest_insert(
         "organization_invites",
         {
@@ -1210,23 +1216,20 @@ def invite_member(
     )
     if not invite:
         raise HTTPException(status_code=400, detail="Failed to create invite")
-    if not invite.get("token"):
-        invite = rest_get_one(
-            "organization_invites",
-            params={"id": f"eq.{invite['id']}", "select": "*"},
-        ) or invite
-    provisioned = send_pending_organization_invite(
+    provisioned = fulfill_organization_invite(
         invite,
         organization_name=str(org.get("name") or "your organization"),
+        first_name=first_name,
+        last_name=last_name,
     )
     return {
         "invite": invite,
         "email_sent": bool(provisioned.get("email_sent")),
-        "invite_url": provisioned.get("invite_url"),
+        "login_url": provisioned.get("login_url"),
         "message": (
-            f"Invitation emailed to {payload.email.lower()}."
+            f"Login details emailed to {payload.email.lower()}."
             if provisioned.get("email_sent")
-            else f"Invite created. Configure RESEND_API_KEY to email {payload.email.lower()}."
+            else f"Account created. Configure RESEND_API_KEY to email login details to {payload.email.lower()}."
         ),
     }
 

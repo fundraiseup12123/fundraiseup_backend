@@ -47,8 +47,8 @@ class CreateOrganizationRequest(BaseModel):
     slug: str | None = None
     default_currency: str = "USD"
     admin_email: EmailStr
-    admin_first_name: str = ""
-    admin_last_name: str = ""
+    admin_first_name: str = Field(min_length=1, max_length=80)
+    admin_last_name: str = Field(default="", max_length=80)
 
 
 class OrganizationResponse(BaseModel):
@@ -154,8 +154,8 @@ def create_organization(
             provisioned = fulfill_organization_invite(
                 invite,
                 organization_name=payload.name,
-                first_name=payload.admin_first_name,
-                last_name=payload.admin_last_name,
+                first_name=str(payload.admin_first_name or "").strip(),
+                last_name=str(payload.admin_last_name or "").strip(),
             )
         except HTTPException as exc:
             provision_error = str(exc.detail) if isinstance(exc.detail, str) else "Admin invite setup failed"
@@ -401,6 +401,8 @@ def delete_organization(
 
 class OrgAdminInviteRequest(BaseModel):
     email: EmailStr
+    first_name: str = Field(min_length=1, max_length=80)
+    last_name: str = Field(default="", max_length=80)
     role: str = "admin"
     organization_id: str | None = None
     access_scope: str = Field(default="organization", pattern="^(organization|all)$")
@@ -493,10 +495,16 @@ def invite_organization_admin(
     user: Annotated[AuthUser, Depends(require_super_admin)],
 ) -> dict[str, Any]:
     email = str(payload.email).lower()
+    first_name = str(payload.first_name or "").strip()
+    last_name = str(payload.last_name or "").strip()
+    if not first_name:
+        raise HTTPException(status_code=400, detail="First name is required")
     if payload.access_scope == "all":
         provisioned = fulfill_platform_admin_invite(
             email=email,
             invited_by=user.id,
+            first_name=first_name,
+            last_name=last_name,
         )
         return {
             "email_sent": bool(provisioned.get("email_sent")),
@@ -528,6 +536,8 @@ def invite_organization_admin(
     provisioned = fulfill_organization_invite(
         invite,
         organization_name=str(org.get("name") or "your organization"),
+        first_name=first_name,
+        last_name=last_name,
     )
     return {
         "invite": invite,

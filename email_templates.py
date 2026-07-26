@@ -380,9 +380,12 @@ def org_admin_invite_email(
     primary_color: str = "#3872DC",
     banner_url: str | None = None,
     contact_email: str | None = None,
+    recipient_name: str | None = None,
 ) -> tuple[str, str]:
     subject = f"Join {organization_name} on FundraiseUp"
     role_label = escape(role.replace("_", " ").title())
+    display_name = (recipient_name or "").strip()
+    greeting = f"Hi {escape(display_name)}," if display_name else "Greetings,"
 
     if temporary_password:
         if existing_user:
@@ -394,9 +397,16 @@ def org_admin_invite_email(
             preheader = f"You now have {role_label} access to {organization_name}."
             cta_label = "Sign in to org console"
         else:
+            name_row = (
+                f'<tr><td style="padding:4px 0;color:#64748b;">Name</td>'
+                f'<td style="padding:4px 0 4px 16px;"><strong>{escape(display_name)}</strong></td></tr>'
+                if display_name
+                else ""
+            )
             credentials = f"""
           <p style="margin:0 0 12px;">Use these credentials to sign in:</p>
           <table role="presentation" cellspacing="0" cellpadding="0" style="margin:0 0 12px;">
+            {name_row}
             <tr><td style="padding:4px 0;color:#64748b;">Email</td><td style="padding:4px 0 4px 16px;"><strong>{escape(email)}</strong></td></tr>
             <tr><td style="padding:4px 0;color:#64748b;">Temporary password</td><td style="padding:4px 0 4px 16px;"><strong>{escape(temporary_password or "")}</strong></td></tr>
           </table>
@@ -430,7 +440,7 @@ def org_admin_invite_email(
         headline = f"You're invited to {organization_name}"
 
     body = f"""
-      <p style="margin:0 0 12px;">Greetings,</p>
+      <p style="margin:0 0 12px;">{greeting}</p>
       <p style="margin:0 0 12px;">
         You have been invited as <strong>{role_label}</strong> for
         <strong>{escape(organization_name)}</strong> on FundraiseUp.
