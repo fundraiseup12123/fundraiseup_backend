@@ -320,7 +320,7 @@ def generate_campaign_content(
     payload: CampaignContentAiRequest,
     user: Annotated[AuthUser, Depends(require_auth)],
 ) -> dict[str, str]:
-    require_org_access(org_id, user, min_role="admin")
+    require_org_access(org_id, user, min_role="member")
 
     api_key, model = _require_openai()
     parsed = _openai_json(api_key, model, _build_messages(payload), max_tokens=4500)
