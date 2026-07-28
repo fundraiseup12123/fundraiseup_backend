@@ -137,12 +137,22 @@ def deny_platform_admin_payment_writes(user: AuthUser) -> None:
         )
 
 
+_ORG_ROLE_RANK = {"member": 0, "admin": 1, "owner": 2}
+
+
+def is_org_admin(org_id: str, user: AuthUser) -> bool:
+    """True for org admin/owner, super admin, or platform admin."""
+    if has_global_org_access(user):
+        return True
+    role = user.org_roles.get(org_id, "member")
+    return _ORG_ROLE_RANK.get(role, 0) >= _ORG_ROLE_RANK["admin"]
+
+
 def require_org_access(org_id: str, user: AuthUser, min_role: str = "member") -> None:
     if has_global_org_access(user):
         return
     if org_id not in user.organization_ids:
         raise HTTPException(status_code=403, detail="Organization access denied")
     role = user.org_roles.get(org_id, "member")
-    hierarchy = {"member": 0, "admin": 1, "owner": 2}
-    if hierarchy.get(role, 0) < hierarchy.get(min_role, 0):
+    if _ORG_ROLE_RANK.get(role, 0) < _ORG_ROLE_RANK.get(min_role, 0):
         raise HTTPException(status_code=403, detail="Insufficient organization permissions")

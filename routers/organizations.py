@@ -11,7 +11,7 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, field_validator
 
-from auth import AuthUser, deny_platform_admin_payment_writes, require_auth, require_org_access
+from auth import AuthUser, deny_platform_admin_payment_writes, is_org_admin, require_auth, require_org_access
 from db import rest_delete, rest_get, rest_get_one, rest_insert, rest_insert_error, rest_patch, select_columns
 from routers.payment_accounts import normalize_payment_account_sources
 from invite_service import fulfill_organization_invite
@@ -502,7 +502,7 @@ def create_campaign(
     payload: CreateCampaignRequest,
     user: Annotated[AuthUser, Depends(require_auth)],
 ) -> dict[str, Any]:
-    require_org_access(org_id, user, min_role="admin")
+    require_org_access(org_id, user, min_role="member")
     slug = payload.slug or _slugify(payload.name)
     existing = rest_get_one(
         "campaigns",
@@ -625,15 +625,28 @@ def update_campaign(
     payload: UpdateCampaignRequest,
     user: Annotated[AuthUser, Depends(require_auth)],
 ) -> dict[str, Any]:
-    require_org_access(org_id, user, min_role="admin")
+    require_org_access(org_id, user, min_role="member")
+    admin_user = is_org_admin(org_id, user)
     payment_fields = (
         "stripe_account_id",
         "paypal_account_id",
         "nowpayments_account_id",
         "payment_account_sources",
     )
-    if any(field in payload.model_fields_set for field in payment_fields):
+    payment_write = any(field in payload.model_fields_set for field in payment_fields)
+    if payment_write:
+        if not admin_user:
+            raise HTTPException(
+                status_code=403,
+                detail="Only organization admins can edit payment settings",
+            )
         deny_platform_admin_payment_writes(user)
+    if not admin_user:
+        if payload.status is not None and str(payload.status).strip().lower() != "draft":
+            raise HTTPException(
+                status_code=403,
+                detail="Members can save campaigns as draft only. An admin must publish.",
+            )
     existing_campaign = rest_get_one(
         "campaigns",
         params={
@@ -926,7 +939,7 @@ def update_currencies(
     currencies: list[CurrencyConfig],
     user: Annotated[AuthUser, Depends(require_auth)],
 ) -> list[dict[str, Any]]:
-    require_org_access(org_id, user, min_role="admin")
+    require_org_access(org_id, user, min_role="member")
     results = []
     for c in currencies:
         existing = rest_get_one(

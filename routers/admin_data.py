@@ -32,6 +32,8 @@ def admin_list_donations(
     frequency: str | None = Query(None),
     payment_method: str | None = Query(None),
     date_preset: str | None = Query(None),
+    date_from: str | None = Query(None),
+    date_to: str | None = Query(None),
     sort: str = Query("date_desc", pattern="^(date_desc|asc|desc)$"),
 ) -> dict[str, Any]:
     require_org_access(org_id, user, min_role="member")
@@ -73,14 +75,18 @@ def admin_list_donations(
         params["or"] = "(payment_method.eq.card,payment_method.is.null)"
     elif method_filter:
         params["payment_method"] = f"eq.{method_filter}"
+    resolved_from: str | None = None
+    resolved_to: str | None = None
     if date_preset and date_preset != "all":
-        date_from, date_to = _date_range(date_preset, org_timezone)
-        if date_from and date_to:
-            params["and"] = f"(created_at.gte.{date_from},created_at.lte.{date_to})"
-        elif date_from:
-            params["created_at"] = f"gte.{date_from}"
-        elif date_to:
-            params["created_at"] = f"lte.{date_to}"
+        resolved_from, resolved_to = _insights_date_range(
+            date_preset, date_from, date_to, org_timezone
+        )
+        if resolved_from and resolved_to:
+            params["and"] = f"(created_at.gte.{resolved_from},created_at.lte.{resolved_to})"
+        elif resolved_from:
+            params["created_at"] = f"gte.{resolved_from}"
+        elif resolved_to:
+            params["created_at"] = f"lte.{resolved_to}"
     rows = rest_get("donations", params=params)
 
     # Include older PayPal rows that were saved without organization_id but belong to this org's campaigns.
@@ -112,14 +118,12 @@ def admin_list_donations(
                 orphan_params["or"] = "(payment_method.eq.card,payment_method.is.null)"
             elif method_filter:
                 orphan_params["payment_method"] = f"eq.{method_filter}"
-            if date_preset and date_preset != "all":
-                date_from, date_to = _date_range(date_preset, org_timezone)
-                if date_from and date_to:
-                    orphan_params["and"] = f"(created_at.gte.{date_from},created_at.lte.{date_to})"
-                elif date_from:
-                    orphan_params["created_at"] = f"gte.{date_from}"
-                elif date_to:
-                    orphan_params["created_at"] = f"lte.{date_to}"
+            if resolved_from and resolved_to:
+                orphan_params["and"] = f"(created_at.gte.{resolved_from},created_at.lte.{resolved_to})"
+            elif resolved_from:
+                orphan_params["created_at"] = f"gte.{resolved_from}"
+            elif resolved_to:
+                orphan_params["created_at"] = f"lte.{resolved_to}"
             orphans = rest_get("donations", params=orphan_params)
             if orphans:
                 seen = {str(r.get("id")) for r in rows}
