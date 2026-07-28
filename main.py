@@ -383,7 +383,6 @@ def _create_once_payment_intent(
     total_display: float,
     cover_fees: bool,
     customer_id: str,
-    receipt_email: str,
     metadata: dict[str, str],
     stripe_account: str | None = None,
 ) -> stripe.PaymentIntent:
@@ -403,7 +402,7 @@ def _create_once_payment_intent(
         "amount": stripe_amount,
         "currency": charge_curr,
         "customer": customer_id,
-        "receipt_email": receipt_email,
+        # Do not set receipt_email — donors get confirmation via our emails, not Stripe receipts.
         "metadata": full_metadata,
         "payment_method_types": _payment_method_types(charge_curr, payment_method),
     }
@@ -666,6 +665,7 @@ def create_checkout(payload: CreateCheckoutRequest) -> CheckoutResponse:
 
                     stripe.PaymentIntent.modify(
                         payment_intent_id,
+                        receipt_email="",
                         metadata={
                             **metadata,
                             "subscription_id": subscription.id,
@@ -695,7 +695,6 @@ def create_checkout(payload: CreateCheckoutRequest) -> CheckoutResponse:
             total_display=total_display,
             cover_fees=payload.cover_fees,
             customer_id=customer.id,
-            receipt_email=payload.donor.email,
             metadata=metadata,
             stripe_account=stripe_account,
         )

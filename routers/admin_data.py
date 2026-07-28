@@ -48,7 +48,7 @@ def admin_list_donations(
     select_cols = (
         "id,first_name,last_name,email,amount,currency,frequency,status,payment_method,"
         "honoree_name,created_at,campaign_id,platform_fee,processing_fee,payout_amount,"
-        "organization_id,crypto_amount,crypto_currency"
+        "base_amount,fee_covered,organization_id,crypto_amount,crypto_currency"
     )
     allowed_methods = {"card", "paypal", "apple_pay", "google_pay", "nowpayments"}
     method_filter = (payment_method or "").strip().lower()
@@ -145,12 +145,27 @@ def admin_list_donations(
         page = rows[:limit]
 
     total_amount = sum(_row_amount(r, reporting_currency) for r in page)
+    total_payout_amount = 0.0
     for row in page:
+        _enrich_donation_fees(row)
         original_currency = str(row.get("currency") or "USD").upper()
         row["original_amount"] = float(row.get("amount") or 0)
         row["original_currency"] = original_currency
         row["reporting_amount"] = _row_amount(row, reporting_currency)
         row["reporting_currency"] = reporting_currency
+        payout = float(row.get("payout_amount") or 0)
+        processing = float(row.get("processing_fee") or 0)
+        platform = float(row.get("platform_fee") or 0)
+        row["reporting_payout_amount"] = convert_to_reporting(
+            payout, original_currency, reporting_currency
+        )
+        row["reporting_processing_fee"] = convert_to_reporting(
+            processing, original_currency, reporting_currency
+        )
+        row["reporting_platform_fee"] = convert_to_reporting(
+            platform, original_currency, reporting_currency
+        )
+        total_payout_amount += float(row["reporting_payout_amount"] or 0)
 
     _attach_last_emails(page)
 
@@ -158,6 +173,7 @@ def admin_list_donations(
         "donations": page,
         "has_more": has_more,
         "total_amount": total_amount,
+        "total_payout_amount": round(total_payout_amount, 2),
         "reporting_currency": reporting_currency,
     }
 
