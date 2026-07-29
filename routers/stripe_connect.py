@@ -247,12 +247,44 @@ def stripe_callback(
     row_id = row.get("id") if isinstance(row, dict) else None
     if campaign_id and row_id:
         rest_patch("campaigns", {"stripe_account_id": row_id}, match={"id": campaign_id})
+    elif (is_default and not campaign_id) and row_id:
+        # Org settings allow one Stripe account: replace prior org-level links.
+        _replace_other_org_stripe_accounts(org_id, keep_id=str(row_id))
 
     redirect_path = "/admin/settings/payment-methods?connected=1"
     if campaign_id:
         redirect_path = f"/admin/campaigns/{campaign_id}/edit?step=payments&connected=1"
 
     return RedirectResponse(url=f"{frontend_url}{redirect_path}")
+
+
+def _replace_other_org_stripe_accounts(org_id: str, *, keep_id: str) -> None:
+    """Keep a single organization-level Stripe account (campaign-scoped rows untouched)."""
+    others = rest_get(
+        "stripe_accounts",
+        params={
+            "organization_id": f"eq.{org_id}",
+            "campaign_id": "is.null",
+            "select": "id",
+        },
+    )
+    for other in others:
+        other_id = str(other.get("id") or "")
+        if not other_id or other_id == keep_id:
+            continue
+        # Clear campaign pointers that still reference the old org row.
+        linked = rest_get(
+            "campaigns",
+            params={
+                "organization_id": f"eq.{org_id}",
+                "stripe_account_id": f"eq.{other_id}",
+                "select": "id",
+            },
+        )
+        for campaign in linked:
+            if campaign.get("id"):
+                rest_patch("campaigns", {"stripe_account_id": keep_id}, match={"id": campaign["id"]})
+        rest_delete("stripe_accounts", match={"id": other_id})
 
 
 @router.get("/orgs/{org_id}/accounts")
