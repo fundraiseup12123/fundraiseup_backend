@@ -389,6 +389,7 @@ class UpdateCampaignRequest(BaseModel):
     status: str | None = None
     default_currency: str | None = None
     stripe_account_id: str | None = None
+    platform_stripe_account_id: str | None = None
     paypal_account_id: str | None = None
     nowpayments_account_id: str | None = None
     payment_account_sources: dict[str, str] | None = None
@@ -629,6 +630,7 @@ def update_campaign(
     admin_user = is_org_admin(org_id, user)
     payment_fields = (
         "stripe_account_id",
+        "platform_stripe_account_id",
         "paypal_account_id",
         "nowpayments_account_id",
         "payment_account_sources",
@@ -682,6 +684,8 @@ def update_campaign(
         updates["default_currency"] = payload.default_currency.upper()
     if payload.stripe_account_id is not None:
         updates["stripe_account_id"] = payload.stripe_account_id or None
+    if "platform_stripe_account_id" in payload.model_fields_set:
+        updates["platform_stripe_account_id"] = payload.platform_stripe_account_id or None
     if payload.paypal_account_id is not None:
         updates["paypal_account_id"] = payload.paypal_account_id or None
     if payload.nowpayments_account_id is not None:

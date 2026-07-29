@@ -35,6 +35,10 @@ def _list_connect_account_ids() -> list[str]:
         for view in _load_accounts_raw().values():
             if isinstance(view, dict):
                 add(view.get("stripe_account_id"))
+            elif isinstance(view, list):
+                for entry in view:
+                    if isinstance(entry, dict):
+                        add(entry.get("stripe_account_id"))
     except Exception:
         pass
 

@@ -46,3 +46,4 @@
 --   032_paypal_account_keys.sql
 --   033_campaign_translations.sql
 --   034_recent_donations_all_organizations.sql
+--   035_campaign_platform_stripe_account_id.sql

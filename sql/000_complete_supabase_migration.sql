@@ -268,6 +268,9 @@ create index if not exists paypal_accounts_org_id_idx on public.paypal_accounts 
 
 alter table public.campaigns
   add column if not exists paypal_account_id uuid references public.paypal_accounts(id) on delete set null;
+
+alter table public.campaigns
+  add column if not exists platform_stripe_account_id text;
 -- 4/7 Row level security policies
 
 alter table public.profiles enable row level security;
