@@ -4,6 +4,7 @@ import json
 import os
 import uuid
 from typing import Annotated, Any, Literal
+from urllib.parse import quote
 
 import stripe
 from fastapi import APIRouter, Depends, HTTPException
@@ -55,6 +56,11 @@ class StripeDisconnectPayload(BaseModel):
 class StripePoolRenamePayload(BaseModel):
     account_entry_id: str
     name: str = Field(min_length=1, max_length=120)
+
+
+class StripeAttachExistingPayload(BaseModel):
+    account_entry_id: str
+    stripe_account_id: str = Field(min_length=3, max_length=128)
 
 
 class PaymentAccountView(BaseModel):
@@ -688,6 +694,87 @@ def set_default_root_stripe_account(
     return {"updated": True, "stripe_accounts": _public_stripe_pool(accounts)}
 
 
+@router.get("/stripe/available")
+def list_available_platform_stripe_accounts(
+    user: Annotated[AuthUser, Depends(require_super_admin)],
+) -> dict[str, Any]:
+    """Connect accounts visible to this platform key — for linking stuck pending rows."""
+    accounts = _load_accounts_raw()
+    linked = {
+        str(e.get("stripe_account_id"))
+        for e in _ensure_stripe_pool(accounts)
+        if e.get("stripe_account_id")
+    }
+    out: list[dict[str, Any]] = []
+    try:
+        for account in stripe.Account.list(limit=100).data:
+            acct_id = str(getattr(account, "id", "") or "")
+            if not acct_id:
+                continue
+            out.append(
+                {
+                    "stripe_account_id": acct_id,
+                    "email": getattr(account, "email", None),
+                    "business_name": getattr(getattr(account, "business_profile", None), "name", None),
+                    "charges_enabled": bool(getattr(account, "charges_enabled", False)),
+                    "details_submitted": bool(getattr(account, "details_submitted", False)),
+                    "already_linked": acct_id in linked,
+                }
+            )
+    except stripe.error.StripeError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=str(exc.user_message or exc) or "Unable to list Stripe accounts",
+        ) from exc
+
+    out.sort(key=lambda row: (row["already_linked"], not row["charges_enabled"], row["stripe_account_id"]))
+    return {"accounts": out}
+
+
+@router.post("/stripe/attach-existing")
+def attach_existing_platform_stripe_account(
+    payload: StripeAttachExistingPayload,
+    user: Annotated[AuthUser, Depends(require_super_admin)],
+) -> dict[str, Any]:
+    """Attach an already-connected Connect account to a named platform pool row."""
+    from routers.stripe_connect import stripe_account_accessible
+
+    acct = payload.stripe_account_id.strip()
+    if not acct.startswith("acct_"):
+        raise HTTPException(status_code=400, detail="stripe_account_id must be a Connect account id")
+    if not stripe_account_accessible(acct):
+        raise HTTPException(
+            status_code=400,
+            detail="This Stripe account is not accessible with the platform secret key.",
+        )
+
+    try:
+        account = stripe.Account.retrieve(acct)
+        charges_enabled = bool(getattr(account, "charges_enabled", False))
+    except stripe.error.StripeError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=str(exc.user_message or exc) or "Unable to retrieve Stripe account",
+        ) from exc
+
+    accounts = _load_accounts_raw()
+    if not _find_pool_entry(accounts, payload.account_entry_id):
+        raise HTTPException(status_code=404, detail="Stripe account not found")
+
+    saved_id = _apply_stripe_oauth_to_pool(
+        accounts,
+        entry_id=payload.account_entry_id,
+        view=None,
+        stripe_account_id=acct,
+        charges_enabled=charges_enabled,
+    )
+    return {
+        "attached": True,
+        "account_entry_id": saved_id,
+        "stripe_accounts": _public_stripe_pool(_load_accounts_raw()),
+    }
+
+
 @router.post("/paypal/connect/start")
 def start_root_paypal_connect(
     payload: PaymentViewPayload,
@@ -716,7 +803,12 @@ def _apply_stripe_oauth_to_pool(
     view: PaymentView | None,
     stripe_account_id: str,
     charges_enabled: bool,
+    entry_name: str | None = None,
 ) -> str:
+    """Attach a Connect account to a named platform pool entry.
+
+    Always updates the target entry_id when provided — never deletes it.
+    """
     pool = _ensure_stripe_pool(accounts)
     entry = _find_pool_entry(accounts, entry_id) if entry_id else None
     if not entry and view:
@@ -726,37 +818,48 @@ def _apply_stripe_oauth_to_pool(
         if not entry and view == "homepage":
             entry = next((e for e in pool if e.get("is_default")), None)
 
-    existing_same = next((e for e in pool if e.get("stripe_account_id") == stripe_account_id), None)
-    if existing_same and (not entry or str(existing_same.get("id")) != str(entry.get("id"))):
-        if entry and not entry.get("stripe_account_id"):
-            pool[:] = [e for e in pool if str(e.get("id")) != str(entry.get("id"))]
-        entry = existing_same
+    status = "active" if charges_enabled else "pending"
 
     if not entry:
         entry = {
             "id": entry_id or str(uuid.uuid4()),
             "name": (
-                "Default"
-                if view == "homepage" or not pool
-                else ("Pop-up" if view == "popup" else "Stripe account")
+                (entry_name or "").strip()[:120]
+                or (
+                    "Default"
+                    if view == "homepage" or not pool
+                    else ("Pop-up" if view == "popup" else "Stripe account")
+                )
             ),
             "stripe_account_id": stripe_account_id,
-            "connection_status": "active" if charges_enabled else "pending",
+            "connection_status": status,
             "charges_enabled": charges_enabled,
             "is_default": len(pool) == 0,
         }
         pool.append(entry)
     else:
+        if entry_name and not entry.get("name"):
+            entry["name"] = entry_name.strip()[:120]
         entry["stripe_account_id"] = stripe_account_id
-        entry["connection_status"] = "active" if charges_enabled else "pending"
+        entry["connection_status"] = status
         entry["charges_enabled"] = charges_enabled
+
+    # If another pool row already pointed at this Connect account, clear the duplicate
+    # pointer so each acct_ appears once — keep the entry the user just connected.
+    for other in pool:
+        if str(other.get("id")) == str(entry.get("id")):
+            continue
+        if other.get("stripe_account_id") == stripe_account_id:
+            other["stripe_account_id"] = None
+            other["connection_status"] = "pending"
+            other["charges_enabled"] = False
 
     accounts["stripe_accounts"] = pool
     if view:
         accounts[view] = {
             **accounts[view],
             "stripe_account_id": stripe_account_id,
-            "stripe_connection_status": "active" if charges_enabled else "pending",
+            "stripe_connection_status": status,
             "stripe_charges_enabled": charges_enabled,
         }
     if entry.get("is_default"):
@@ -775,27 +878,6 @@ def handle_root_stripe_oauth_callback(code: str, state: str) -> RedirectResponse
     parts = state.split(":")
     kind = parts[1] if len(parts) > 1 else ""
 
-    try:
-        response = stripe.OAuth.token(grant_type="authorization_code", code=code)
-    except stripe.error.StripeError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    stripe_account_id = getattr(response, "stripe_user_id", None)
-    if not stripe_account_id:
-        try:
-            stripe_account_id = response["stripe_user_id"]
-        except Exception:
-            stripe_account_id = None
-    if not stripe_account_id:
-        raise HTTPException(status_code=400, detail="No Stripe account returned")
-
-    try:
-        account = stripe.Account.retrieve(stripe_account_id)
-        charges_enabled = bool(getattr(account, "charges_enabled", False))
-    except stripe.error.StripeError:
-        charges_enabled = False
-
-    accounts = _load_accounts_raw()
     entry_id: str | None = None
     view: PaymentView | None = None
     frontend_origin = None
@@ -809,17 +891,55 @@ def handle_root_stripe_oauth_callback(code: str, state: str) -> RedirectResponse
     else:
         raise HTTPException(status_code=400, detail="Invalid view")
 
-    saved_id = _apply_stripe_oauth_to_pool(
-        accounts,
-        entry_id=entry_id,
-        view=view,
-        stripe_account_id=stripe_account_id,
-        charges_enabled=charges_enabled,
-    )
+    frontend_url = resolve_frontend_url(frontend_origin)
+
+    def fail(message: str) -> RedirectResponse:
+        return RedirectResponse(
+            url=(
+                f"{frontend_url}/super-admin/payment-accounts"
+                f"?error={quote(message[:180], safe='')}&provider=stripe"
+            )
+        )
+
+    try:
+        response = stripe.OAuth.token(grant_type="authorization_code", code=code)
+    except stripe.error.StripeError as exc:
+        return fail(str(exc.user_message or exc) or "Stripe authorization failed")
+
+    stripe_account_id = getattr(response, "stripe_user_id", None)
+    if not stripe_account_id:
+        try:
+            stripe_account_id = response["stripe_user_id"]
+        except Exception:
+            stripe_account_id = None
+    if not stripe_account_id:
+        return fail("No Stripe account returned from OAuth")
+
+    try:
+        account = stripe.Account.retrieve(stripe_account_id)
+        charges_enabled = bool(getattr(account, "charges_enabled", False))
+    except stripe.error.StripeError:
+        # OAuth succeeded — persist the Connect id even if retrieve lags.
+        charges_enabled = False
+
+    accounts = _load_accounts_raw()
+    try:
+        saved_id = _apply_stripe_oauth_to_pool(
+            accounts,
+            entry_id=entry_id,
+            view=view,
+            stripe_account_id=stripe_account_id,
+            charges_enabled=charges_enabled,
+        )
+    except HTTPException as exc:
+        detail = exc.detail if isinstance(exc.detail, str) else "Unable to save Stripe account"
+        return fail(detail)
+    except Exception as exc:
+        return fail(f"Unable to save Stripe account: {exc}")
 
     return RedirectResponse(
         url=(
-            f"{resolve_frontend_url(frontend_origin)}/super-admin/payment-accounts"
+            f"{frontend_url}/super-admin/payment-accounts"
             f"?connected=1&provider=stripe&entry={saved_id}"
         )
     )
