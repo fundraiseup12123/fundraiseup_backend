@@ -58,11 +58,6 @@ class StripePoolRenamePayload(BaseModel):
     name: str = Field(min_length=1, max_length=120)
 
 
-class StripeAttachExistingPayload(BaseModel):
-    account_entry_id: str
-    stripe_account_id: str = Field(min_length=3, max_length=128)
-
-
 class PaymentAccountView(BaseModel):
     view: PaymentView
     stripe_account_id: str | None = None
@@ -692,87 +687,6 @@ def set_default_root_stripe_account(
     _set_pool_default(accounts, payload.account_entry_id)
     _save_accounts(accounts)
     return {"updated": True, "stripe_accounts": _public_stripe_pool(accounts)}
-
-
-@router.get("/stripe/available")
-def list_available_platform_stripe_accounts(
-    user: Annotated[AuthUser, Depends(require_super_admin)],
-) -> dict[str, Any]:
-    """Connect accounts visible to this platform key — for linking stuck pending rows."""
-    accounts = _load_accounts_raw()
-    linked = {
-        str(e.get("stripe_account_id"))
-        for e in _ensure_stripe_pool(accounts)
-        if e.get("stripe_account_id")
-    }
-    out: list[dict[str, Any]] = []
-    try:
-        for account in stripe.Account.list(limit=100).data:
-            acct_id = str(getattr(account, "id", "") or "")
-            if not acct_id:
-                continue
-            out.append(
-                {
-                    "stripe_account_id": acct_id,
-                    "email": getattr(account, "email", None),
-                    "business_name": getattr(getattr(account, "business_profile", None), "name", None),
-                    "charges_enabled": bool(getattr(account, "charges_enabled", False)),
-                    "details_submitted": bool(getattr(account, "details_submitted", False)),
-                    "already_linked": acct_id in linked,
-                }
-            )
-    except stripe.error.StripeError as exc:
-        raise HTTPException(
-            status_code=502,
-            detail=str(exc.user_message or exc) or "Unable to list Stripe accounts",
-        ) from exc
-
-    out.sort(key=lambda row: (row["already_linked"], not row["charges_enabled"], row["stripe_account_id"]))
-    return {"accounts": out}
-
-
-@router.post("/stripe/attach-existing")
-def attach_existing_platform_stripe_account(
-    payload: StripeAttachExistingPayload,
-    user: Annotated[AuthUser, Depends(require_super_admin)],
-) -> dict[str, Any]:
-    """Attach an already-connected Connect account to a named platform pool row."""
-    from routers.stripe_connect import stripe_account_accessible
-
-    acct = payload.stripe_account_id.strip()
-    if not acct.startswith("acct_"):
-        raise HTTPException(status_code=400, detail="stripe_account_id must be a Connect account id")
-    if not stripe_account_accessible(acct):
-        raise HTTPException(
-            status_code=400,
-            detail="This Stripe account is not accessible with the platform secret key.",
-        )
-
-    try:
-        account = stripe.Account.retrieve(acct)
-        charges_enabled = bool(getattr(account, "charges_enabled", False))
-    except stripe.error.StripeError as exc:
-        raise HTTPException(
-            status_code=502,
-            detail=str(exc.user_message or exc) or "Unable to retrieve Stripe account",
-        ) from exc
-
-    accounts = _load_accounts_raw()
-    if not _find_pool_entry(accounts, payload.account_entry_id):
-        raise HTTPException(status_code=404, detail="Stripe account not found")
-
-    saved_id = _apply_stripe_oauth_to_pool(
-        accounts,
-        entry_id=payload.account_entry_id,
-        view=None,
-        stripe_account_id=acct,
-        charges_enabled=charges_enabled,
-    )
-    return {
-        "attached": True,
-        "account_entry_id": saved_id,
-        "stripe_accounts": _public_stripe_pool(_load_accounts_raw()),
-    }
 
 
 @router.post("/paypal/connect/start")
