@@ -598,10 +598,42 @@ def _start_view_or_pool_stripe_connect(
         if not entry and view == "homepage":
             entry = next((e for e in pool if e.get("is_default")), None)
 
+    display_name = (
+        (entry or {}).get("name")
+        or (name or "").strip()
+        or ("Default" if view == "homepage" else ("Pop-up" if view == "popup" else "Stripe account"))
+    )
+    display_name = str(display_name).strip()[:120] or "Stripe account"
+
+    # For Standard OAuth: do NOT create a null placeholder row up-front.
+    # Orphan "not connected" rows appeared when users finished Stripe but the
+    # callback did not persist — reserve an id in state and create on success.
+    if entry:
+        entry_id = str(entry["id"])
+    else:
+        entry_id = str(uuid.uuid4())
+
+    return_url = (
+        f"{frontend_url}/super-admin/payment-accounts"
+        f"?connected=1&provider=stripe&entry={entry_id}"
+    )
+    refresh_url = (
+        f"{frontend_url}/super-admin/payment-accounts"
+        f"?refresh=1&provider=stripe&entry={entry_id}"
+    )
+
+    if STRIPE_CONNECT_CLIENT_ID and use_stripe_standard_oauth():
+        state = (
+            f"root:pool:{entry_id}:"
+            f"{pack_origin_token(display_name)}:"
+            f"{pack_origin_token(frontend_url)}"
+        )
+        return {"url": build_stripe_oauth_authorize_url(state=state, frontend_url=frontend_url)}
+
+    # Express Account Links path — needs an account id before redirect.
     if not entry:
-        display_name = (name or "Stripe account").strip()[:120] or "Stripe account"
         entry = {
-            "id": str(uuid.uuid4()),
+            "id": entry_id,
             "name": display_name,
             "stripe_account_id": None,
             "connection_status": "pending",
@@ -611,19 +643,6 @@ def _start_view_or_pool_stripe_connect(
         pool.append(entry)
         accounts["stripe_accounts"] = pool
         _save_accounts(accounts)
-
-    return_url = (
-        f"{frontend_url}/super-admin/payment-accounts"
-        f"?connected=1&provider=stripe&entry={entry['id']}"
-    )
-    refresh_url = (
-        f"{frontend_url}/super-admin/payment-accounts"
-        f"?refresh=1&provider=stripe&entry={entry['id']}"
-    )
-
-    if STRIPE_CONNECT_CLIENT_ID and use_stripe_standard_oauth():
-        state = f"root:pool:{entry['id']}:{pack_origin_token(frontend_url)}"
-        return {"url": build_stripe_oauth_authorize_url(state=state, frontend_url=frontend_url)}
 
     account_id = entry.get("stripe_account_id")
     if not account_id:
@@ -752,8 +771,8 @@ def _apply_stripe_oauth_to_pool(
         }
         pool.append(entry)
     else:
-        if entry_name and not entry.get("name"):
-            entry["name"] = entry_name.strip()[:120]
+        if entry_name and str(entry_name).strip():
+            entry["name"] = str(entry_name).strip()[:120]
         entry["stripe_account_id"] = stripe_account_id
         entry["connection_status"] = status
         entry["charges_enabled"] = charges_enabled
@@ -798,12 +817,19 @@ def complete_root_stripe_oauth(code: str, state: str) -> str:
     kind = parts[1] if len(parts) > 1 else ""
 
     entry_id: str | None = None
+    entry_name: str | None = None
     view: PaymentView | None = None
     frontend_origin = None
 
     if kind == "pool":
         entry_id = parts[2] if len(parts) > 2 else None
-        frontend_origin = unpack_origin_token(parts[3]) if len(parts) > 3 else None
+        # New format: root:pool:{entry_id}:{name_token}:{origin_token}
+        # Legacy format: root:pool:{entry_id}:{origin_token}
+        if len(parts) > 4:
+            entry_name = unpack_origin_token(parts[3])
+            frontend_origin = unpack_origin_token(parts[4])
+        else:
+            frontend_origin = unpack_origin_token(parts[3]) if len(parts) > 3 else None
     elif kind in ("homepage", "popup"):
         view = kind  # type: ignore[assignment]
         frontend_origin = unpack_origin_token(parts[2]) if len(parts) > 2 else None
@@ -847,6 +873,7 @@ def complete_root_stripe_oauth(code: str, state: str) -> str:
             view=view,
             stripe_account_id=stripe_account_id,
             charges_enabled=charges_enabled,
+            entry_name=entry_name,
         )
     except HTTPException as exc:
         detail = exc.detail if isinstance(exc.detail, str) else "Unable to save Stripe account"
