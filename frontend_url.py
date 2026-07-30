@@ -38,19 +38,30 @@ def resolve_invite_frontend_url(origin: str | None = None) -> str:
     return base
 
 
-def pack_origin_token(frontend_url: str) -> str:
-    """Encode a frontend origin for OAuth state (URL-safe, no colons)."""
-    raw = resolve_frontend_url(frontend_url).encode("utf-8")
+def pack_state_token(value: str) -> str:
+    """Encode arbitrary text for OAuth state (URL-safe, no colons)."""
+    raw = (value or "").encode("utf-8")
     return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
 
 
-def unpack_origin_token(token: str | None) -> str | None:
+def unpack_state_token(token: str | None) -> str | None:
     if not token:
         return None
     padded = token + "=" * (-len(token) % 4)
     try:
-        decoded = base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8")
+        return base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8")
     except Exception:
+        return None
+
+
+def pack_origin_token(frontend_url: str) -> str:
+    """Encode a frontend origin for OAuth state (URL-safe, no colons)."""
+    return pack_state_token(resolve_frontend_url(frontend_url))
+
+
+def unpack_origin_token(token: str | None) -> str | None:
+    decoded = unpack_state_token(token)
+    if not decoded:
         return None
     if decoded.startswith("http://") or decoded.startswith("https://"):
         return decoded.rstrip("/")

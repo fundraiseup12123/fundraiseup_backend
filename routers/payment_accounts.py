@@ -15,7 +15,13 @@ from auth import AuthUser, require_super_admin
 from db import rest_get_one, rest_insert, rest_patch
 from site_constants import ROOT_CAMPAIGN_ID
 
-from frontend_url import pack_origin_token, resolve_frontend_url, unpack_origin_token
+from frontend_url import (
+    pack_origin_token,
+    pack_state_token,
+    resolve_frontend_url,
+    unpack_origin_token,
+    unpack_state_token,
+)
 from routers.stripe_connect import (
     STRIPE_CONNECT_CLIENT_ID,
     build_stripe_oauth_authorize_url,
@@ -625,7 +631,7 @@ def _start_view_or_pool_stripe_connect(
     if STRIPE_CONNECT_CLIENT_ID and use_stripe_standard_oauth():
         state = (
             f"root:pool:{entry_id}:"
-            f"{pack_origin_token(display_name)}:"
+            f"{pack_state_token(display_name)}:"
             f"{pack_origin_token(frontend_url)}"
         )
         return {"url": build_stripe_oauth_authorize_url(state=state, frontend_url=frontend_url)}
@@ -826,7 +832,7 @@ def complete_root_stripe_oauth(code: str, state: str) -> str:
         # New format: root:pool:{entry_id}:{name_token}:{origin_token}
         # Legacy format: root:pool:{entry_id}:{origin_token}
         if len(parts) > 4:
-            entry_name = unpack_origin_token(parts[3])
+            entry_name = unpack_state_token(parts[3])
             frontend_origin = unpack_origin_token(parts[4])
         else:
             frontend_origin = unpack_origin_token(parts[3]) if len(parts) > 3 else None
