@@ -173,10 +173,26 @@ def stripe_callback(
     code: str = Query(...),
     state: str = Query(...),
 ) -> RedirectResponse:
-    if state.startswith("root:"):
-        from routers.payment_accounts import handle_root_stripe_oauth_callback
+    return RedirectResponse(url=complete_stripe_oauth(code, state))
 
-        return handle_root_stripe_oauth_callback(code, state)
+
+class StripeOAuthCompletePayload(BaseModel):
+    code: str
+    state: str
+
+
+@router.post("/oauth/complete")
+def stripe_oauth_complete(payload: StripeOAuthCompletePayload) -> dict[str, str]:
+    """JSON OAuth completion used by the Next.js callback proxy (avoids redirect header issues)."""
+    return {"redirect_url": complete_stripe_oauth(payload.code.strip(), payload.state.strip())}
+
+
+def complete_stripe_oauth(code: str, state: str) -> str:
+    """Exchange the OAuth code and return the frontend redirect URL (success or error page)."""
+    if state.startswith("root:"):
+        from routers.payment_accounts import complete_root_stripe_oauth
+
+        return complete_root_stripe_oauth(code, state)
 
     if not STRIPE_CONNECT_CLIENT_ID:
         raise HTTPException(status_code=503, detail="Stripe Connect not configured")
@@ -188,10 +204,8 @@ def stripe_callback(
     frontend_origin = unpack_origin_token(parts[3]) if len(parts) > 3 else None
     frontend_url = resolve_frontend_url(frontend_origin)
 
-    def fail(message: str) -> RedirectResponse:
-        return RedirectResponse(
-            url=f"{frontend_url}/admin/settings/payment-methods?error={quote(message[:180], safe='')}"
-        )
+    def fail(message: str) -> str:
+        return f"{frontend_url}/admin/settings/payment-methods?error={quote(message[:180], safe='')}"
 
     try:
         response = stripe.OAuth.token(grant_type="authorization_code", code=code)
@@ -255,7 +269,7 @@ def stripe_callback(
     if campaign_id:
         redirect_path = f"/admin/campaigns/{campaign_id}/edit?step=payments&connected=1"
 
-    return RedirectResponse(url=f"{frontend_url}{redirect_path}")
+    return f"{frontend_url}{redirect_path}"
 
 
 def _replace_other_org_stripe_accounts(org_id: str, *, keep_id: str) -> None:

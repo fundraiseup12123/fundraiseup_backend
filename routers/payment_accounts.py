@@ -786,6 +786,11 @@ def _apply_stripe_oauth_to_pool(
 
 
 def handle_root_stripe_oauth_callback(code: str, state: str) -> RedirectResponse:
+    return RedirectResponse(url=complete_root_stripe_oauth(code, state))
+
+
+def complete_root_stripe_oauth(code: str, state: str) -> str:
+    """Exchange OAuth code for a platform pool Connect account; return frontend redirect URL."""
     if not state.startswith("root:"):
         raise HTTPException(status_code=400, detail="Invalid state")
 
@@ -807,12 +812,10 @@ def handle_root_stripe_oauth_callback(code: str, state: str) -> RedirectResponse
 
     frontend_url = resolve_frontend_url(frontend_origin)
 
-    def fail(message: str) -> RedirectResponse:
-        return RedirectResponse(
-            url=(
-                f"{frontend_url}/super-admin/payment-accounts"
-                f"?error={quote(message[:180], safe='')}&provider=stripe"
-            )
+    def fail(message: str) -> str:
+        return (
+            f"{frontend_url}/super-admin/payment-accounts"
+            f"?error={quote(message[:180], safe='')}&provider=stripe"
         )
 
     try:
@@ -851,11 +854,9 @@ def handle_root_stripe_oauth_callback(code: str, state: str) -> RedirectResponse
     except Exception as exc:
         return fail(f"Unable to save Stripe account: {exc}")
 
-    return RedirectResponse(
-        url=(
-            f"{frontend_url}/super-admin/payment-accounts"
-            f"?connected=1&provider=stripe&entry={saved_id}"
-        )
+    return (
+        f"{frontend_url}/super-admin/payment-accounts"
+        f"?connected=1&provider=stripe&entry={saved_id}"
     )
 
 
