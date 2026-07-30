@@ -958,6 +958,7 @@ def _donation_row_from_intent(
 
 
 from routers.super_admin import router as super_admin_router
+from routers.platform_data import router as platform_data_router
 from routers.organizations import router as organizations_router
 from routers.public import router as public_router
 from routers.stripe_connect import router as stripe_router
@@ -973,6 +974,7 @@ from routers.donor_portal import router as donor_portal_router
 from routers.ai_content import router as ai_content_router
 
 app.include_router(super_admin_router)
+app.include_router(platform_data_router)
 app.include_router(payment_accounts_router)
 app.include_router(organizations_router)
 app.include_router(public_router)
