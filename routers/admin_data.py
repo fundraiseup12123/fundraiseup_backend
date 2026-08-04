@@ -667,6 +667,7 @@ def admin_utm_report(
     date_preset: str = Query("7d"),
     date_from: str | None = Query(None),
     date_to: str | None = Query(None),
+    timezone: str | None = Query(None),
 ) -> dict[str, Any]:
     """Group donation results by utm_campaign for the org console UTM tab."""
     require_org_access(org_id, user, min_role="member")
@@ -675,7 +676,8 @@ def admin_utm_report(
         "organizations",
         params={"id": f"eq.{org_id}", "select": "reporting_currency,timezone"},
     )
-    org_timezone = str((org or {}).get("timezone") or "UTC")
+    # Page-local timezone (UTM summary defaults to UTC); ignore org timezone here.
+    tz_name = _org_zone(timezone or "UTC").key
     reporting_currency = str((org or {}).get("reporting_currency") or "USD").upper()
 
     campaigns = rest_get(
@@ -683,7 +685,7 @@ def admin_utm_report(
         params={"organization_id": f"eq.{org_id}", "select": "id,name,slug,status,designation"},
     ) or []
     resolved_from, resolved_to = _insights_date_range(
-        date_preset, date_from, date_to, org_timezone
+        date_preset, date_from, date_to, tz_name
     )
 
     rows = _admin_org_donation_rows(
@@ -728,7 +730,8 @@ def admin_utm_report(
         "date_preset": date_preset,
         "date_from": date_from or (resolved_from[:10] if resolved_from else None),
         "date_to": date_to or (resolved_to[:10] if resolved_to else None),
-        "date_label": _date_label(date_preset, date_from, date_to, org_timezone),
+        "date_label": _date_label(date_preset, date_from, date_to, tz_name),
+        "timezone": tz_name,
         "selected_campaign_id": campaign_id or "all",
         "campaigns": [
             {"id": c.get("id"), "name": c.get("name") or "Campaign", "slug": c.get("slug") or ""}

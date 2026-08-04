@@ -15,6 +15,7 @@ from routers import admin_data as ad
 router = APIRouter(prefix="/super", tags=["platform-data"])
 
 _GA_PROPERTY_CAP = 15
+_DEFAULT_PLATFORM_TZ = "America/Los_Angeles"
 _DONATION_SELECT = (
     "id,first_name,last_name,email,amount,currency,frequency,status,payment_method,"
     "honoree_name,created_at,campaign_id,platform_fee,processing_fee,payout_amount,"
@@ -105,8 +106,10 @@ def platform_list_donations(
     date_to: str | None = Query(None),
     sort: str = Query("date_desc", pattern="^(date_desc|asc|desc)$"),
     reporting_currency: str = Query("USD"),
+    timezone: str | None = Query(None),
 ) -> dict[str, Any]:
     reporting_currency = (reporting_currency or "USD").strip().upper() or "USD"
+    tz_name = ad._org_zone(timezone or _DEFAULT_PLATFORM_TZ).key
     org_names = _org_name_map()
     campaigns = _all_campaigns(organization_id)
     amount_sort = sort in {"asc", "desc"}
@@ -141,7 +144,7 @@ def platform_list_donations(
     resolved_to: str | None = None
     if date_preset and date_preset != "all":
         resolved_from, resolved_to = ad._insights_date_range(
-            date_preset, date_from, date_to, "UTC"
+            date_preset, date_from, date_to, tz_name
         )
         if resolved_from and resolved_to:
             params["and"] = f"(created_at.gte.{resolved_from},created_at.lte.{resolved_to})"
@@ -286,9 +289,10 @@ def platform_insights(
     date_to: str | None = Query(None),
     interval: str = Query("hourly"),
     reporting_currency: str = Query("USD"),
+    timezone: str | None = Query(None),
 ) -> dict[str, Any]:
     reporting_currency = (reporting_currency or "USD").strip().upper() or "USD"
-    tz_name = "UTC"
+    tz_name = ad._org_zone(timezone or _DEFAULT_PLATFORM_TZ).key
     org_names = _org_name_map()
     campaigns = _all_campaigns(organization_id)
     filter_opts = _filter_options(org_names, campaigns, include_sources=True)
