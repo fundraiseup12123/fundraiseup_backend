@@ -972,6 +972,7 @@ from routers.emails import router as emails_router
 from routers.uploads import router as uploads_router
 from routers.donor_portal import router as donor_portal_router
 from routers.ai_content import router as ai_content_router
+from routers.testing_paypal import router as testing_paypal_router
 
 app.include_router(super_admin_router)
 app.include_router(platform_data_router)
@@ -988,6 +989,7 @@ app.include_router(nowpayments_router)
 app.include_router(emails_router)
 app.include_router(uploads_router)
 app.include_router(donor_portal_router)
+app.include_router(testing_paypal_router)
 
 
 @app.on_event("startup")
