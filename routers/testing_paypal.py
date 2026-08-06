@@ -158,21 +158,22 @@ def capture_order(body: CaptureOrderRequest) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     status_value = str(result.get("status") or "").upper()
-    if status_value not in {"COMPLETED", "CAPTURED"}:
-        # PayPal returns COMPLETED on successful capture; reject other states.
-        if status_value not in {"PENDING", "APPROVED"}:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Capture not successful (status={status_value or 'unknown'})",
-            )
+    capture_id = result.get("capture_id")
+    # Instant settle only — COMPLETED capture means money hit the account path.
+    verified = status_value == "COMPLETED" and bool(capture_id)
+    if not verified:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Capture not successful (status={status_value or 'unknown'})",
+        )
 
     return {
         "order_id": result["order_id"],
         "status": result["status"],
-        "capture_id": result.get("capture_id"),
+        "capture_id": capture_id,
         "transaction_id": result.get("transaction_id"),
         "payment_method": body.payment_method,
-        "verified": status_value in {"COMPLETED", "CAPTURED"},
+        "verified": True,
     }
 
 

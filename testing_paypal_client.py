@@ -15,6 +15,7 @@ import logging
 import os
 import threading
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -28,8 +29,8 @@ logger = logging.getLogger(__name__)
 _TESTING_ENV_FILE = Path(__file__).resolve().parent / ".env.testing-paypal"
 _http = httpx.Client(timeout=30.0)
 _plan_lock = threading.Lock()
-# (currency_upper, amount_value) -> {"product_id", "plan_id"}
-_plan_cache: dict[tuple[str, str], dict[str, str]] = {}
+# (currency_upper, amount_value, plan_variant) -> {"product_id", "plan_id"}
+_plan_cache: dict[tuple[str, str, str], dict[str, str]] = {}
 _product_id: str | None = None
 _product_lock = threading.Lock()
 _file_lock = threading.Lock()
@@ -385,33 +386,135 @@ def capture_testing_order(order_id: str) -> dict[str, Any]:
         headers={
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
+            # Return full capture representation so we can require COMPLETED (instant settle).
+            "Prefer": "return=representation",
         },
     )
     if response.status_code >= 400:
         raise RuntimeError(_paypal_error_detail(response, "Unable to capture PayPal payment"))
 
     raw = response.json()
-    status = str(raw.get("status") or "")
+    # PayPal may return HTTP 200 with an error payload (or COMPLETED order + DECLINED capture).
+    issue = _capture_failure_detail(raw)
+    if issue:
+        raise RuntimeError(issue)
+
+    order_status = str(raw.get("status") or "").upper()
     capture_id = None
     transaction_id = None
+    capture_status = None
     try:
         units = raw.get("purchase_units") or []
         if units and isinstance(units[0], dict):
             payments = units[0].get("payments") or {}
             captures = payments.get("captures") or []
             if captures and isinstance(captures[0], dict):
-                capture_id = captures[0].get("id")
-                transaction_id = captures[0].get("id")
+                first = captures[0]
+                capture_id = first.get("id")
+                transaction_id = first.get("id")
+                capture_status = str(first.get("status") or "").upper() or None
     except Exception:
         logger.debug("Unable to parse capture ids", exc_info=True)
 
+    # Instant settle only: COMPLETED capture means funds moved (not auth/hold/scheduled).
+    # PENDING = under review — not yet reflected as available in the merchant account.
+    ok_capture = capture_status == "COMPLETED"
+    ok_order = order_status in {"COMPLETED", "CAPTURED"}
+    if capture_status == "PENDING":
+        raise RuntimeError(
+            "Payment is pending PayPal review and is not settled yet. "
+            "Check Activity in PayPal — it is not a completed instant payment."
+        )
+    if not (ok_order and ok_capture and capture_id):
+        detail = (
+            f"Payment not completed (order={order_status or 'unknown'}, "
+            f"capture={capture_status or 'missing'})"
+        )
+        raise RuntimeError(detail)
+
     return {
         "order_id": order_id,
-        "status": status,
+        "status": capture_status or order_status,
         "capture_id": capture_id,
         "transaction_id": transaction_id,
         "raw": raw,
     }
+
+
+def _capture_failure_detail(raw: dict[str, Any]) -> str | None:
+    """Return a human error if PayPal body indicates decline / refusal despite HTTP 2xx."""
+    name = str(raw.get("name") or "").upper()
+    if name in {
+        "INSTRUMENT_DECLINED",
+        "UNPROCESSABLE_ENTITY",
+        "TRANSACTION_REFUSED",
+        "PAYER_CANNOT_PAY",
+        "CREDIT_CARD_CVV_CHECK_FAILED",
+        "CREDIT_CARD_REFUSED",
+    }:
+        return _format_paypal_issue_body(raw) or name.replace("_", " ").title()
+
+    details = raw.get("details")
+    if isinstance(details, list):
+        for item in details:
+            if not isinstance(item, dict):
+                continue
+            issue = str(item.get("issue") or item.get("issue_code") or "").upper()
+            if issue in {
+                "INSTRUMENT_DECLINED",
+                "TRANSACTION_REFUSED",
+                "PAYER_CANNOT_PAY",
+                "CARD_EXPIRED",
+                "INVALID_ACCOUNT_STATUS",
+                "CREDIT_CARD_CVV_CHECK_FAILED",
+                "CREDIT_CARD_REFUSED",
+            }:
+                return (
+                    str(item.get("description") or item.get("message") or "")
+                    or issue.replace("_", " ").title()
+                )
+
+    try:
+        units = raw.get("purchase_units") or []
+        if units and isinstance(units[0], dict):
+            payments = units[0].get("payments") or {}
+            captures = payments.get("captures") or []
+            if captures and isinstance(captures[0], dict):
+                first = captures[0]
+                cap_status = str(first.get("status") or "").upper()
+                if cap_status in {"DECLINED", "FAILED", "DENIED", "VOIDED"}:
+                    reason = ""
+                    processor = first.get("processor_response") or {}
+                    if isinstance(processor, dict):
+                        reason = str(
+                            processor.get("response_code")
+                            or processor.get("avs_code")
+                            or ""
+                        )
+                    base = f"Card payment {cap_status.lower()}"
+                    return f"{base} ({reason})" if reason else base
+    except Exception:
+        logger.debug("Unable to inspect capture decline status", exc_info=True)
+
+    return None
+
+
+def _format_paypal_issue_body(raw: dict[str, Any]) -> str:
+    message = str(raw.get("message") or "").strip()
+    details = raw.get("details")
+    if isinstance(details, list) and details:
+        parts: list[str] = []
+        for item in details:
+            if isinstance(item, dict):
+                parts.append(
+                    str(item.get("description") or item.get("issue") or item)
+                )
+            else:
+                parts.append(str(item))
+        joined = "; ".join(p for p in parts if p)
+        if joined:
+            return f"{message}: {joined}" if message else joined
+    return message
 
 
 def _product_name() -> str:
@@ -458,10 +561,16 @@ def ensure_testing_plan(
     total_display: float,
     display_currency: str,
 ) -> dict[str, Any]:
-    """Create or reuse a sandbox Billing Plan for amount + charge currency."""
+    """Create or reuse a Billing Plan: instant setup_fee + monthly REGULAR schedule.
+
+    Hybrid billing (testing-paypal only):
+    - setup_fee = first gift, charged immediately when the subscriber approves
+    - REGULAR monthly cycle starts ~1 month later (see create_testing_subscription start_time)
+    """
     charge_currency, charge_amount = convert_for_testing_paypal(total_display, display_currency)
     amount_value = f"{float(charge_amount):.2f}"
-    cache_key = (charge_currency.upper(), amount_value)
+    # Bust older plans that had no setup_fee (those only scheduled, no instant first charge).
+    cache_key = (charge_currency.upper(), amount_value, "hybrid-setup-fee-v1")
 
     with _plan_lock:
         cached = _plan_cache.get(cache_key)
@@ -473,6 +582,7 @@ def ensure_testing_plan(
                 "charge_amount": charge_amount,
                 "display_amount": format_display_amount(total_display, display_currency),
                 "reused": True,
+                "billing_mode": "hybrid",
             }
 
     product_id = ensure_testing_product()
@@ -480,8 +590,10 @@ def ensure_testing_plan(
     headers = _auth_headers()
     plan_payload = {
         "product_id": product_id,
-        "name": f"Testing monthly {amount_value} {charge_currency}"[:127],
-        "description": "Sandbox testing plan for /testing-paypal monthly donations",
+        "name": f"Testing hybrid monthly {amount_value} {charge_currency}"[:127],
+        "description": (
+            "Instant first charge (setup fee) + scheduled monthly renewals for /testing-paypal"
+        ),
         "status": "ACTIVE",
         "billing_cycles": [
             {
@@ -499,7 +611,13 @@ def ensure_testing_plan(
         ],
         "payment_preferences": {
             "auto_bill_outstanding": True,
-            "setup_fee_failure_action": "CONTINUE",
+            # Instant first payment into the merchant account on subscribe.
+            "setup_fee": {
+                "value": amount_value,
+                "currency_code": charge_currency.upper(),
+            },
+            # If the instant charge fails, do not leave an active subscription.
+            "setup_fee_failure_action": "CANCEL",
             "payment_failure_threshold": 3,
         },
     }
@@ -541,7 +659,14 @@ def ensure_testing_plan(
         "charge_amount": charge_amount,
         "display_amount": format_display_amount(total_display, display_currency),
         "reused": False,
+        "billing_mode": "hybrid",
     }
+
+
+def subscription_regular_start_time_iso() -> str:
+    """UTC start for the first REGULAR cycle (~1 month out). Setup fee is charged on approve."""
+    start = datetime.now(timezone.utc) + timedelta(days=32)
+    return start.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def create_testing_subscription(
@@ -551,11 +676,15 @@ def create_testing_subscription(
     cancel_url: str,
     custom_id: str | None = None,
     subscriber: dict[str, Any] | None = None,
+    start_time: str | None = None,
 ) -> dict[str, Any]:
     creds = testing_paypal_creds()
     headers = _auth_headers()
+    # Defer REGULAR billing so the setup_fee is the only instant charge (no double bill).
+    regular_start = (start_time or "").strip() or subscription_regular_start_time_iso()
     payload: dict[str, Any] = {
         "plan_id": plan_id,
+        "start_time": regular_start,
         "application_context": {
             "brand_name": "UZ PayPal Testing",
             "locale": "en-US",
@@ -596,6 +725,8 @@ def create_testing_subscription(
         "status": str(body.get("status") or ""),
         "plan_id": plan_id,
         "approve_url": approve_url,
+        "start_time": regular_start,
+        "billing_mode": "hybrid",
         "raw": body,
     }
 
