@@ -79,7 +79,12 @@ def _default_view_entry() -> dict[str, Any]:
         "stripe_connection_status": None,
         "stripe_charges_enabled": False,
         "paypal_merchant_id": None,
+        "paypal_email": None,
         "paypal_connection_status": None,
+        "paypal_attach_mode": None,
+        "paypal_client_id": None,
+        "paypal_client_secret": None,
+        "paypal_client_id_hint": None,
         "nowpayments_api_key": None,
         "nowpayments_ipn_secret": None,
         "nowpayments_api_key_hint": None,
@@ -332,6 +337,7 @@ def _accounts_response(accounts: dict[str, Any]) -> dict[str, Any]:
         entry = dict(accounts[view])
         entry.pop("nowpayments_api_key", None)
         entry.pop("nowpayments_ipn_secret", None)
+        entry.pop("paypal_client_secret", None)
         views.append({"view": view, **entry})
     return {
         "views": views,
@@ -457,10 +463,52 @@ def resolve_root_paypal_payee(checkout_view: str | None) -> str | None:
     status = entry.get("paypal_connection_status")
     if status and status not in ("active", "pending", "connected", None):
         return None
+    # Keys-only platform accounts settle via Orders API (no classic email payee).
+    if str(entry.get("paypal_attach_mode") or "").lower() == "keys" and not (
+        (email and "@" in str(email)) or (merchant and "@" in str(merchant))
+    ):
+        return None
     if email and "@" in str(email):
         return str(email).strip()
     if merchant and "@" in str(merchant):
         return str(merchant).strip()
+    return None
+
+
+def resolve_root_paypal_account(checkout_view: str | None) -> dict[str, Any] | None:
+    """Platform PayPal row for checkout (email Connect or API keys)."""
+    view: PaymentView = "popup" if checkout_view == "popup" else "homepage"
+    accounts = _load_accounts_raw()
+    entry = accounts.get(view) or {}
+    status = entry.get("paypal_connection_status")
+    if status and status not in ("active", "pending", "connected", None):
+        return None
+    client_id = str(entry.get("paypal_client_id") or "").strip()
+    client_secret = str(entry.get("paypal_client_secret") or "").strip()
+    attach_mode = str(entry.get("paypal_attach_mode") or "").strip().lower()
+    if attach_mode == "keys" and client_id and client_secret:
+        return {
+            "id": f"platform:{view}",
+            "attach_mode": "keys",
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "client_id_hint": entry.get("paypal_client_id_hint"),
+            "paypal_email": entry.get("paypal_email"),
+            "paypal_merchant_id": entry.get("paypal_merchant_id") or f"keys:{client_id}",
+            "connection_status": "active",
+            "is_default": True,
+        }
+    email = entry.get("paypal_email")
+    merchant = entry.get("paypal_merchant_id")
+    if (email and "@" in str(email)) or merchant:
+        return {
+            "id": f"platform:{view}",
+            "attach_mode": "email",
+            "paypal_email": email,
+            "paypal_merchant_id": merchant,
+            "connection_status": status or "active",
+            "is_default": True,
+        }
     return None
 
 
@@ -480,6 +528,14 @@ def normalize_payment_account_sources(raw: object) -> dict[str, str]:
         if value in {"platform", "organization"}:
             normalized[key] = value
     return normalized
+
+
+def normalize_payment_processor(raw: object) -> str:
+    """Primary checkout processor: stripe (default) or paypal (all methods via PayPal keys)."""
+    value = str(raw or "").strip().lower()
+    if value in {"stripe", "paypal"}:
+        return value
+    return "stripe"
 
 
 def resolve_payment_account_sources(
@@ -506,6 +562,32 @@ def resolve_payment_account_sources(
         )
         return normalize_payment_account_sources((org or {}).get("payment_account_sources"))
     return defaults
+
+
+def resolve_payment_processor(
+    org_id: str | None,
+    campaign_id: str | None,
+) -> str:
+    """Campaign override if set; else organization; else stripe."""
+    resolved_org_id = org_id
+    if campaign_id:
+        campaign = rest_get_one(
+            "campaigns",
+            params={"id": f"eq.{campaign_id}", "select": "payment_processor,organization_id"},
+        )
+        if campaign:
+            if not resolved_org_id:
+                resolved_org_id = campaign.get("organization_id")
+            raw = campaign.get("payment_processor")
+            if raw is not None and str(raw).strip() != "":
+                return normalize_payment_processor(raw)
+    if resolved_org_id:
+        org = rest_get_one(
+            "organizations",
+            params={"id": f"eq.{resolved_org_id}", "select": "payment_processor"},
+        )
+        return normalize_payment_processor((org or {}).get("payment_processor"))
+    return "stripe"
 
 
 def uses_platform_provider(
@@ -546,10 +628,20 @@ def homepage_payment_summary() -> dict[str, Any]:
             "default_account_id": (default or {}).get("id"),
         },
         "paypal": {
-            "connected": bool(paypal_merchant or paypal_email),
+            "connected": bool(
+                paypal_merchant
+                or paypal_email
+                or (
+                    str(entry.get("paypal_attach_mode") or "").lower() == "keys"
+                    and entry.get("paypal_client_id")
+                    and entry.get("paypal_client_secret")
+                )
+            ),
             "paypal_merchant_id": paypal_merchant,
             "paypal_email": paypal_email,
             "connection_status": entry.get("paypal_connection_status"),
+            "attach_mode": entry.get("paypal_attach_mode") or ("email" if paypal_merchant or paypal_email else None),
+            "client_id_hint": entry.get("paypal_client_id_hint"),
         },
         "nowpayments": {
             "connected": bool(now_key or now_hint),
@@ -907,6 +999,10 @@ def save_root_paypal_account(state: str, merchant_id: str, email: str | None = N
         "paypal_merchant_id": merchant_id,
         "paypal_email": email,
         "paypal_connection_status": "active",
+        "paypal_attach_mode": "email",
+        "paypal_client_id": None,
+        "paypal_client_secret": None,
+        "paypal_client_id_hint": None,
     }
     _save_accounts(accounts)
     return f"/super-admin/payment-accounts?connected=1&provider=paypal&view={view}"
@@ -931,9 +1027,58 @@ def disconnect_root_paypal(
         "paypal_merchant_id": None,
         "paypal_email": None,
         "paypal_connection_status": None,
+        "paypal_attach_mode": None,
+        "paypal_client_id": None,
+        "paypal_client_secret": None,
+        "paypal_client_id_hint": None,
     }
     _save_accounts(accounts)
     return {"removed": True}
+
+
+class AttachRootPayPalKeysPayload(BaseModel):
+    view: PaymentView
+    client_id: str = Field(min_length=8, max_length=256)
+    client_secret: str = Field(min_length=8, max_length=512)
+    email: str | None = Field(default=None, max_length=254)
+
+
+@router.post("/paypal/keys")
+def attach_root_paypal_keys(
+    payload: AttachRootPayPalKeysPayload,
+    user: Annotated[AuthUser, Depends(require_super_admin)],
+) -> dict[str, Any]:
+    from paypal_client import client_id_hint, verify_paypal_credentials
+
+    client_id = payload.client_id.strip()
+    client_secret = payload.client_secret.strip()
+    email = (payload.email or "").strip() or None
+    if not verify_paypal_credentials(client_id, client_secret):
+        raise HTTPException(
+            status_code=400,
+            detail="PayPal Client ID/Secret are invalid or PayPal API is unreachable. Check the keys and try again.",
+        )
+
+    accounts = _load_accounts_raw()
+    view = payload.view
+    accounts[view] = {
+        **accounts[view],
+        "paypal_merchant_id": f"keys:{client_id}",
+        "paypal_email": email,
+        "paypal_connection_status": "active",
+        "paypal_attach_mode": "keys",
+        "paypal_client_id": client_id,
+        "paypal_client_secret": client_secret,
+        "paypal_client_id_hint": client_id_hint(client_id),
+    }
+    _save_accounts(accounts)
+    return {
+        "view": view,
+        "attach_mode": "keys",
+        "client_id_hint": client_id_hint(client_id),
+        "paypal_email": email,
+        "connection_status": "active",
+    }
 
 
 @router.post("/stripe/disconnect")

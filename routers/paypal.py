@@ -98,6 +98,7 @@ class CreatePayPalOrderResponse(BaseModel):
     charge_amount: float
     display_amount: str
     conversion_note: str | None = None
+    approve_url: str | None = None
 
 
 class CapturePayPalOrderRequest(BaseModel):
@@ -264,6 +265,7 @@ def paypal_checkout_config(
     campaign_id: str | None = Query(None),
     checkout_view: Literal["homepage", "popup"] = Query("homepage"),
 ) -> dict[str, object]:
+    from routers.payment_accounts import resolve_payment_processor
     from routers.paypal_connect import (
         _account_has_keys,
         resolve_paypal_account_for_checkout,
@@ -275,6 +277,7 @@ def paypal_checkout_config(
     keys_ready = _account_has_keys(account)
     available = bool(payee or keys_ready)
     mode = "keys" if keys_ready else ("redirect" if payee else "unavailable")
+    processor = resolve_payment_processor(None, campaign_id)
     # Prefetch OAuth token in the background so PayPal click only creates the order.
     if keys_ready and account:
         import threading
@@ -293,6 +296,45 @@ def paypal_checkout_config(
         "mode": mode,
         "currency": paypal_checkout_currency(),
         "api_configured": paypal_configured() or keys_ready,
+        "payment_processor": processor,
+        # Public client id for JS SDK when processor=paypal (keys mode). Never return secret.
+        "client_id": str(account.get("client_id") or "") if keys_ready and processor == "paypal" else "",
+        "paypal_env": paypal_env(),
+    }
+
+
+@router.get("/client-token")
+def paypal_client_token(
+    campaign_id: str | None = Query(None),
+    checkout_view: Literal["homepage", "popup"] = Query("homepage"),
+) -> dict[str, object]:
+    """Client token for Advanced Card Fields when payment_processor=paypal (keys account)."""
+    from paypal_client import create_paypal_client_token
+    from routers.payment_accounts import resolve_payment_processor
+    from routers.paypal_connect import _account_has_keys, resolve_paypal_account_for_checkout
+
+    if resolve_payment_processor(None, campaign_id) != "paypal":
+        raise HTTPException(
+            status_code=400,
+            detail="PayPal processor is not enabled for this campaign",
+        )
+    account = resolve_paypal_account_for_checkout(campaign_id, checkout_view)
+    if not _account_has_keys(account):
+        raise HTTPException(
+            status_code=400,
+            detail="Attach PayPal API keys to use card fields with the PayPal processor",
+        )
+    try:
+        token = create_paypal_client_token(
+            client_id=str(account.get("client_id") or ""),
+            client_secret=str(account.get("client_secret") or ""),
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "client_token": token,
+        "client_id": str(account.get("client_id") or ""),
+        "paypal_env": paypal_env(),
     }
 
 
@@ -491,16 +533,22 @@ def paypal_complete_redirect(payload: CompletePayPalRedirectRequest) -> CaptureP
 
 @router.post("/create-order", response_model=CreatePayPalOrderResponse)
 def paypal_create_order(payload: CreatePayPalOrderRequest) -> CreatePayPalOrderResponse:
-    from routers.paypal_connect import resolve_paypal_payee_email_for_checkout
+    from routers.paypal_connect import (
+        _account_has_keys,
+        resolve_paypal_account_for_checkout,
+        resolve_paypal_payee_email_for_checkout,
+    )
 
+    account = resolve_paypal_account_for_checkout(payload.campaign_id, payload.checkout_view)
     payee = resolve_paypal_payee_email_for_checkout(payload.campaign_id, payload.checkout_view)
-    if not payee:
+    keys_ready = _account_has_keys(account)
+    if not payee and not keys_ready:
         raise HTTPException(
             status_code=400,
             detail="PayPal is not connected for this page. Connect a PayPal account in admin first.",
         )
 
-    if not paypal_configured():
+    if not keys_ready and not paypal_configured():
         raise HTTPException(status_code=503, detail="PayPal API is not configured on the server")
 
     if payload.frequency != "once":
@@ -516,11 +564,13 @@ def paypal_create_order(payload: CreatePayPalOrderRequest) -> CreatePayPalOrderR
         created = create_paypal_order(
             total_display=total_display,
             display_currency=display_currency,
-            description="Gaza Emergency Donation",
+            description="Donation",
             return_url=return_url,
             cancel_url=cancel_url,
             custom_id=json.dumps(_metadata_payload(payload, base_amount))[:127],
-            payee_email=payee,
+            payee_email=payee if not keys_ready else None,
+            client_id=str(account.get("client_id") or "") if keys_ready and account else None,
+            client_secret=str(account.get("client_secret") or "") if keys_ready and account else None,
         )
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -540,16 +590,25 @@ def paypal_create_order(payload: CreatePayPalOrderRequest) -> CreatePayPalOrderR
         charge_amount=float(created["charge_amount"]),
         display_amount=created["display_amount"],
         conversion_note=conversion,
+        approve_url=str(created.get("approve_url") or "") or None,
     )
 
 
 @router.post("/capture-order", response_model=CapturePayPalOrderResponse)
 def paypal_capture_order(payload: CapturePayPalOrderRequest) -> CapturePayPalOrderResponse:
-    if not paypal_configured():
+    from routers.paypal_connect import _account_has_keys, resolve_paypal_account_for_checkout
+
+    account = resolve_paypal_account_for_checkout(payload.campaign_id, payload.checkout_view)
+    keys_ready = _account_has_keys(account)
+    if not keys_ready and not paypal_configured():
         raise HTTPException(status_code=503, detail="PayPal is not configured on the server")
 
     try:
-        capture = capture_paypal_order(payload.order_id)
+        capture = capture_paypal_order(
+            payload.order_id,
+            client_id=str(account.get("client_id") or "") if keys_ready and account else None,
+            client_secret=str(account.get("client_secret") or "") if keys_ready and account else None,
+        )
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

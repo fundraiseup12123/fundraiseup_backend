@@ -321,6 +321,37 @@ def exchange_paypal_code(code: str, redirect_uri: str) -> tuple[str, str | None]
     return merchant_id, email
 
 
+def create_paypal_client_token(
+    *,
+    client_id: str | None = None,
+    client_secret: str | None = None,
+) -> str:
+    """Client token for Advanced Card Fields / Apple Pay / Google Pay JS SDK."""
+    token = _paypal_access_token(client_id=client_id, client_secret=client_secret)
+    response = _http.post(
+        f"{paypal_api_base()}/v1/identity/generate-token",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "Accept-Language": "en_US",
+        },
+        json={},
+    )
+    if response.status_code >= 400:
+        detail = response.text
+        try:
+            body = response.json()
+            detail = body.get("error_description") or body.get("message") or detail
+        except Exception:
+            pass
+        raise RuntimeError(detail or "Unable to generate PayPal client token")
+    body = response.json()
+    client_token = body.get("client_token")
+    if not client_token:
+        raise RuntimeError("PayPal did not return a client_token")
+    return str(client_token)
+
+
 def create_paypal_order(
     *,
     total_display: float,

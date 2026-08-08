@@ -257,14 +257,30 @@ def _auth_headers() -> dict[str, str]:
     }
 
 
+_client_token_lock = threading.Lock()
+# (api_base|client_id) -> (client_token, expires_at_monotonic)
+_client_token_cache: dict[str, tuple[str, float]] = {}
+# PayPal client tokens are typically valid ~1h; refresh early to avoid expiry mid-checkout.
+_CLIENT_TOKEN_TTL_SEC = 45 * 60
+
+
 def create_testing_client_token() -> str:
     """Client token for PayPal JS Card Fields (Advanced Checkout), when the app supports it."""
     if not testing_paypal_configured():
         raise RuntimeError("Testing PayPal is not configured")
     creds = testing_paypal_creds()
+    api_base = _testing_api_base(creds["env"])
+    cache_key = f"{api_base}|{creds['client_id']}"
+    now = time.monotonic()
+
+    with _client_token_lock:
+        cached = _client_token_cache.get(cache_key)
+        if cached and cached[1] > now:
+            return cached[0]
+
     headers = _auth_headers()
     response = _http.post(
-        f"{_testing_api_base(creds['env'])}/v1/identity/generate-token",
+        f"{api_base}/v1/identity/generate-token",
         headers={**headers, "Accept-Language": "en_US"},
         json={},
     )
@@ -274,7 +290,11 @@ def create_testing_client_token() -> str:
     token = body.get("client_token")
     if not token:
         raise RuntimeError("PayPal did not return a client_token")
-    return str(token)
+    token_str = str(token)
+
+    with _client_token_lock:
+        _client_token_cache[cache_key] = (token_str, now + _CLIENT_TOKEN_TTL_SEC)
+    return token_str
 
 
 def _paypal_error_detail(response: httpx.Response, fallback: str) -> str:

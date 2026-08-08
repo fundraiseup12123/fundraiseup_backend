@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from auth import AuthUser, deny_platform_admin_payment_writes, is_org_admin, require_auth, require_org_access
 from db import rest_delete, rest_get, rest_get_one, rest_insert, rest_insert_error, rest_patch, select_columns
-from routers.payment_accounts import normalize_payment_account_sources
+from routers.payment_accounts import normalize_payment_account_sources, normalize_payment_processor
 from invite_service import fulfill_organization_invite
 from domain_utils import (
     platform_domain_config,
@@ -393,6 +393,7 @@ class UpdateCampaignRequest(BaseModel):
     paypal_account_id: str | None = None
     nowpayments_account_id: str | None = None
     payment_account_sources: dict[str, str] | None = None
+    payment_processor: str | None = None
     # None omitted; explicit null clears the minimum (no limit).
     min_donation_amount: float | None = None
     min_donation_amount_once: float | None = None
@@ -514,11 +515,12 @@ def create_campaign(
 
     org = rest_get_one(
         "organizations",
-        params={"id": f"eq.{org_id}", "select": "default_currency,payment_account_sources"},
+        params={"id": f"eq.{org_id}", "select": "default_currency,payment_account_sources,payment_processor"},
     )
     currency = (payload.default_currency or (org or {}).get("default_currency") or "USD")
     currency = str(currency).strip().upper() or "USD"
     payment_sources = normalize_payment_account_sources((org or {}).get("payment_account_sources"))
+    payment_processor = normalize_payment_processor((org or {}).get("payment_processor"))
 
     campaign = rest_insert(
         "campaigns",
@@ -529,6 +531,7 @@ def create_campaign(
             "default_currency": currency,
             "status": "draft",
             "payment_account_sources": payment_sources,
+            "payment_processor": payment_processor,
         },
     )
     if not campaign:
@@ -541,6 +544,7 @@ def create_campaign(
                 "default_currency": currency,
                 "status": "draft",
                 "payment_account_sources": payment_sources,
+                "payment_processor": payment_processor,
             },
         )
         raise HTTPException(status_code=500, detail=err or "Failed to create campaign")
@@ -634,6 +638,7 @@ def update_campaign(
         "paypal_account_id",
         "nowpayments_account_id",
         "payment_account_sources",
+        "payment_processor",
     )
     payment_write = any(field in payload.model_fields_set for field in payment_fields)
     if payment_write:
@@ -694,6 +699,12 @@ def update_campaign(
         updates["payment_account_sources"] = normalize_payment_account_sources(
             payload.payment_account_sources
         )
+    if "payment_processor" in payload.model_fields_set:
+        # Explicit null clears campaign override (inherit org).
+        if payload.payment_processor is None or str(payload.payment_processor).strip() == "":
+            updates["payment_processor"] = None
+        else:
+            updates["payment_processor"] = normalize_payment_processor(payload.payment_processor)
     def _normalize_min(raw: float | None) -> float | None:
         if raw is None or not isinstance(raw, (int, float)) or float(raw) <= 0:
             return None
@@ -1287,9 +1298,17 @@ def get_org_settings(org_id: str, user: Annotated[AuthUser, Depends(require_auth
         "organizations",
         params={
             "id": f"eq.{org_id}",
-            "select": "id,name,slug,default_currency,reporting_currency,timezone,payment_methods,notification_prefs,reminder_interval_days,email_organization_name,payment_account_sources",
+            "select": "id,name,slug,default_currency,reporting_currency,timezone,payment_methods,notification_prefs,reminder_interval_days,email_organization_name,payment_account_sources,payment_processor",
         },
     )
+    if not org:
+        org = rest_get_one(
+            "organizations",
+            params={
+                "id": f"eq.{org_id}",
+                "select": "id,name,slug,default_currency,reporting_currency,timezone,payment_methods,notification_prefs,reminder_interval_days,email_organization_name,payment_account_sources",
+            },
+        )
     if not org:
         org = rest_get_one(
             "organizations",
@@ -1321,6 +1340,7 @@ def get_org_settings(org_id: str, user: Annotated[AuthUser, Depends(require_auth
     if "email_organization_name" not in org:
         org["email_organization_name"] = None
     org["payment_account_sources"] = normalize_payment_account_sources(org.get("payment_account_sources"))
+    org["payment_processor"] = normalize_payment_processor(org.get("payment_processor"))
     return org
 
 
@@ -1385,7 +1405,7 @@ def update_org_settings(
     user: Annotated[AuthUser, Depends(require_auth)],
 ) -> dict[str, Any]:
     require_org_access(org_id, user, min_role="admin")
-    if "payment_methods" in payload or "payment_account_sources" in payload:
+    if "payment_methods" in payload or "payment_account_sources" in payload or "payment_processor" in payload:
         deny_platform_admin_payment_writes(user)
     existing = rest_get_one(
         "organizations",
@@ -1408,6 +1428,7 @@ def update_org_settings(
         "reminder_interval_days",
         "email_organization_name",
         "payment_account_sources",
+        "payment_processor",
     }
     updates: dict[str, Any] = {k: v for k, v in payload.items() if k in allowed}
 
@@ -1473,6 +1494,9 @@ def update_org_settings(
             updates["payment_account_sources"]
         )
 
+    if "payment_processor" in updates:
+        updates["payment_processor"] = normalize_payment_processor(updates["payment_processor"])
+
     if not updates:
         raise HTTPException(status_code=400, detail="No updates provided")
 
@@ -1489,7 +1513,7 @@ def update_org_settings(
         "organizations",
         params={
             "id": f"eq.{org_id}",
-            "select": "id,name,slug,default_currency,reporting_currency,timezone,payment_methods,notification_prefs,reminder_interval_days,email_organization_name,payment_account_sources",
+            "select": "id,name,slug,default_currency,reporting_currency,timezone,payment_methods,notification_prefs,reminder_interval_days,email_organization_name,payment_account_sources,payment_processor",
         },
     ) or updated
     if isinstance(fresh, dict) and "email_organization_name" not in fresh:
@@ -1500,6 +1524,7 @@ def update_org_settings(
             "payment_account_sources": normalize_payment_account_sources(
                 fresh.get("payment_account_sources")
             ),
+            "payment_processor": normalize_payment_processor(fresh.get("payment_processor")),
             "campaigns_currency_updated": campaigns_updated,
         }
     return fresh

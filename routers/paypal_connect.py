@@ -414,7 +414,9 @@ def resolve_paypal_account_for_checkout(
             from routers.payment_accounts import uses_platform_provider
 
             if uses_platform_provider(str(org_id), "paypal", str(campaign_id)):
-                return None
+                from routers.payment_accounts import resolve_root_paypal_account
+
+                return resolve_root_paypal_account(checkout_view)
 
             if campaign.get("paypal_account_id"):
                 acct = rest_get_one(
