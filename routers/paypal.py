@@ -311,6 +311,11 @@ def paypal_checkout_config(
     available = bool(payee or keys_ready)
     mode = "keys" if keys_ready else ("redirect" if payee else "unavailable")
     processor = resolve_payment_processor(None, campaign_id)
+    env_value = paypal_env()
+    if keys_ready and account:
+        account_env = str(account.get("paypal_env") or "").strip().lower()
+        if account_env in {"live", "sandbox"}:
+            env_value = account_env
     # Prefetch OAuth token in the background so PayPal click only creates the order.
     if keys_ready and account:
         import threading
@@ -332,7 +337,8 @@ def paypal_checkout_config(
         "payment_processor": processor,
         # Public client id for JS SDK when processor=paypal (keys mode). Never return secret.
         "client_id": str(account.get("client_id") or "") if keys_ready and processor == "paypal" else "",
-        "paypal_env": paypal_env(),
+        "paypal_env": env_value,
+        "keys_source": str(account.get("keys_source") or "") if keys_ready else "",
     }
 
 

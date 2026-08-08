@@ -1048,7 +1048,7 @@ def attach_root_paypal_keys(
     payload: AttachRootPayPalKeysPayload,
     user: Annotated[AuthUser, Depends(require_super_admin)],
 ) -> dict[str, Any]:
-    from paypal_client import client_id_hint, verify_paypal_credentials
+    from paypal_client import client_id_hint, probe_paypal_subscriptions_capability, verify_paypal_credentials
 
     client_id = payload.client_id.strip()
     client_secret = payload.client_secret.strip()
@@ -1057,6 +1057,15 @@ def attach_root_paypal_keys(
         raise HTTPException(
             status_code=400,
             detail="PayPal Client ID/Secret are invalid or PayPal API is unreachable. Check the keys and try again.",
+        )
+
+    sub_probe = probe_paypal_subscriptions_capability(client_id, client_secret)
+    subscriptions_ready = bool(sub_probe.get("ok"))
+    subscriptions_warning = None
+    if not subscriptions_ready:
+        subscriptions_warning = (
+            "Keys saved for one-time PayPal, but monthly needs Billing agreements + Future payments "
+            "enabled on this REST app in the PayPal Developer Dashboard → Accept payments → Advanced options."
         )
 
     accounts = _load_accounts_raw()
@@ -1072,13 +1081,17 @@ def attach_root_paypal_keys(
         "paypal_client_id_hint": client_id_hint(client_id),
     }
     _save_accounts(accounts)
-    return {
+    result: dict[str, Any] = {
         "view": view,
         "attach_mode": "keys",
         "client_id_hint": client_id_hint(client_id),
         "paypal_email": email,
         "connection_status": "active",
+        "subscriptions_ready": subscriptions_ready,
     }
+    if subscriptions_warning:
+        result["subscriptions_warning"] = subscriptions_warning
+    return result
 
 
 @router.post("/stripe/disconnect")

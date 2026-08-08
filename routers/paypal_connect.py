@@ -220,6 +220,18 @@ def attach_paypal_keys_account(
             detail="PayPal Client ID/Secret are invalid or PayPal API is unreachable. Check the keys and try again.",
         )
 
+    from paypal_client import probe_paypal_subscriptions_capability
+
+    sub_probe = probe_paypal_subscriptions_capability(client_id, client_secret)
+    subscriptions_ready = bool(sub_probe.get("ok"))
+    subscriptions_warning = None
+    if not subscriptions_ready:
+        subscriptions_warning = (
+            "Keys connected for one-time PayPal checkout, but monthly is blocked until you enable "
+            "Billing agreements + Future payments (Subscriptions) on this REST app in the "
+            "PayPal Developer Dashboard → Accept payments → Advanced options, then re-save keys."
+        )
+
     is_default = bool(payload.is_default) and not payload.campaign_id
     if is_default:
         _clear_org_paypal_defaults(org_id)
@@ -265,7 +277,11 @@ def attach_paypal_keys_account(
             match={"id": payload.campaign_id},
         )
 
-    return _public_paypal_account(row)
+    public = _public_paypal_account(row)
+    public["subscriptions_ready"] = subscriptions_ready
+    if subscriptions_warning:
+        public["subscriptions_warning"] = subscriptions_warning
+    return public
 
 
 @router.delete("/accounts/{account_id}")
@@ -379,12 +395,61 @@ def handle_org_paypal_callback(code: str, state: str) -> RedirectResponse | None
     )
 
 
+def _testing_paypal_keys_account() -> dict[str, Any] | None:
+    """
+    Campaign PayPal processor keys from TESTING_PAYPAL_* / .env.testing-paypal.
+    Same credentials that power /testing-paypal (including monthly subscriptions).
+    """
+    try:
+        from testing_paypal_client import (
+            testing_paypal_configured,
+            testing_paypal_creds,
+            testing_paypal_env,
+        )
+        from paypal_client import client_id_hint, set_paypal_credentials_env
+    except Exception:
+        return None
+    if not testing_paypal_configured():
+        return None
+    creds = testing_paypal_creds()
+    cid = (creds.get("client_id") or "").strip()
+    secret = (creds.get("client_secret") or "").strip()
+    if not cid or not secret:
+        return None
+    env = testing_paypal_env()
+    set_paypal_credentials_env(cid, env)
+    return {
+        "id": "testing-paypal-keys",
+        "attach_mode": "keys",
+        "client_id": cid,
+        "client_secret": secret,
+        "client_id_hint": client_id_hint(cid),
+        "paypal_merchant_id": f"keys:{cid}",
+        "connection_status": "active",
+        "is_default": True,
+        "keys_source": "testing_paypal",
+        "paypal_env": env,
+    }
+
+
 def resolve_paypal_account_for_checkout(
     campaign_id: str | None,
     checkout_view: str | None,
 ) -> dict[str, Any] | None:
     """Resolve the org/campaign PayPal account row used for checkout (email or keys)."""
     from site_constants import ROOT_CAMPAIGN_ID
+
+    # PayPal checkout processor: always use TESTING_PAYPAL_* keys when configured
+    # (same live app that already supports monthly on /testing-paypal).
+    try:
+        from routers.payment_accounts import resolve_payment_processor
+
+        if resolve_payment_processor(None, campaign_id) == "paypal":
+            testing_keys = _testing_paypal_keys_account()
+            if testing_keys:
+                return testing_keys
+    except Exception:
+        pass
 
     select_cols = (
         "id,organization_id,campaign_id,paypal_email,paypal_merchant_id,connection_status,"

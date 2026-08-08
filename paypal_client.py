@@ -18,6 +18,8 @@ _http = httpx.Client(timeout=15.0)
 _token_lock = threading.Lock()
 # client_id -> (access_token, expires_at_epoch)
 _token_cache: dict[str, tuple[str, float]] = {}
+# client_id -> "live" | "sandbox" (detected from which OAuth host accepts the keys)
+_cred_env_cache: dict[str, str] = {}
 
 
 def _clean_env(name: str, fallback: str = "") -> str:
@@ -53,16 +55,78 @@ def paypal_connect_available() -> bool:
     return bool(paypal_client_id())
 
 
-def paypal_api_base() -> str:
-    if paypal_env() == "live":
+def _api_base_for_env(env: str) -> str:
+    if (env or "").strip().lower() == "live":
         return "https://api-m.paypal.com"
     return "https://api-m.sandbox.paypal.com"
+
+
+def paypal_api_base() -> str:
+    return _api_base_for_env(paypal_env())
 
 
 def paypal_web_base() -> str:
     if paypal_env() == "live":
         return "https://www.paypal.com"
     return "https://www.sandbox.paypal.com"
+
+
+def set_paypal_credentials_env(client_id: str, env: str) -> None:
+    """Pin API host for known merchant/testing keys (live|sandbox)."""
+    cid = (client_id or "").strip()
+    mode = (env or "").strip().lower()
+    if cid and mode in {"live", "sandbox"}:
+        _cred_env_cache[cid] = mode
+
+
+def detect_paypal_credentials_env(client_id: str, client_secret: str) -> str:
+    """Return 'live' or 'sandbox' for keys by trying OAuth against both hosts."""
+    cid = (client_id or "").strip()
+    secret = (client_secret or "").strip()
+    if not cid or not secret:
+        raise RuntimeError("PayPal is not configured")
+
+    cached = _cred_env_cache.get(cid)
+    if cached in ("live", "sandbox"):
+        return cached
+
+    # Prefer platform env first (faster when keys match), then the other.
+    preferred = paypal_env()
+    order = [preferred, "sandbox" if preferred == "live" else "live"]
+    last_detail = "PayPal credentials rejected"
+    for env in order:
+        try:
+            response = _http.post(
+                f"{_api_base_for_env(env)}/v1/oauth2/token",
+                data={"grant_type": "client_credentials"},
+                auth=(cid, secret),
+                headers={"Accept": "application/json"},
+            )
+            if response.status_code < 400 and response.json().get("access_token"):
+                _cred_env_cache[cid] = env
+                return env
+            try:
+                last_detail = response.json().get("error_description") or response.text or last_detail
+            except Exception:
+                last_detail = response.text or last_detail
+        except httpx.HTTPError:
+            continue
+    raise RuntimeError(str(last_detail))
+
+
+def paypal_api_base_for(
+    client_id: str | None = None,
+    client_secret: str | None = None,
+) -> str:
+    """API host for these credentials (auto-detect when merchant keys are passed)."""
+    cid = (client_id or "").strip()
+    secret = (client_secret or "").strip()
+    if cid and secret:
+        try:
+            return _api_base_for_env(detect_paypal_credentials_env(cid, secret))
+        except RuntimeError:
+            pass
+    return paypal_api_base()
 
 
 def _paypal_access_token(
@@ -80,9 +144,10 @@ def _paypal_access_token(
         if cached and cached[1] > now + 60:
             return cached[0]
 
+    api_base = paypal_api_base_for(cid, secret)
     try:
         response = _http.post(
-            f"{paypal_api_base()}/v1/oauth2/token",
+            f"{api_base}/v1/oauth2/token",
             data={"grant_type": "client_credentials"},
             auth=(cid, secret),
             headers={"Accept": "application/json"},
@@ -107,6 +172,11 @@ def _paypal_access_token(
     expires_at = now + max(120, expires_in - 120)
     with _token_lock:
         _token_cache[cid] = (str(token), expires_at)
+    # Remember which host accepted these keys.
+    if api_base.endswith("paypal.com") and "sandbox" not in api_base:
+        _cred_env_cache[cid] = "live"
+    else:
+        _cred_env_cache[cid] = "sandbox"
     return str(token)
 
 
@@ -123,10 +193,45 @@ def warm_paypal_access_token(
 
 def verify_paypal_credentials(client_id: str, client_secret: str) -> bool:
     try:
+        detect_paypal_credentials_env(client_id, client_secret)
         _paypal_access_token(client_id=client_id, client_secret=client_secret)
         return True
     except Exception:
         return False
+
+
+def probe_paypal_subscriptions_capability(
+    client_id: str,
+    client_secret: str,
+) -> dict[str, object]:
+    """
+    Check whether these REST keys can use Catalog Products / Billing Plans.
+    Monthly checkout requires this; one-time Orders can work without it.
+    """
+    cid = (client_id or "").strip()
+    secret = (client_secret or "").strip()
+    token = _paypal_access_token(client_id=cid, client_secret=secret)
+    api_base = paypal_api_base_for(cid, secret)
+    response = _http.get(
+        f"{api_base}/v1/catalogs/products",
+        params={"page_size": 1, "page": 1, "total_required": "false"},
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+    )
+    if response.status_code < 400:
+        return {
+            "ok": True,
+            "api_env": _cred_env_cache.get(cid) or paypal_env(),
+        }
+    detail = _paypal_error_detail(response, "Subscriptions API not available for these keys")
+    return {
+        "ok": False,
+        "api_env": _cred_env_cache.get(cid) or paypal_env(),
+        "detail": detail,
+    }
 
 
 def client_id_hint(client_id: str) -> str:
@@ -329,7 +434,7 @@ def create_paypal_client_token(
     """Client token for Advanced Card Fields / Apple Pay / Google Pay JS SDK."""
     token = _paypal_access_token(client_id=client_id, client_secret=client_secret)
     response = _http.post(
-        f"{paypal_api_base()}/v1/identity/generate-token",
+        f"{paypal_api_base_for(client_id, client_secret)}/v1/identity/generate-token",
         headers={
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
@@ -395,7 +500,7 @@ def create_paypal_order(
 
     token = _paypal_access_token(client_id=client_id, client_secret=client_secret)
     response = _http.post(
-        f"{paypal_api_base()}/v2/checkout/orders",
+        f"{paypal_api_base_for(client_id, client_secret)}/v2/checkout/orders",
         json=payload,
         headers={
             "Authorization": f"Bearer {token}",
@@ -432,7 +537,7 @@ def capture_paypal_order(
 ) -> dict[str, object]:
     token = _paypal_access_token(client_id=client_id, client_secret=client_secret)
     response = _http.post(
-        f"{paypal_api_base()}/v2/checkout/orders/{order_id}/capture",
+        f"{paypal_api_base_for(client_id, client_secret)}/v2/checkout/orders/{order_id}/capture",
         headers={
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
@@ -483,8 +588,12 @@ def _paypal_error_detail(response: httpx.Response, fallback: str) -> str:
         lower = detail.lower()
         if "insufficient permissions" in lower or "not_authorized" in lower or "permission_denied" in lower:
             detail = (
-                f"{detail} Enable Subscriptions (and Billing Agreements if listed) "
-                "for this REST app in the PayPal Developer Dashboard, then retry."
+                f"{detail} "
+                "Monthly PayPal needs Subscriptions on this REST app: "
+                "developer.paypal.com → Apps → your app → Accept payments → Advanced options → "
+                "enable Billing agreements + Future payments (and Subscriptions if shown), Save, "
+                "wait a few minutes, then re-attach the same Client ID/Secret. "
+                "One-time checkout can work without this; monthly cannot."
             )
     except Exception:
         pass
@@ -510,13 +619,15 @@ def ensure_paypal_product(
             return cached
 
     token = _paypal_access_token(client_id=client_id, client_secret=client_secret)
+    api_base = paypal_api_base_for(client_id, client_secret)
     response = _http.post(
-        f"{paypal_api_base()}/v1/catalogs/products",
+        f"{api_base}/v1/catalogs/products",
         json={
             "name": "Monthly Donation",
             "description": "Recurring donation via PayPal checkout processor",
             "type": "SERVICE",
-            "category": "CHARITY",
+            # SOFTWARE is widely allowed; CHARITY can be restricted on some merchant apps.
+            "category": "SOFTWARE",
         },
         headers={
             "Authorization": f"Bearer {token}",
@@ -562,6 +673,7 @@ def ensure_paypal_plan(
 
     product_id = ensure_paypal_product(client_id=client_id, client_secret=client_secret)
     token = _paypal_access_token(client_id=client_id, client_secret=client_secret)
+    api_base = paypal_api_base_for(client_id, client_secret)
     plan_payload = {
         "product_id": product_id,
         "name": f"Monthly donation {amount_value} {charge_currency}"[:127],
@@ -592,7 +704,7 @@ def ensure_paypal_plan(
         },
     }
     response = _http.post(
-        f"{paypal_api_base()}/v1/billing/plans",
+        f"{api_base}/v1/billing/plans",
         json=plan_payload,
         headers={
             "Authorization": f"Bearer {token}",
@@ -609,7 +721,7 @@ def ensure_paypal_plan(
     status = str(body.get("status") or "").upper()
     if status == "CREATED":
         activate = _http.post(
-            f"{paypal_api_base()}/v1/billing/plans/{plan_id}/activate",
+            f"{api_base}/v1/billing/plans/{plan_id}/activate",
             headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
         )
         if activate.status_code >= 400:
@@ -660,7 +772,7 @@ def create_paypal_subscription(
         payload["subscriber"] = subscriber
 
     response = _http.post(
-        f"{paypal_api_base()}/v1/billing/subscriptions",
+        f"{paypal_api_base_for(client_id, client_secret)}/v1/billing/subscriptions",
         json=payload,
         headers={
             "Authorization": f"Bearer {token}",
@@ -698,7 +810,7 @@ def get_paypal_subscription(
 ) -> dict[str, object]:
     token = _paypal_access_token(client_id=client_id, client_secret=client_secret)
     response = _http.get(
-        f"{paypal_api_base()}/v1/billing/subscriptions/{subscription_id}",
+        f"{paypal_api_base_for(client_id, client_secret)}/v1/billing/subscriptions/{subscription_id}",
         headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
     )
     if response.status_code >= 400:
