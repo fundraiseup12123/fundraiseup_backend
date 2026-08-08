@@ -461,15 +461,30 @@ def _paypal_error_detail(response: httpx.Response, fallback: str) -> str:
     detail = response.text
     try:
         body = response.json()
-        detail = (
-            body.get("message")
-            or body.get("error_description")
-            or body.get("details", detail)
-            or detail
-        )
-        if isinstance(detail, list):
-            detail = "; ".join(
-                str(item.get("description") or item.get("issue") or item) for item in detail
+        message = str(body.get("message") or body.get("error_description") or "").strip()
+        details = body.get("details")
+        detail_parts: list[str] = []
+        if isinstance(details, list):
+            for item in details:
+                if isinstance(item, dict):
+                    part = str(item.get("description") or item.get("issue") or "").strip()
+                    if part:
+                        detail_parts.append(part)
+                else:
+                    detail_parts.append(str(item))
+        if message and detail_parts:
+            detail = f"{message}: {'; '.join(detail_parts)}"
+        elif message:
+            detail = message
+        elif detail_parts:
+            detail = "; ".join(detail_parts)
+        elif details:
+            detail = str(details)
+        lower = detail.lower()
+        if "insufficient permissions" in lower or "not_authorized" in lower or "permission_denied" in lower:
+            detail = (
+                f"{detail} Enable Subscriptions (and Billing Agreements if listed) "
+                "for this REST app in the PayPal Developer Dashboard, then retry."
             )
     except Exception:
         pass
