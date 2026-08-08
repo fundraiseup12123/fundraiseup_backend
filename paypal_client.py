@@ -447,3 +447,254 @@ def capture_paypal_order(
         raise RuntimeError(detail or "Unable to capture PayPal payment")
 
     return response.json()
+
+
+_product_lock = threading.Lock()
+_plan_lock = threading.Lock()
+# client_id -> product_id
+_product_cache: dict[str, str] = {}
+# (client_id, currency, amount) -> {product_id, plan_id}
+_plan_cache: dict[tuple[str, str, str], dict[str, str]] = {}
+
+
+def _paypal_error_detail(response: httpx.Response, fallback: str) -> str:
+    detail = response.text
+    try:
+        body = response.json()
+        detail = (
+            body.get("message")
+            or body.get("error_description")
+            or body.get("details", detail)
+            or detail
+        )
+        if isinstance(detail, list):
+            detail = "; ".join(
+                str(item.get("description") or item.get("issue") or item) for item in detail
+            )
+    except Exception:
+        pass
+    return str(detail or fallback)
+
+
+def subscription_regular_start_time_iso() -> str:
+    from datetime import datetime, timedelta, timezone
+
+    start = datetime.now(timezone.utc) + timedelta(days=32)
+    return start.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def ensure_paypal_product(
+    *,
+    client_id: str | None = None,
+    client_secret: str | None = None,
+) -> str:
+    cid = (client_id or "").strip() or paypal_client_id()
+    with _product_lock:
+        cached = _product_cache.get(cid)
+        if cached:
+            return cached
+
+    token = _paypal_access_token(client_id=client_id, client_secret=client_secret)
+    response = _http.post(
+        f"{paypal_api_base()}/v1/catalogs/products",
+        json={
+            "name": "Monthly Donation",
+            "description": "Recurring donation via PayPal checkout processor",
+            "type": "SERVICE",
+            "category": "CHARITY",
+        },
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "Prefer": "return=representation",
+        },
+    )
+    if response.status_code >= 400:
+        raise RuntimeError(_paypal_error_detail(response, "Unable to create PayPal product"))
+    product_id = response.json().get("id")
+    if not product_id:
+        raise RuntimeError("PayPal did not return a product id")
+    with _product_lock:
+        _product_cache[cid] = str(product_id)
+    return str(product_id)
+
+
+def ensure_paypal_plan(
+    *,
+    total_display: float,
+    display_currency: str,
+    client_id: str | None = None,
+    client_secret: str | None = None,
+) -> dict[str, object]:
+    """Hybrid plan: setup_fee charges now; REGULAR monthly starts ~1 month later."""
+    charge_currency, charge_amount = convert_for_paypal(total_display, display_currency)
+    amount_value = f"{float(charge_amount):.2f}"
+    cid = (client_id or "").strip() or paypal_client_id()
+    cache_key = (cid, charge_currency.upper(), amount_value)
+
+    with _plan_lock:
+        cached = _plan_cache.get(cache_key)
+        if cached:
+            return {
+                "product_id": cached["product_id"],
+                "plan_id": cached["plan_id"],
+                "charge_currency": charge_currency,
+                "charge_amount": charge_amount,
+                "display_amount": format_display_amount(total_display, display_currency),
+                "reused": True,
+                "billing_mode": "hybrid",
+            }
+
+    product_id = ensure_paypal_product(client_id=client_id, client_secret=client_secret)
+    token = _paypal_access_token(client_id=client_id, client_secret=client_secret)
+    plan_payload = {
+        "product_id": product_id,
+        "name": f"Monthly donation {amount_value} {charge_currency}"[:127],
+        "description": "Instant first charge + scheduled monthly renewals",
+        "status": "ACTIVE",
+        "billing_cycles": [
+            {
+                "frequency": {"interval_unit": "MONTH", "interval_count": 1},
+                "tenure_type": "REGULAR",
+                "sequence": 1,
+                "total_cycles": 0,
+                "pricing_scheme": {
+                    "fixed_price": {
+                        "value": amount_value,
+                        "currency_code": charge_currency.upper(),
+                    }
+                },
+            }
+        ],
+        "payment_preferences": {
+            "auto_bill_outstanding": True,
+            "setup_fee": {
+                "value": amount_value,
+                "currency_code": charge_currency.upper(),
+            },
+            "setup_fee_failure_action": "CANCEL",
+            "payment_failure_threshold": 3,
+        },
+    }
+    response = _http.post(
+        f"{paypal_api_base()}/v1/billing/plans",
+        json=plan_payload,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "Prefer": "return=representation",
+        },
+    )
+    if response.status_code >= 400:
+        raise RuntimeError(_paypal_error_detail(response, "Unable to create PayPal billing plan"))
+    body = response.json()
+    plan_id = body.get("id")
+    if not plan_id:
+        raise RuntimeError("PayPal did not return a plan id")
+    status = str(body.get("status") or "").upper()
+    if status == "CREATED":
+        activate = _http.post(
+            f"{paypal_api_base()}/v1/billing/plans/{plan_id}/activate",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        )
+        if activate.status_code >= 400:
+            raise RuntimeError(_paypal_error_detail(activate, "Unable to activate PayPal billing plan"))
+
+    with _plan_lock:
+        _plan_cache[cache_key] = {"product_id": product_id, "plan_id": str(plan_id)}
+
+    return {
+        "product_id": product_id,
+        "plan_id": str(plan_id),
+        "charge_currency": charge_currency,
+        "charge_amount": charge_amount,
+        "display_amount": format_display_amount(total_display, display_currency),
+        "reused": False,
+        "billing_mode": "hybrid",
+    }
+
+
+def create_paypal_subscription(
+    *,
+    plan_id: str,
+    return_url: str,
+    cancel_url: str,
+    custom_id: str | None = None,
+    subscriber: dict[str, object] | None = None,
+    start_time: str | None = None,
+    client_id: str | None = None,
+    client_secret: str | None = None,
+) -> dict[str, object]:
+    token = _paypal_access_token(client_id=client_id, client_secret=client_secret)
+    regular_start = (start_time or "").strip() or subscription_regular_start_time_iso()
+    payload: dict[str, object] = {
+        "plan_id": plan_id,
+        "start_time": regular_start,
+        "application_context": {
+            "brand_name": "Donation",
+            "locale": "en-US",
+            "shipping_preference": "NO_SHIPPING",
+            "user_action": "SUBSCRIBE_NOW",
+            "return_url": return_url,
+            "cancel_url": cancel_url,
+        },
+    }
+    if custom_id:
+        payload["custom_id"] = custom_id[:127]
+    if subscriber:
+        payload["subscriber"] = subscriber
+
+    response = _http.post(
+        f"{paypal_api_base()}/v1/billing/subscriptions",
+        json=payload,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "Prefer": "return=representation",
+        },
+    )
+    if response.status_code >= 400:
+        raise RuntimeError(_paypal_error_detail(response, "Unable to create PayPal subscription"))
+    body = response.json()
+    subscription_id = body.get("id")
+    if not subscription_id:
+        raise RuntimeError("PayPal did not return a subscription id")
+    approve_url = None
+    for link in body.get("links") or []:
+        if isinstance(link, dict) and str(link.get("rel") or "").lower() == "approve":
+            approve_url = link.get("href")
+            break
+    return {
+        "subscription_id": str(subscription_id),
+        "status": str(body.get("status") or ""),
+        "plan_id": plan_id,
+        "approve_url": approve_url,
+        "start_time": regular_start,
+        "billing_mode": "hybrid",
+        "raw": body,
+    }
+
+
+def get_paypal_subscription(
+    subscription_id: str,
+    *,
+    client_id: str | None = None,
+    client_secret: str | None = None,
+) -> dict[str, object]:
+    token = _paypal_access_token(client_id=client_id, client_secret=client_secret)
+    response = _http.get(
+        f"{paypal_api_base()}/v1/billing/subscriptions/{subscription_id}",
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+    )
+    if response.status_code >= 400:
+        raise RuntimeError(_paypal_error_detail(response, "Unable to fetch PayPal subscription"))
+    body = response.json()
+    return {
+        "subscription_id": str(body.get("id") or subscription_id),
+        "status": str(body.get("status") or ""),
+        "plan_id": str((body.get("plan_id") or "")),
+        "next_billing_time": (body.get("billing_info") or {}).get("next_billing_time")
+        if isinstance(body.get("billing_info"), dict)
+        else None,
+        "raw": body,
+    }

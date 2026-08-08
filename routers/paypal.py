@@ -22,6 +22,9 @@ from paypal_client import (
     approve_link_from_order,
     capture_paypal_order,
     create_paypal_order,
+    create_paypal_subscription,
+    ensure_paypal_plan,
+    get_paypal_subscription,
     paypal_configured,
     paypal_env,
     warm_paypal_access_token,
@@ -90,6 +93,36 @@ class CompletePayPalRedirectRequest(BaseModel):
     utm: PayPalUtm | None = None
     device: PayPalDevice | None = None
     paypal_txn_id: str | None = None
+    subscription_id: str | None = None
+
+
+class EnsurePayPalPlanRequest(BaseModel):
+    amount: float = Field(gt=0)
+    currency: str = Field(min_length=3, max_length=3)
+    cover_fees: bool = False
+    campaign_id: str | None = None
+    checkout_view: Literal["homepage", "popup"] = "homepage"
+
+
+class CreatePayPalSubscriptionRequest(CreatePayPalOrderRequest):
+    frequency: Literal["monthly"] = "monthly"
+    plan_id: str | None = None
+
+
+class ActivatePayPalSubscriptionRequest(BaseModel):
+    subscription_id: str = Field(min_length=5, max_length=64)
+    amount: float = Field(gt=0)
+    currency: str = Field(min_length=3, max_length=3)
+    cover_fees: bool = False
+    dedicate: bool = False
+    honoree_name: str | None = None
+    comment: str | None = None
+    campaign_id: str | None = None
+    checkout_view: Literal["homepage", "popup"] = "homepage"
+    donor: PayPalDonor
+    utm: PayPalUtm | None = None
+    device: PayPalDevice | None = None
+    payment_ref: str | None = None
 
 
 class CreatePayPalOrderResponse(BaseModel):
@@ -348,8 +381,8 @@ def paypal_prepare_redirect(payload: PreparePayPalRedirectRequest) -> dict[str, 
         resolve_paypal_payee_email_for_checkout,
     )
 
-    if payload.frequency != "once":
-        raise HTTPException(status_code=400, detail="PayPal is only available for one-time donations")
+    if payload.frequency not in ("once", "monthly"):
+        raise HTTPException(status_code=400, detail="Unsupported donation frequency")
 
     if payload.campaign_id:
         campaign = rest_get_one(
@@ -363,7 +396,9 @@ def paypal_prepare_redirect(payload: PreparePayPalRedirectRequest) -> dict[str, 
             assert_meets_min_donation(
                 payload.amount,
                 payload.currency,
-                min_donation_amount=resolve_min_donation_for_frequency(campaign, "once"),
+                min_donation_amount=resolve_min_donation_for_frequency(
+                    campaign, "monthly" if payload.frequency == "monthly" else "once"
+                ),
                 default_currency=campaign.get("default_currency"),
             )
 
@@ -374,6 +409,12 @@ def paypal_prepare_redirect(payload: PreparePayPalRedirectRequest) -> dict[str, 
         raise HTTPException(
             status_code=400,
             detail="PayPal is not connected for this page. Connect a PayPal account in admin first.",
+        )
+
+    if payload.frequency == "monthly" and not keys_ready:
+        raise HTTPException(
+            status_code=400,
+            detail="Monthly PayPal requires API keys (PayPal checkout processor).",
         )
 
     display_currency = payload.currency.lower()
@@ -397,6 +438,45 @@ def paypal_prepare_redirect(payload: PreparePayPalRedirectRequest) -> dict[str, 
         return_url = f"{return_url}{sep}payment_ref={payment_ref}"
 
         try:
+            if payload.frequency == "monthly":
+                plan = ensure_paypal_plan(
+                    total_display=total_display,
+                    display_currency=display_currency,
+                    client_id=str(account.get("client_id") or ""),
+                    client_secret=str(account.get("client_secret") or ""),
+                )
+                created = create_paypal_subscription(
+                    plan_id=str(plan["plan_id"]),
+                    return_url=return_url,
+                    cancel_url=cancel_url,
+                    custom_id=payment_ref,
+                    subscriber={
+                        "name": {
+                            "given_name": payload.donor.first_name,
+                            "surname": payload.donor.last_name,
+                        },
+                        "email_address": payload.donor.email,
+                    },
+                    client_id=str(account.get("client_id") or ""),
+                    client_secret=str(account.get("client_secret") or ""),
+                )
+                approve_url = created.get("approve_url")
+                if not approve_url:
+                    raise RuntimeError("PayPal did not return an approval link")
+                return {
+                    "redirect_url": str(approve_url),
+                    "payment_ref": payment_ref,
+                    "subscription_id": str(created["subscription_id"]),
+                    "plan_id": str(plan["plan_id"]),
+                    "order_id": "",
+                    "payee_email": payee or "",
+                    "charge_currency": charge_currency_code,
+                    "charge_amount": f"{charge_amount:.2f}",
+                    "display_amount": format_display_amount(total_display, display_currency),
+                    "mode": "keys_subscription",
+                    "frequency": "monthly",
+                }
+
             created = create_paypal_order(
                 total_display=total_display,
                 display_currency=display_currency,
@@ -424,7 +504,14 @@ def paypal_prepare_redirect(payload: PreparePayPalRedirectRequest) -> dict[str, 
             "charge_amount": f"{charge_amount:.2f}",
             "display_amount": format_display_amount(total_display, display_currency),
             "mode": "keys",
+            "frequency": "once",
         }
+
+    if payload.frequency == "monthly":
+        raise HTTPException(
+            status_code=400,
+            detail="Monthly PayPal requires API keys (PayPal checkout processor).",
+        )
 
     payment_ref = str(uuid.uuid4())
     return_url = payload.return_url or (
@@ -484,8 +571,36 @@ def paypal_complete_redirect(payload: CompletePayPalRedirectRequest) -> CaptureP
     display_currency = payload.currency.lower()
     base_amount, total_display = _resolve_total(payload.amount, display_currency, payload.cover_fees)
 
-    if keys_ready and account:
-        order_token = (payload.paypal_txn_id or "").strip()
+    subscription_id = (payload.subscription_id or "").strip()
+    txn = (payload.paypal_txn_id or "").strip()
+    if not subscription_id and txn.upper().startswith("I-"):
+        subscription_id = txn
+
+    if keys_ready and account and (subscription_id or payload.frequency == "monthly"):
+        if not subscription_id:
+            raise HTTPException(
+                status_code=400,
+                detail="Missing PayPal subscription id. Complete approval on PayPal and return.",
+            )
+        try:
+            sub = get_paypal_subscription(
+                subscription_id,
+                client_id=str(account.get("client_id") or ""),
+                client_secret=str(account.get("client_secret") or ""),
+            )
+        except RuntimeError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        status_value = str(sub.get("status") or "").upper()
+        if status_value not in {"ACTIVE", "APPROVED"}:
+            raise HTTPException(
+                status_code=400,
+                detail=f"PayPal subscription not active (status={status_value or 'unknown'})",
+            )
+        order_id = f"paypal-sub:{subscription_id}"
+        # Ensure donation row is marked monthly.
+        payload.frequency = "monthly"
+    elif keys_ready and account:
+        order_token = txn
         if not order_token:
             raise HTTPException(
                 status_code=400,
@@ -530,6 +645,160 @@ def paypal_complete_redirect(payload: CompletePayPalRedirectRequest) -> CaptureP
             )
     return CapturePayPalOrderResponse(order_id=order_id, status="COMPLETED", recorded=bool(saved))
 
+
+@router.post("/ensure-plan")
+def paypal_ensure_plan(payload: EnsurePayPalPlanRequest) -> dict[str, object]:
+    from routers.payment_accounts import resolve_payment_processor
+    from routers.paypal_connect import _account_has_keys, resolve_paypal_account_for_checkout
+
+    if resolve_payment_processor(None, payload.campaign_id) != "paypal":
+        raise HTTPException(status_code=400, detail="PayPal processor is not enabled for this campaign")
+    account = resolve_paypal_account_for_checkout(payload.campaign_id, payload.checkout_view)
+    if not _account_has_keys(account):
+        raise HTTPException(status_code=400, detail="Attach PayPal API keys for monthly billing")
+    _, total_display = _resolve_total(payload.amount, payload.currency.lower(), payload.cover_fees)
+    try:
+        plan = ensure_paypal_plan(
+            total_display=total_display,
+            display_currency=payload.currency.lower(),
+            client_id=str(account.get("client_id") or ""),
+            client_secret=str(account.get("client_secret") or ""),
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return plan
+
+
+@router.post("/create-subscription")
+def paypal_create_subscription(payload: CreatePayPalSubscriptionRequest) -> dict[str, object]:
+    from routers.payment_accounts import resolve_payment_processor
+    from routers.paypal_connect import _account_has_keys, resolve_paypal_account_for_checkout
+
+    if resolve_payment_processor(None, payload.campaign_id) != "paypal":
+        raise HTTPException(status_code=400, detail="PayPal processor is not enabled for this campaign")
+    account = resolve_paypal_account_for_checkout(payload.campaign_id, payload.checkout_view)
+    if not _account_has_keys(account):
+        raise HTTPException(status_code=400, detail="Attach PayPal API keys for monthly billing")
+
+    display_currency = payload.currency.lower()
+    _, total_display = _resolve_total(payload.amount, display_currency, payload.cover_fees)
+    frontend_url = resolve_frontend_url()
+    return_url = payload.return_url or f"{frontend_url}/?donation=success&provider=paypal"
+    cancel_url = payload.cancel_url or f"{frontend_url}/?donation=cancelled&provider=paypal"
+
+    try:
+        plan_id = (payload.plan_id or "").strip()
+        plan_meta: dict[str, object] = {}
+        if not plan_id:
+            plan_meta = ensure_paypal_plan(
+                total_display=total_display,
+                display_currency=display_currency,
+                client_id=str(account.get("client_id") or ""),
+                client_secret=str(account.get("client_secret") or ""),
+            )
+            plan_id = str(plan_meta["plan_id"])
+        created = create_paypal_subscription(
+            plan_id=plan_id,
+            return_url=return_url,
+            cancel_url=cancel_url,
+            custom_id=json.dumps(_metadata_payload(payload, payload.amount))[:127],
+            subscriber={
+                "name": {
+                    "given_name": payload.donor.first_name,
+                    "surname": payload.donor.last_name,
+                },
+                "email_address": payload.donor.email,
+            },
+            client_id=str(account.get("client_id") or ""),
+            client_secret=str(account.get("client_secret") or ""),
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return {
+        **created,
+        **plan_meta,
+        "plan_id": plan_id,
+        "frequency": "monthly",
+        "base_amount": payload.amount,
+        "total_amount": total_display,
+        "currency": payload.currency.upper(),
+    }
+
+
+@router.post("/activate-subscription")
+def paypal_activate_subscription(payload: ActivatePayPalSubscriptionRequest) -> dict[str, object]:
+    from routers.paypal_connect import _account_has_keys, resolve_paypal_account_for_checkout
+
+    account = resolve_paypal_account_for_checkout(payload.campaign_id, payload.checkout_view)
+    if not _account_has_keys(account):
+        raise HTTPException(status_code=400, detail="Attach PayPal API keys for monthly billing")
+    try:
+        result = get_paypal_subscription(
+            payload.subscription_id,
+            client_id=str(account.get("client_id") or ""),
+            client_secret=str(account.get("client_secret") or ""),
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    status_value = str(result.get("status") or "").upper()
+    success_states = {"ACTIVE", "APPROVED"}
+    pending_states = {"APPROVAL_PENDING", "SUSPENDED"}
+    if status_value not in success_states and status_value not in pending_states:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Subscription not active (status={status_value or 'unknown'})",
+        )
+
+    recorded = False
+    if status_value in success_states:
+        display_currency = payload.currency.lower()
+        base_amount, total_display = _resolve_total(payload.amount, display_currency, payload.cover_fees)
+        record_payload = CompletePayPalRedirectRequest(
+            payment_ref=payload.payment_ref or payload.subscription_id[:32].ljust(8, "0"),
+            amount=payload.amount,
+            currency=payload.currency,
+            frequency="monthly",
+            cover_fees=payload.cover_fees,
+            dedicate=payload.dedicate,
+            honoree_name=payload.honoree_name,
+            comment=payload.comment,
+            campaign_id=payload.campaign_id,
+            checkout_view=payload.checkout_view,
+            donor=payload.donor,
+            utm=payload.utm,
+            device=payload.device,
+            subscription_id=payload.subscription_id,
+        )
+        saved = _record_paypal_donation(
+            order_id=f"paypal-sub:{payload.subscription_id}",
+            payload=record_payload,
+            base_amount=base_amount,
+            total_display=total_display,
+        )
+        recorded = bool(saved)
+        if saved:
+            try:
+                from emails import send_donation_alerts_for_row, send_donation_confirmation_for_row
+
+                send_donation_confirmation_for_row(saved)
+                send_donation_alerts_for_row(saved)
+            except Exception:
+                import logging
+
+                logging.getLogger(__name__).exception(
+                    "Post-donation emails failed for PayPal subscription %s",
+                    payload.subscription_id,
+                )
+
+    return {
+        **result,
+        "verified": status_value in success_states,
+        "pending_approval": status_value in pending_states,
+        "recorded": recorded,
+        "frequency": "monthly",
+    }
 
 @router.post("/create-order", response_model=CreatePayPalOrderResponse)
 def paypal_create_order(payload: CreatePayPalOrderRequest) -> CreatePayPalOrderResponse:
