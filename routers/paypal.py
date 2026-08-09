@@ -377,6 +377,59 @@ def paypal_client_token(
     }
 
 
+class RegisterApplePayDomainRequest(BaseModel):
+    domain: str = Field(min_length=1, max_length=253)
+    campaign_id: str | None = None
+    checkout_view: Literal["homepage", "popup"] = "homepage"
+
+
+@router.post("/register-apple-pay-domain")
+def paypal_register_apple_pay_domain(payload: RegisterApplePayDomainRequest) -> dict[str, object]:
+    """Register this hostname with PayPal so native Apple Pay merchant validation works."""
+    from paypal_client import register_paypal_apple_pay_domain
+    from routers.payment_accounts import resolve_payment_processor
+    from routers.paypal_connect import _account_has_keys, resolve_paypal_account_for_checkout
+
+    if resolve_payment_processor(None, payload.campaign_id) != "paypal":
+        raise HTTPException(
+            status_code=400,
+            detail="PayPal processor is not enabled for this campaign",
+        )
+    account = resolve_paypal_account_for_checkout(payload.campaign_id, payload.checkout_view)
+    if not _account_has_keys(account):
+        raise HTTPException(
+            status_code=400,
+            detail="Attach PayPal API keys before registering Apple Pay domains",
+        )
+    try:
+        return register_paypal_apple_pay_domain(
+            payload.domain,
+            client_id=str(account.get("client_id") or ""),
+            client_secret=str(account.get("client_secret") or ""),
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/apple-pay-quote")
+def paypal_apple_pay_quote(
+    amount: float = Query(..., gt=0),
+    currency: str = Query(..., min_length=3, max_length=3),
+    cover_fees: bool = Query(False),
+) -> dict[str, object]:
+    """Return the PayPal charge currency/amount Apple Pay sheet must use (orders convert)."""
+    display_currency = currency.lower()
+    base_amount, total_display = _resolve_total(amount, display_currency, cover_fees)
+    charge_currency_code, charge_amount = convert_for_paypal(total_display, display_currency)
+    return {
+        "display_currency": display_currency.upper(),
+        "display_amount": float(total_display),
+        "charge_currency": charge_currency_code.upper(),
+        "charge_amount": float(charge_amount),
+        "base_amount": float(base_amount),
+    }
+
+
 @router.post("/prepare-redirect")
 def paypal_prepare_redirect(payload: PreparePayPalRedirectRequest) -> dict[str, str]:
     from currency import assert_meets_min_donation, resolve_min_donation_for_frequency

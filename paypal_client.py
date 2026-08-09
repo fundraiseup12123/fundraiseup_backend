@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import os
 import threading
@@ -825,3 +826,55 @@ def get_paypal_subscription(
         else None,
         "raw": body,
     }
+
+
+def register_paypal_apple_pay_domain(
+    domain: str,
+    *,
+    client_id: str | None = None,
+    client_secret: str | None = None,
+) -> dict[str, object]:
+    """
+    Register a web domain for Apple Pay with PayPal (wallet-domains API).
+    Required before native ApplePaySession merchant validation succeeds.
+    """
+    host = (domain or "").strip().lower().split(":")[0].strip(".")
+    if not host or host in {"localhost", "127.0.0.1"}:
+        raise RuntimeError("Apple Pay domain registration requires a public HTTPS hostname")
+
+    token = _paypal_access_token(client_id=client_id, client_secret=client_secret)
+    api_base = paypal_api_base_for(client_id, client_secret)
+    try:
+        response = _http.post(
+            f"{api_base}/v1/customer/wallet-domains",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+            json={
+                "provider_type": "APPLE_PAY",
+                "domain": {"name": host},
+            },
+        )
+    except httpx.HTTPError as exc:
+        raise RuntimeError("Unable to reach PayPal to register Apple Pay domain") from exc
+
+    # Already registered is success for our purposes.
+    if response.status_code in {200, 201, 204}:
+        return {"domain": host, "registered": True, "created": True}
+    if response.status_code in {409, 422}:
+        detail = ""
+        try:
+            detail = json.dumps(response.json())
+        except Exception:
+            detail = response.text or ""
+        lowered = detail.lower()
+        if any(
+            phrase in lowered
+            for phrase in ("already", "exist", "duplicate", "registered", "conflict")
+        ):
+            return {"domain": host, "registered": True, "created": False}
+    if response.status_code >= 400:
+        raise RuntimeError(_paypal_error_detail(response, "Unable to register Apple Pay domain"))
+    return {"domain": host, "registered": True, "created": False}
