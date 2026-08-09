@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import os
@@ -828,11 +829,56 @@ def get_paypal_subscription(
     }
 
 
+def _b64url_json(payload: dict[str, object]) -> str:
+    raw = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _paypal_auth_assertion(client_id: str, payer_id: str) -> str:
+    """PayPal-Auth-Assertion for wallet-domains (iss = REST client id, payer_id = merchant)."""
+    header = _b64url_json({"alg": "none"})
+    body = _b64url_json({"iss": client_id, "payer_id": payer_id})
+    return f"{header}.{body}."
+
+
+def _resolve_paypal_payer_id(
+    *,
+    client_id: str | None,
+    client_secret: str | None,
+    preferred_merchant_id: str | None = None,
+) -> str | None:
+    preferred = (preferred_merchant_id or "").strip()
+    if preferred and not preferred.startswith("keys:") and "@" not in preferred:
+        return preferred
+
+    cid = (client_id or "").strip()
+    secret = (client_secret or "").strip()
+    if not cid or not secret:
+        return None
+
+    token = _paypal_access_token(client_id=cid, client_secret=secret)
+    api_base = paypal_api_base_for(cid, secret)
+    try:
+        response = _http.get(
+            f"{api_base}/v1/identity/oauth2/userinfo?schema=paypalv1.1",
+            headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+        )
+        if response.status_code < 400:
+            body = response.json()
+            payer = str(body.get("payer_id") or body.get("user_id") or "").strip()
+            if payer:
+                return payer
+    except Exception:
+        logger.debug("PayPal payer_id lookup skipped", exc_info=True)
+    return None
+
+
 def register_paypal_apple_pay_domain(
     domain: str,
     *,
     client_id: str | None = None,
     client_secret: str | None = None,
+    merchant_id: str | None = None,
 ) -> dict[str, object]:
     """
     Register a web domain for Apple Pay with PayPal (wallet-domains API).
@@ -842,16 +888,28 @@ def register_paypal_apple_pay_domain(
     if not host or host in {"localhost", "127.0.0.1"}:
         raise RuntimeError("Apple Pay domain registration requires a public HTTPS hostname")
 
-    token = _paypal_access_token(client_id=client_id, client_secret=client_secret)
-    api_base = paypal_api_base_for(client_id, client_secret)
+    cid = (client_id or "").strip() or paypal_client_id()
+    secret = (client_secret or "").strip() or paypal_client_secret()
+    token = _paypal_access_token(client_id=cid, client_secret=secret)
+    api_base = paypal_api_base_for(cid, secret)
+    payer_id = _resolve_paypal_payer_id(
+        client_id=cid,
+        client_secret=secret,
+        preferred_merchant_id=merchant_id,
+    )
+
+    headers: dict[str, str] = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+    if cid and payer_id:
+        headers["PayPal-Auth-Assertion"] = _paypal_auth_assertion(cid, payer_id)
+
     try:
         response = _http.post(
             f"{api_base}/v1/customer/wallet-domains",
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-            },
+            headers=headers,
             json={
                 "provider_type": "APPLE_PAY",
                 "domain": {"name": host},
@@ -862,7 +920,13 @@ def register_paypal_apple_pay_domain(
 
     # Already registered is success for our purposes.
     if response.status_code in {200, 201, 204}:
-        return {"domain": host, "registered": True, "created": True}
+        return {
+            "domain": host,
+            "registered": True,
+            "created": True,
+            "client_id_hint": cid[:12] if cid else "",
+            "payer_id": payer_id or "",
+        }
     if response.status_code in {409, 422}:
         detail = ""
         try:
@@ -874,7 +938,19 @@ def register_paypal_apple_pay_domain(
             phrase in lowered
             for phrase in ("already", "exist", "duplicate", "registered", "conflict")
         ):
-            return {"domain": host, "registered": True, "created": False}
+            return {
+                "domain": host,
+                "registered": True,
+                "created": False,
+                "client_id_hint": cid[:12] if cid else "",
+                "payer_id": payer_id or "",
+            }
     if response.status_code >= 400:
         raise RuntimeError(_paypal_error_detail(response, "Unable to register Apple Pay domain"))
-    return {"domain": host, "registered": True, "created": False}
+    return {
+        "domain": host,
+        "registered": True,
+        "created": False,
+        "client_id_hint": cid[:12] if cid else "",
+        "payer_id": payer_id or "",
+    }

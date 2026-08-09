@@ -402,11 +402,33 @@ def paypal_register_apple_pay_domain(payload: RegisterApplePayDomainRequest) -> 
             detail="Attach PayPal API keys before registering Apple Pay domains",
         )
     try:
-        return register_paypal_apple_pay_domain(
+        result = register_paypal_apple_pay_domain(
             payload.domain,
             client_id=str(account.get("client_id") or ""),
             client_secret=str(account.get("client_secret") or ""),
+            merchant_id=str(account.get("paypal_merchant_id") or ""),
         )
+        # Also register apex platform host when on a campaign subdomain
+        # (e.g. child.fundraiseup.us.com → fundraiseup.us.com).
+        host = str(result.get("domain") or payload.domain).lower()
+        parts = [p for p in host.split(".") if p]
+        parent = ""
+        if host.endswith(".us.com") and len(parts) >= 4:
+            parent = ".".join(parts[-3:])
+        elif len(parts) >= 3:
+            parent = ".".join(parts[-2:])
+        if parent and parent != host:
+            try:
+                register_paypal_apple_pay_domain(
+                    parent,
+                    client_id=str(account.get("client_id") or ""),
+                    client_secret=str(account.get("client_secret") or ""),
+                    merchant_id=str(account.get("paypal_merchant_id") or ""),
+                )
+                result["parent_domain"] = parent
+            except RuntimeError:
+                pass
+        return result
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
