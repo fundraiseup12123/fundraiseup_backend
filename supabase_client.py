@@ -79,6 +79,7 @@ def insert_donation(row: dict[str, Any]) -> dict[str, Any] | None:
         "crypto_currency",
         "stripe_customer_id",
         "stripe_subscription_id",
+        "payment_processor",
     )
 
     for _ in range(len(optional_columns) + 1):

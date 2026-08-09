@@ -302,6 +302,7 @@ def _record_paypal_donation(
     payload: CreatePayPalOrderRequest | CompletePayPalRedirectRequest | CapturePayPalOrderRequest,
     base_amount: float,
     total_display: float,
+    status: str = "succeeded",
 ) -> dict[str, object] | None:
     display_currency = payload.currency.upper()
     cover_fees = payload.cover_fees
@@ -314,9 +315,16 @@ def _record_paypal_donation(
 
     campaign_id = payload.campaign_id
     from site_constants import ROOT_CAMPAIGN_ID
+    from routers.payment_accounts import resolve_payment_processor
 
     if not campaign_id:
         campaign_id = ROOT_CAMPAIGN_ID
+
+    processor = resolve_payment_processor(None, campaign_id)
+    if processor not in {"paypal", "authorizenet_paypal"}:
+        processor = "paypal"
+
+    donation_status = status if status in {"succeeded", "failed", "pending"} else "succeeded"
 
     row = {
         "stripe_payment_intent_id": order_id,
@@ -328,15 +336,16 @@ def _record_paypal_donation(
         "currency": display_currency,
         "frequency": payload.frequency,
         "payment_method": "paypal",
+        "payment_processor": processor,
         "honoree_name": payload.honoree_name or None,
         "comment": payload.comment or None,
         "organization_id": _resolve_paypal_organization_id(campaign_id),
         "campaign_id": campaign_id,
-        "status": "succeeded",
+        "status": donation_status,
         "fee_covered": cover_fees,
         "platform_fee": 0,
-        "processing_fee": processing_fee,
-        "payout_amount": payout_amount,
+        "processing_fee": processing_fee if donation_status == "succeeded" else 0,
+        "payout_amount": payout_amount if donation_status == "succeeded" else 0,
     }
     device = {}
     if payload.device:
@@ -761,7 +770,7 @@ def paypal_complete_redirect(payload: CompletePayPalRedirectRequest) -> CaptureP
             )
         except RuntimeError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        if str(capture.get("status") or "") != "COMPLETED":
+        if str(capture.get("status") or "").upper() != "COMPLETED":
             raise HTTPException(status_code=400, detail="PayPal payment was not completed")
         order_id = f"paypal:{order_token}"
     else:
@@ -1026,9 +1035,31 @@ def paypal_capture_order(payload: CapturePayPalOrderRequest) -> CapturePayPalOrd
             client_secret=str(account.get("client_secret") or "") if keys_ready and account else None,
         )
     except RuntimeError as exc:
+        try:
+            fail_id = f"paypal:failed:{payload.order_id}"
+            base_amount, total_display = _resolve_total(
+                payload.amount, payload.currency.lower(), payload.cover_fees
+            )
+            comment = (payload.comment or "").strip()
+            fail_note = str(exc)[:400]
+            # Temporarily stash failure note on payload comment for the row
+            original_comment = payload.comment
+            payload.comment = f"{comment + ' · ' if comment else ''}Payment failed: {fail_note}"[:500]
+            _record_paypal_donation(
+                order_id=fail_id,
+                payload=payload,
+                base_amount=base_amount,
+                total_display=total_display,
+                status="failed",
+            )
+            payload.comment = original_comment
+        except Exception:
+            import logging
+
+            logging.getLogger(__name__).exception("Unable to record failed PayPal donation")
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    status = capture.get("status", "")
+    status = str(capture.get("status") or "").upper()
     if status != "COMPLETED":
         raise HTTPException(status_code=400, detail="PayPal payment was not completed")
 

@@ -56,6 +56,22 @@ def _messages_ok(payload: dict[str, Any]) -> bool:
 
 
 def _first_error(payload: dict[str, Any]) -> str:
+    txn = payload.get("transactionResponse") if isinstance(payload, dict) else None
+    if isinstance(txn, dict):
+        response_code = str(txn.get("responseCode") or "")
+        errors = txn.get("errors")
+        if isinstance(errors, list) and errors:
+            text = str(errors[0].get("errorText") or errors[0].get("errorCode") or "").strip()
+            if text:
+                return text
+        if isinstance(errors, dict):
+            text = str(errors.get("errorText") or errors.get("errorCode") or "").strip()
+            if text:
+                return text
+        if response_code == "2":
+            return "Card was declined"
+        if response_code == "3":
+            return "Transaction error"
     messages = payload.get("messages") if isinstance(payload, dict) else None
     if isinstance(messages, dict):
         items = messages.get("message")
@@ -67,13 +83,6 @@ def _first_error(payload: dict[str, Any]) -> str:
             text = str(items.get("text") or items.get("code") or "").strip()
             if text:
                 return text
-    txn = payload.get("transactionResponse") if isinstance(payload, dict) else None
-    if isinstance(txn, dict):
-        errors = txn.get("errors")
-        if isinstance(errors, list) and errors:
-            return str(errors[0].get("errorText") or errors[0].get("errorCode") or "Transaction failed")
-        if isinstance(errors, dict):
-            return str(errors.get("errorText") or errors.get("errorCode") or "Transaction failed")
     return "Authorize.net request failed"
 
 
@@ -166,8 +175,9 @@ def create_transaction_opaque(
     }
     data = _post(body, env=env)
     txn = data.get("transactionResponse") if isinstance(data.get("transactionResponse"), dict) else {}
+    # Approved (1) only — held-for-review (4) is not a completed gift.
     response_code = str(txn.get("responseCode") or "")
-    if not _messages_ok(data) or response_code not in {"1", "4"}:
+    if not _messages_ok(data) or response_code != "1":
         raise RuntimeError(_first_error(data))
     return {
         "transaction_id": str(txn.get("transId") or ""),
@@ -271,7 +281,7 @@ def complete_paypal_express(
     data = _post(body, env=env)
     txn = data.get("transactionResponse") if isinstance(data.get("transactionResponse"), dict) else {}
     response_code = str(txn.get("responseCode") or "")
-    if not _messages_ok(data) or response_code not in {"1", "4"}:
+    if not _messages_ok(data) or response_code != "1":
         raise RuntimeError(_first_error(data))
     return {
         "transaction_id": str(txn.get("transId") or ""),

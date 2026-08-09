@@ -548,12 +548,37 @@ def capture_paypal_order(
     if response.status_code >= 400:
         detail = response.text
         try:
-            detail = response.json().get("message", detail)
+            body = response.json()
+            detail = body.get("message", detail)
+            details = body.get("details")
+            if isinstance(details, list) and details:
+                issue = str(details[0].get("issue") or details[0].get("description") or "").strip()
+                if issue:
+                    detail = issue if not detail else f"{detail}: {issue}"
         except Exception:
             pass
         raise RuntimeError(detail or "Unable to capture PayPal payment")
 
-    return response.json()
+    body = response.json()
+    order_status = str(body.get("status") or "").upper()
+    capture_statuses: list[str] = []
+    for unit in body.get("purchase_units") or []:
+        if not isinstance(unit, dict):
+            continue
+        payments = unit.get("payments") if isinstance(unit.get("payments"), dict) else {}
+        for cap in payments.get("captures") or []:
+            if isinstance(cap, dict) and cap.get("status"):
+                capture_statuses.append(str(cap.get("status")).upper())
+
+    # Prefer nested capture status — order can look COMPLETED while a capture was DECLINED.
+    if capture_statuses:
+        if not any(status == "COMPLETED" for status in capture_statuses):
+            bad = ", ".join(sorted(set(capture_statuses)))
+            raise RuntimeError(f"PayPal capture not completed (status={bad})")
+    elif order_status != "COMPLETED":
+        raise RuntimeError(f"PayPal payment was not completed (status={order_status or 'unknown'})")
+
+    return body
 
 
 _product_lock = threading.Lock()

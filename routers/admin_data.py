@@ -31,6 +31,7 @@ def admin_list_donations(
     status: str | None = Query(None),
     frequency: str | None = Query(None),
     payment_method: str | None = Query(None),
+    payment_processor: str | None = Query(None),
     date_preset: str | None = Query(None),
     date_from: str | None = Query(None),
     date_to: str | None = Query(None),
@@ -47,13 +48,17 @@ def admin_list_donations(
     sort_desc = sort == "desc"
     select_cols = (
         "id,first_name,last_name,email,amount,currency,frequency,status,payment_method,"
-        "honoree_name,created_at,campaign_id,platform_fee,processing_fee,payout_amount,"
+        "payment_processor,honoree_name,created_at,campaign_id,platform_fee,processing_fee,payout_amount,"
         "base_amount,fee_covered,organization_id,crypto_amount,crypto_currency"
     )
     allowed_methods = {"card", "paypal", "apple_pay", "google_pay", "nowpayments"}
     method_filter = (payment_method or "").strip().lower()
     if method_filter not in allowed_methods:
         method_filter = ""
+    allowed_processors = {"stripe", "paypal", "authorizenet_paypal", "nowpayments"}
+    processor_filter = (payment_processor or "").strip().lower()
+    if processor_filter not in allowed_processors:
+        processor_filter = ""
 
     # Amount sort loads the filtered set so FX conversion ranks correctly across currencies.
     fetch_limit = limit + 1
@@ -75,6 +80,8 @@ def admin_list_donations(
         params["or"] = "(payment_method.eq.card,payment_method.is.null)"
     elif method_filter:
         params["payment_method"] = f"eq.{method_filter}"
+    if processor_filter:
+        params["payment_processor"] = f"eq.{processor_filter}"
     resolved_from: str | None = None
     resolved_to: str | None = None
     if date_preset and date_preset != "all":
@@ -118,6 +125,8 @@ def admin_list_donations(
                 orphan_params["or"] = "(payment_method.eq.card,payment_method.is.null)"
             elif method_filter:
                 orphan_params["payment_method"] = f"eq.{method_filter}"
+            if processor_filter:
+                orphan_params["payment_processor"] = f"eq.{processor_filter}"
             if resolved_from and resolved_to:
                 orphan_params["and"] = f"(created_at.gte.{resolved_from},created_at.lte.{resolved_to})"
             elif resolved_from:

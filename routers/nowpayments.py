@@ -300,6 +300,7 @@ def _record_nowpayments_donation(
         "currency": display_currency,
         "frequency": payload.frequency,
         "payment_method": "nowpayments",
+        "payment_processor": "nowpayments",
         "honoree_name": payload.honoree_name or None,
         "comment": payload.comment or None,
         "organization_id": _resolve_organization_id(campaign_id),

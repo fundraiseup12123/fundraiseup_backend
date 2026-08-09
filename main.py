@@ -936,6 +936,7 @@ def _donation_row_from_intent(
         "currency": display_currency,
         "frequency": frequency,
         "payment_method": meta.get("payment_method"),
+        "payment_processor": "stripe",
         "honoree_name": meta.get("honoree_name") or None,
         "comment": meta.get("comment") or None,
         "organization_id": meta.get("organization_id"),
@@ -1049,6 +1050,7 @@ async def stripe_webhook(request: Request) -> dict[str, str]:
             "currency": display_currency,
             "frequency": meta.get("frequency", "once"),
             "payment_method": meta.get("payment_method"),
+            "payment_processor": "stripe",
             "honoree_name": meta.get("honoree_name"),
             "comment": meta.get("comment"),
             "status": "succeeded",
@@ -1066,9 +1068,87 @@ async def stripe_webhook(request: Request) -> dict[str, str]:
         if utm:
             row["utm"] = utm
         row["device"] = _device_from_meta(meta)
-        saved = insert_donation(_ensure_donation_org({k: v for k, v in row.items() if v is not None}))
+        existing = get_donation_by_payment_intent(pi["id"])
+        if existing and str(existing.get("status") or "").lower() == "failed":
+            from db import rest_patch
+
+            rest_patch(
+                "donations",
+                {
+                    "status": "succeeded",
+                    "processing_fee": processing_fee,
+                    "payout_amount": payout_amount,
+                },
+                match={"id": existing["id"]},
+            )
+            saved = get_donation_by_payment_intent(pi["id"])
+        else:
+            saved = insert_donation(_ensure_donation_org({k: v for k, v in row.items() if v is not None}))
         if saved:
             _send_donation_emails_safe(saved)
+
+    if event["type"] == "payment_intent.payment_failed":
+        pi = event["data"]["object"]
+        meta = pi.get("metadata", {}) or {}
+        display_currency = str(meta.get("display_currency") or pi.get("currency") or "usd").upper()
+        try:
+            total_display = float(meta.get("total_display", (pi.get("amount") or 0) / 100))
+        except (TypeError, ValueError):
+            total_display = float((pi.get("amount") or 0) / 100)
+        try:
+            base_amount = float(meta.get("base_amount", total_display))
+        except (TypeError, ValueError):
+            base_amount = total_display
+        last_error = pi.get("last_payment_error") if isinstance(pi.get("last_payment_error"), dict) else {}
+        fail_msg = str(
+            last_error.get("message")
+            or last_error.get("code")
+            or meta.get("failure_message")
+            or "Card payment failed"
+        )[:400]
+        existing = get_donation_by_payment_intent(pi["id"])
+        if existing:
+            from db import rest_patch
+
+            if str(existing.get("status") or "").lower() != "succeeded":
+                comment = str(existing.get("comment") or "").strip()
+                updates = {
+                    "status": "failed",
+                    "payout_amount": 0,
+                    "comment": f"{comment + ' · ' if comment else ''}Payment failed: {fail_msg}"[:500],
+                }
+                rest_patch("donations", updates, match={"id": existing["id"]})
+        else:
+            row = {
+                "stripe_payment_intent_id": pi["id"],
+                "first_name": meta.get("first_name", "Anonymous"),
+                "last_name": meta.get("last_name", ""),
+                "email": meta.get("email"),
+                "amount": total_display,
+                "base_amount": base_amount,
+                "currency": display_currency,
+                "frequency": meta.get("frequency", "once"),
+                "payment_method": meta.get("payment_method") or "card",
+                "payment_processor": "stripe",
+                "honoree_name": meta.get("honoree_name"),
+                "comment": f"Payment failed: {fail_msg}",
+                "status": "failed",
+                "organization_id": meta.get("organization_id"),
+                "campaign_id": meta.get("campaign_id"),
+                "stripe_account_id": pi.get("on_behalf_of")
+                or (pi.get("transfer_data") or {}).get("destination"),
+                "stripe_customer_id": pi.get("customer") if isinstance(pi.get("customer"), str) else None,
+                "stripe_subscription_id": meta.get("subscription_id"),
+                "fee_covered": str(meta.get("cover_fees", "false")).lower() == "true",
+                "platform_fee": 0,
+                "processing_fee": 0,
+                "payout_amount": 0,
+            }
+            utm = _utm_from_meta(meta)
+            if utm:
+                row["utm"] = utm
+            row["device"] = _device_from_meta(meta)
+            insert_donation(_ensure_donation_org({k: v for k, v in row.items() if v is not None}))
 
     if event["type"] == "account.updated":
         from db import rest_patch
@@ -1312,6 +1392,8 @@ def _ensure_donation_org(row: dict[str, Any]) -> dict[str, Any]:
 
 def _send_donation_emails_safe(saved: dict[str, Any]) -> None:
     """Email failures must never mark a successful payment as unrecorded."""
+    if str(saved.get("status") or "").lower() != "succeeded":
+        return
     try:
         from emails import send_donation_alerts_for_row, send_donation_confirmation_for_row
 

@@ -390,6 +390,7 @@ def _record_anet_donation(
     comment: str | None,
     utm: AnetUtm | None,
     device: AnetDevice | None,
+    status: str = "succeeded",
 ) -> dict[str, Any] | None:
     base_amount, total_display = _resolve_total(amount, currency, cover_fees)
     if cover_fees:
@@ -402,6 +403,7 @@ def _record_anet_donation(
     from site_constants import ROOT_CAMPAIGN_ID
 
     cid = campaign_id or ROOT_CAMPAIGN_ID
+    donation_status = status if status in {"succeeded", "failed", "pending"} else "succeeded"
     row: dict[str, Any] = {
         "stripe_payment_intent_id": order_id,
         "first_name": donor.first_name,
@@ -412,15 +414,16 @@ def _record_anet_donation(
         "currency": currency.upper(),
         "frequency": frequency,
         "payment_method": payment_method,
+        "payment_processor": "authorizenet_paypal",
         "honoree_name": honoree_name or None,
         "comment": comment or None,
         "organization_id": _resolve_org_id(cid),
         "campaign_id": cid,
-        "status": "succeeded",
+        "status": donation_status,
         "fee_covered": cover_fees,
         "platform_fee": 0,
         "processing_fee": processing_fee,
-        "payout_amount": payout_amount,
+        "payout_amount": payout_amount if donation_status == "succeeded" else 0,
     }
     device_data: dict[str, Any] = {}
     if device:
@@ -462,6 +465,8 @@ def _record_anet_donation(
 def _send_emails(saved: dict[str, Any] | None) -> None:
     if not saved:
         return
+    if str(saved.get("status") or "").lower() != "succeeded":
+        return
     try:
         from emails import send_donation_alerts_for_row, send_donation_confirmation_for_row
 
@@ -469,6 +474,38 @@ def _send_emails(saved: dict[str, Any] | None) -> None:
         send_donation_alerts_for_row(saved)
     except Exception:
         logger.exception("Post-donation emails failed for Authorize.net donation %s", saved.get("id"))
+
+
+def _record_failed_anet_charge(
+    payload: AnetChargeRequest,
+    *,
+    detail: str,
+    payment_method: str,
+    frequency: str,
+) -> None:
+    """Persist declined/failed attempts so admin lists show Failed instead of nothing/Succeeded."""
+    try:
+        fail_id = f"authorizenet:failed:{uuid.uuid4().hex[:16]}"
+        comment = (payload.comment or "").strip()
+        fail_note = (detail or "Card was declined")[:400]
+        _record_anet_donation(
+            order_id=fail_id,
+            payment_method=payment_method,
+            donor=payload.donor,
+            amount=payload.amount,
+            currency=payload.currency,
+            frequency=frequency,
+            cover_fees=payload.cover_fees,
+            campaign_id=payload.campaign_id,
+            checkout_view=payload.checkout_view,
+            honoree_name=payload.honoree_name,
+            comment=f"{comment + ' · ' if comment else ''}Payment failed: {fail_note}"[:500],
+            utm=payload.utm,
+            device=payload.device,
+            status="failed",
+        )
+    except Exception:
+        logger.exception("Unable to record failed Authorize.net donation")
 
 
 @router.get("/checkout-config")
@@ -521,6 +558,12 @@ def authorizenet_charge(payload: AnetChargeRequest) -> dict[str, Any]:
             env=creds.get("env") or "production",
         )
     except RuntimeError as exc:
+        _record_failed_anet_charge(
+            payload,
+            detail=str(exc),
+            payment_method=payload.payment_method,
+            frequency="once",
+        )
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     txn_id = result.get("transaction_id") or invoice
@@ -539,6 +582,7 @@ def authorizenet_charge(payload: AnetChargeRequest) -> dict[str, Any]:
         comment=payload.comment,
         utm=payload.utm,
         device=payload.device,
+        status="succeeded",
     )
     _send_emails(saved)
     return {
@@ -573,6 +617,12 @@ def authorizenet_subscribe(payload: AnetSubscribeRequest) -> dict[str, Any]:
             env=creds.get("env") or "production",
         )
     except RuntimeError as exc:
+        _record_failed_anet_charge(
+            payload,
+            detail=str(exc),
+            payment_method=payload.payment_method,
+            frequency="monthly",
+        )
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     sub_id = result["subscription_id"]
@@ -591,6 +641,7 @@ def authorizenet_subscribe(payload: AnetSubscribeRequest) -> dict[str, Any]:
         comment=payload.comment,
         utm=payload.utm,
         device=payload.device,
+        status="succeeded",
     )
     _send_emails(saved)
     return {

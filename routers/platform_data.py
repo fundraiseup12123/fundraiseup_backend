@@ -18,7 +18,7 @@ _GA_PROPERTY_CAP = 15
 _DEFAULT_PLATFORM_TZ = "America/Los_Angeles"
 _DONATION_SELECT = (
     "id,first_name,last_name,email,amount,currency,frequency,status,payment_method,"
-    "honoree_name,created_at,campaign_id,platform_fee,processing_fee,payout_amount,"
+    "payment_processor,honoree_name,created_at,campaign_id,platform_fee,processing_fee,payout_amount,"
     "base_amount,fee_covered,organization_id,crypto_amount,crypto_currency"
 )
 _INSIGHTS_SELECT = (
@@ -101,6 +101,7 @@ def platform_list_donations(
     status: str | None = Query(None),
     frequency: str | None = Query(None),
     payment_method: str | None = Query(None),
+    payment_processor: str | None = Query(None),
     date_preset: str | None = Query(None),
     date_from: str | None = Query(None),
     date_to: str | None = Query(None),
@@ -119,6 +120,11 @@ def platform_list_donations(
     method_filter = (payment_method or "").strip().lower()
     if method_filter not in allowed_methods:
         method_filter = ""
+
+    allowed_processors = {"stripe", "paypal", "authorizenet_paypal", "nowpayments"}
+    processor_filter = (payment_processor or "").strip().lower()
+    if processor_filter not in allowed_processors:
+        processor_filter = ""
 
     fetch_limit = min(10000, max(limit + 1, 5000))
     params: dict[str, str] = {
@@ -139,6 +145,8 @@ def platform_list_donations(
         params["or"] = "(payment_method.eq.card,payment_method.is.null)"
     elif method_filter:
         params["payment_method"] = f"eq.{method_filter}"
+    if processor_filter:
+        params["payment_processor"] = f"eq.{processor_filter}"
 
     resolved_from: str | None = None
     resolved_to: str | None = None
@@ -178,6 +186,12 @@ def platform_list_donations(
         elif method_filter:
             rows = [
                 r for r in rows if str(r.get("payment_method") or "").lower() == method_filter
+            ]
+        if processor_filter:
+            rows = [
+                r
+                for r in rows
+                if str(r.get("payment_processor") or "").lower() == processor_filter
             ]
 
     rows.sort(key=lambda r: str(r.get("created_at") or ""), reverse=True)
