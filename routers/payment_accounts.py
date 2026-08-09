@@ -89,6 +89,14 @@ def _default_view_entry() -> dict[str, Any]:
         "nowpayments_ipn_secret": None,
         "nowpayments_api_key_hint": None,
         "nowpayments_connection_status": None,
+        "authorizenet_api_login_id": None,
+        "authorizenet_transaction_key": None,
+        "authorizenet_signature_key": None,
+        "authorizenet_public_client_key": None,
+        "authorizenet_api_login_id_hint": None,
+        "authorizenet_public_client_key_hint": None,
+        "authorizenet_env": None,
+        "authorizenet_connection_status": None,
     }
 
 
@@ -342,6 +350,8 @@ def _accounts_response(accounts: dict[str, Any]) -> dict[str, Any]:
         entry.pop("nowpayments_api_key", None)
         entry.pop("nowpayments_ipn_secret", None)
         entry.pop("paypal_client_secret", None)
+        entry.pop("authorizenet_transaction_key", None)
+        entry.pop("authorizenet_signature_key", None)
         views.append({"view": view, **entry})
     return {
         "views": views,
@@ -518,7 +528,12 @@ def resolve_root_paypal_account(checkout_view: str | None) -> dict[str, Any] | N
 
 
 def normalize_payment_account_sources(raw: object) -> dict[str, str]:
-    defaults = {"stripe": "organization", "paypal": "organization", "nowpayments": "organization"}
+    defaults = {
+        "stripe": "organization",
+        "paypal": "organization",
+        "nowpayments": "organization",
+        "authorizenet": "organization",
+    }
     data = raw
     if isinstance(data, str):
         try:
@@ -536,9 +551,9 @@ def normalize_payment_account_sources(raw: object) -> dict[str, str]:
 
 
 def normalize_payment_processor(raw: object) -> str:
-    """Primary checkout processor: stripe (default) or paypal (all methods via PayPal keys)."""
+    """Primary checkout processor: stripe, paypal, or authorizenet_paypal hybrid."""
     value = str(raw or "").strip().lower()
-    if value in {"stripe", "paypal"}:
+    if value in {"stripe", "paypal", "authorizenet_paypal"}:
         return value
     return "stripe"
 
@@ -553,6 +568,43 @@ def _platform_homepage_has_paypal_keys(accounts: dict[str, Any] | None = None) -
     )
 
 
+def _platform_homepage_has_authorizenet_keys(accounts: dict[str, Any] | None = None) -> bool:
+    data = accounts if accounts is not None else _load_accounts_raw()
+    entry = data.get("homepage") if isinstance(data.get("homepage"), dict) else {}
+    return (
+        bool(str(entry.get("authorizenet_api_login_id") or "").strip())
+        and bool(str(entry.get("authorizenet_transaction_key") or "").strip())
+        and bool(str(entry.get("authorizenet_public_client_key") or "").strip())
+    )
+
+
+def get_platform_authorizenet_credentials(
+    view: PaymentView = "homepage",
+    accounts: dict[str, Any] | None = None,
+) -> dict[str, str] | None:
+    data = accounts if accounts is not None else _load_accounts_raw()
+    entry = data.get(view) if isinstance(data.get(view), dict) else {}
+    login = str(entry.get("authorizenet_api_login_id") or "").strip()
+    txn_key = str(entry.get("authorizenet_transaction_key") or "").strip()
+    public_key = str(entry.get("authorizenet_public_client_key") or "").strip()
+    if not (login and txn_key and public_key):
+        return None
+    env = str(entry.get("authorizenet_env") or "production").strip().lower()
+    if env not in {"sandbox", "production"}:
+        env = "production"
+    return {
+        "api_login_id": login,
+        "transaction_key": txn_key,
+        "signature_key": str(entry.get("authorizenet_signature_key") or "").strip(),
+        "public_client_key": public_key,
+        "env": env,
+        "api_login_id_hint": str(entry.get("authorizenet_api_login_id_hint") or "").strip(),
+        "public_client_key_hint": str(entry.get("authorizenet_public_client_key_hint") or "").strip(),
+        "connection_status": str(entry.get("authorizenet_connection_status") or "active"),
+        "keys_source": f"platform:{view}",
+    }
+
+
 def get_platform_default_payment_processor(accounts: dict[str, Any] | None = None) -> str:
     data = accounts if accounts is not None else _load_accounts_raw()
     return normalize_payment_processor(data.get("default_payment_processor"))
@@ -562,7 +614,12 @@ def resolve_payment_account_sources(
     org_id: str | None,
     campaign_id: str | None,
 ) -> dict[str, str]:
-    defaults = {"stripe": "organization", "paypal": "organization", "nowpayments": "organization"}
+    defaults = {
+        "stripe": "organization",
+        "paypal": "organization",
+        "nowpayments": "organization",
+        "authorizenet": "organization",
+    }
     resolved_org_id = org_id
     if campaign_id:
         campaign = rest_get_one(
@@ -588,7 +645,7 @@ def resolve_payment_processor(
     org_id: str | None,
     campaign_id: str | None,
 ) -> str:
-    """Campaign override if set; else platform-PayPal rule / org / platform default / stripe."""
+    """Campaign override if set; else platform inherit rules / org / platform default / stripe."""
     resolved_org_id = org_id
     if campaign_id:
         campaign = rest_get_one(
@@ -612,6 +669,15 @@ def resolve_payment_processor(
     ):
         return "paypal"
 
+    if (
+        platform_processor == "authorizenet_paypal"
+        and _platform_homepage_has_authorizenet_keys()
+        and _platform_homepage_has_paypal_keys()
+        and uses_platform_provider(resolved_org_id, "authorizenet", campaign_id)
+        and uses_platform_provider(resolved_org_id, "paypal", campaign_id)
+    ):
+        return "authorizenet_paypal"
+
     if resolved_org_id:
         org = rest_get_one(
             "organizations",
@@ -621,7 +687,11 @@ def resolve_payment_processor(
         if org_raw is not None and str(org_raw).strip() != "":
             return normalize_payment_processor(org_raw)
 
-    return platform_processor if platform_processor in {"stripe", "paypal"} else "stripe"
+    return (
+        platform_processor
+        if platform_processor in {"stripe", "paypal", "authorizenet_paypal"}
+        else "stripe"
+    )
 
 
 def uses_platform_provider(
@@ -680,6 +750,13 @@ def homepage_payment_summary() -> dict[str, Any]:
             "connected": bool(now_key or now_hint),
             "api_key_hint": now_hint,
             "connection_status": entry.get("nowpayments_connection_status"),
+        },
+        "authorizenet": {
+            "connected": _platform_homepage_has_authorizenet_keys(accounts),
+            "api_login_id_hint": entry.get("authorizenet_api_login_id_hint"),
+            "public_client_key_hint": entry.get("authorizenet_public_client_key_hint"),
+            "env": entry.get("authorizenet_env") or "production",
+            "connection_status": entry.get("authorizenet_connection_status"),
         },
     }
 
@@ -1065,9 +1142,11 @@ def disconnect_root_paypal(
         "paypal_client_secret": None,
         "paypal_client_id_hint": None,
     }
-    # Main gateway PayPal requires homepage keys — fall back to Stripe if removed.
-    if view == "homepage" and get_platform_default_payment_processor(accounts) == "paypal":
-        accounts["default_payment_processor"] = "stripe"
+    # Main gateway PayPal / hybrid requires homepage keys — fall back to Stripe if removed.
+    if view == "homepage":
+        processor = get_platform_default_payment_processor(accounts)
+        if processor in {"paypal", "authorizenet_paypal"}:
+            accounts["default_payment_processor"] = "stripe"
     _save_accounts(accounts)
     return {"removed": True}
 
@@ -1080,7 +1159,7 @@ class AttachRootPayPalKeysPayload(BaseModel):
 
 
 class MainGatewayPayload(BaseModel):
-    payment_processor: Literal["stripe", "paypal"]
+    payment_processor: Literal["stripe", "paypal", "authorizenet_paypal"]
 
 
 @router.post("/main-gateway")
@@ -1088,7 +1167,7 @@ def set_main_gateway(
     payload: MainGatewayPayload,
     user: Annotated[AuthUser, Depends(require_super_admin)],
 ) -> dict[str, Any]:
-    """Set platform main payment gateway (Stripe or PayPal keys for all methods)."""
+    """Set platform main payment gateway (Stripe, PayPal keys, or Authorize.net + PayPal hybrid)."""
     accounts = _load_accounts_raw()
     processor = normalize_payment_processor(payload.payment_processor)
     if processor == "paypal" and not _platform_homepage_has_paypal_keys(accounts):
@@ -1098,12 +1177,110 @@ def set_main_gateway(
                 "Attach PayPal API keys on the Homepage view before setting PayPal as the main gateway."
             ),
         )
+    if processor == "authorizenet_paypal":
+        if not _platform_homepage_has_authorizenet_keys(accounts):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Attach Authorize.net keys on the Homepage view before setting "
+                    "Authorize.net + PayPal as the main gateway."
+                ),
+            )
+        if not _platform_homepage_has_paypal_keys(accounts):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Attach PayPal API keys on the Homepage view (needed for Google Pay) "
+                    "before setting Authorize.net + PayPal as the main gateway."
+                ),
+            )
     accounts["default_payment_processor"] = processor
     _save_accounts(accounts)
     return {
         "default_payment_processor": processor,
         "paypal_keys_connected": _platform_homepage_has_paypal_keys(accounts),
+        "authorizenet_keys_connected": _platform_homepage_has_authorizenet_keys(accounts),
     }
+
+
+class AttachRootAuthorizeNetKeysPayload(BaseModel):
+    view: PaymentView
+    api_login_id: str = Field(min_length=2, max_length=64)
+    transaction_key: str = Field(min_length=8, max_length=128)
+    public_client_key: str = Field(min_length=8, max_length=512)
+    signature_key: str | None = Field(default=None, max_length=512)
+    env: Literal["sandbox", "production"] = "production"
+
+
+@router.post("/authorizenet/keys")
+def attach_root_authorizenet_keys(
+    payload: AttachRootAuthorizeNetKeysPayload,
+    user: Annotated[AuthUser, Depends(require_super_admin)],
+) -> dict[str, Any]:
+    from authorizenet_client import authenticate_test, credential_hint
+
+    login = payload.api_login_id.strip()
+    txn_key = payload.transaction_key.strip()
+    public_key = payload.public_client_key.strip()
+    signature = (payload.signature_key or "").strip() or None
+    env = payload.env
+    if not authenticate_test(login, txn_key, env=env):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Authorize.net API Login ID / Transaction Key are invalid for the selected "
+                f"environment ({env}), or the API is unreachable."
+            ),
+        )
+
+    accounts = _load_accounts_raw()
+    view = payload.view
+    accounts[view] = {
+        **accounts[view],
+        "authorizenet_api_login_id": login,
+        "authorizenet_transaction_key": txn_key,
+        "authorizenet_signature_key": signature,
+        "authorizenet_public_client_key": public_key,
+        "authorizenet_api_login_id_hint": credential_hint(login),
+        "authorizenet_public_client_key_hint": credential_hint(public_key),
+        "authorizenet_env": env,
+        "authorizenet_connection_status": "active",
+    }
+    _save_accounts(accounts)
+    return {
+        "view": view,
+        "api_login_id_hint": credential_hint(login),
+        "public_client_key_hint": credential_hint(public_key),
+        "env": env,
+        "connection_status": "active",
+    }
+
+
+@router.post("/authorizenet/disconnect")
+def disconnect_root_authorizenet(
+    payload: PaymentViewPayload,
+    user: Annotated[AuthUser, Depends(require_super_admin)],
+) -> dict[str, bool]:
+    accounts = _load_accounts_raw()
+    view = payload.view
+    accounts[view] = {
+        **accounts[view],
+        "authorizenet_api_login_id": None,
+        "authorizenet_transaction_key": None,
+        "authorizenet_signature_key": None,
+        "authorizenet_public_client_key": None,
+        "authorizenet_api_login_id_hint": None,
+        "authorizenet_public_client_key_hint": None,
+        "authorizenet_env": None,
+        "authorizenet_connection_status": None,
+    }
+    if (
+        view == "homepage"
+        and get_platform_default_payment_processor(accounts) == "authorizenet_paypal"
+    ):
+        accounts["default_payment_processor"] = "stripe"
+    _save_accounts(accounts)
+    return {"removed": True}
 
 
 @router.post("/paypal/keys")

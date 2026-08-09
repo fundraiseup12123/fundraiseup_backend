@@ -61,7 +61,7 @@ def register_campaign_paypal_apple_pay_domains(
     if not host or host in {"localhost", "127.0.0.1"}:
         return None
 
-    if resolve_payment_processor(None, campaign_id) != "paypal":
+    if resolve_payment_processor(None, campaign_id) not in {"paypal", "authorizenet_paypal"}:
         return None
     account = resolve_paypal_account_for_checkout(campaign_id, checkout_view)
     if not _account_has_keys(account):
@@ -417,8 +417,12 @@ def paypal_checkout_config(
         "currency": paypal_checkout_currency(),
         "api_configured": paypal_configured() or keys_ready,
         "payment_processor": processor,
-        # Public client id for JS SDK when processor=paypal (keys mode). Never return secret.
-        "client_id": str(account.get("client_id") or "") if keys_ready and processor == "paypal" else "",
+        # Public client id for JS SDK when processor uses PayPal keys (paypal or hybrid GPay).
+        "client_id": (
+            str(account.get("client_id") or "")
+            if keys_ready and processor in {"paypal", "authorizenet_paypal"}
+            else ""
+        ),
         "paypal_env": env_value,
         "keys_source": str(account.get("keys_source") or "") if keys_ready else "",
     }
@@ -434,7 +438,7 @@ def paypal_client_token(
     from routers.payment_accounts import resolve_payment_processor
     from routers.paypal_connect import _account_has_keys, resolve_paypal_account_for_checkout
 
-    if resolve_payment_processor(None, campaign_id) != "paypal":
+    if resolve_payment_processor(None, campaign_id) not in {"paypal", "authorizenet_paypal"}:
         raise HTTPException(
             status_code=400,
             detail="PayPal processor is not enabled for this campaign",
@@ -471,7 +475,7 @@ def paypal_register_apple_pay_domain(payload: RegisterApplePayDomainRequest) -> 
     from routers.payment_accounts import resolve_payment_processor
     from routers.paypal_connect import _account_has_keys, resolve_paypal_account_for_checkout
 
-    if resolve_payment_processor(None, payload.campaign_id) != "paypal":
+    if resolve_payment_processor(None, payload.campaign_id) not in {"paypal", "authorizenet_paypal"}:
         raise HTTPException(
             status_code=400,
             detail="PayPal processor is not enabled for this campaign",
@@ -794,7 +798,7 @@ def paypal_ensure_plan(payload: EnsurePayPalPlanRequest) -> dict[str, object]:
     from routers.payment_accounts import resolve_payment_processor
     from routers.paypal_connect import _account_has_keys, resolve_paypal_account_for_checkout
 
-    if resolve_payment_processor(None, payload.campaign_id) != "paypal":
+    if resolve_payment_processor(None, payload.campaign_id) not in {"paypal", "authorizenet_paypal"}:
         raise HTTPException(status_code=400, detail="PayPal processor is not enabled for this campaign")
     account = resolve_paypal_account_for_checkout(payload.campaign_id, payload.checkout_view)
     if not _account_has_keys(account):
@@ -817,7 +821,7 @@ def paypal_create_subscription(payload: CreatePayPalSubscriptionRequest) -> dict
     from routers.payment_accounts import resolve_payment_processor
     from routers.paypal_connect import _account_has_keys, resolve_paypal_account_for_checkout
 
-    if resolve_payment_processor(None, payload.campaign_id) != "paypal":
+    if resolve_payment_processor(None, payload.campaign_id) not in {"paypal", "authorizenet_paypal"}:
         raise HTTPException(status_code=400, detail="PayPal processor is not enabled for this campaign")
     account = resolve_paypal_account_for_checkout(payload.campaign_id, payload.checkout_view)
     if not _account_has_keys(account):

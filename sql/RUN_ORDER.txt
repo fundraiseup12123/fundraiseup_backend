@@ -48,3 +48,4 @@
 --   034_recent_donations_all_organizations.sql
 --   035_campaign_platform_stripe_account_id.sql
 --   036_payment_processor.sql
+--   037_authorizenet_paypal.sql
