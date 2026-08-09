@@ -20,7 +20,7 @@ from authorizenet_client import (
     create_transaction_opaque,
     credential_hint,
 )
-from currency import calculate_total_with_fees, estimate_processing_fee
+from currency import calculate_total_with_fees, convert_to_reporting, estimate_processing_fee
 from db import rest_delete, rest_get, rest_get_one, rest_insert, rest_patch
 from frontend_url import resolve_frontend_url
 from supabase_client import insert_donation, supabase_enabled
@@ -348,6 +348,18 @@ def _resolve_total(amount: float, currency: str, cover_fees: bool) -> tuple[floa
     return base, round(float(total_display), 2)
 
 
+def _charge_amount_and_currency(total_display: float, display_currency: str) -> tuple[float, str]:
+    """Authorize.net merchant accounts in this product are USD — convert when needed."""
+    code = (display_currency or "USD").upper()
+    if code == "USD":
+        return round(float(total_display), 2), "USD"
+    try:
+        converted = convert_to_reporting(total_display, code, "USD")
+        return round(float(converted), 2), "USD"
+    except Exception:
+        return round(float(total_display), 2), code
+
+
 def _resolve_org_id(campaign_id: str | None) -> str:
     from site_constants import ROOT_CAMPAIGN_ID, ROOT_ORG_ID
 
@@ -494,13 +506,14 @@ def authorizenet_charge(payload: AnetChargeRequest) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail="Authorize.net credentials are not configured")
 
     base_amount, total_display = _resolve_total(payload.amount, payload.currency, payload.cover_fees)
+    charge_amount, charge_currency = _charge_amount_and_currency(total_display, payload.currency)
     invoice = f"d{int(time.time())}{uuid.uuid4().hex[:6]}"[:20]
     try:
         result = create_transaction_opaque(
             api_login_id=creds["api_login_id"],
             transaction_key=creds["transaction_key"],
-            amount=total_display,
-            currency=payload.currency,
+            amount=charge_amount,
+            currency=charge_currency,
             data_descriptor=payload.data_descriptor.strip(),
             data_value=payload.data_value.strip(),
             order_invoice=invoice,
@@ -544,12 +557,13 @@ def authorizenet_subscribe(payload: AnetSubscribeRequest) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail="Authorize.net credentials are not configured")
 
     base_amount, total_display = _resolve_total(payload.amount, payload.currency, payload.cover_fees)
+    charge_amount, charge_currency = _charge_amount_and_currency(total_display, payload.currency)
     try:
         result = create_arb_subscription_from_opaque(
             api_login_id=creds["api_login_id"],
             transaction_key=creds["transaction_key"],
-            amount=total_display,
-            currency=payload.currency,
+            amount=charge_amount,
+            currency=charge_currency,
             data_descriptor=payload.data_descriptor.strip(),
             data_value=payload.data_value.strip(),
             customer_email=payload.donor.email,
