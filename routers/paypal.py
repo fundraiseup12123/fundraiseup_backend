@@ -27,11 +27,93 @@ from paypal_client import (
     get_paypal_subscription,
     paypal_configured,
     paypal_env,
+    register_paypal_apple_pay_domain,
     warm_paypal_access_token,
 )
 from supabase_client import insert_donation, supabase_enabled
 
 router = APIRouter(prefix="/paypal", tags=["paypal"])
+
+
+def _parent_apple_pay_host(host: str) -> str:
+    parts = [p for p in (host or "").lower().split(".") if p]
+    if host.endswith(".us.com") and len(parts) >= 4:
+        return ".".join(parts[-3:])
+    if len(parts) >= 3:
+        return ".".join(parts[-2:])
+    return ""
+
+
+def register_campaign_paypal_apple_pay_domains(
+    hostname: str,
+    *,
+    campaign_id: str | None = None,
+    checkout_view: str = "homepage",
+) -> dict[str, object] | None:
+    """
+    Register hostname (+ parent platform host) with PayPal Apple Pay when this
+    campaign uses PayPal keys. Returns None when PayPal processor/keys are absent.
+    """
+    from routers.payment_accounts import resolve_payment_processor
+    from routers.paypal_connect import _account_has_keys, resolve_paypal_account_for_checkout
+
+    host = (hostname or "").strip().lower().split(":")[0].strip(".")
+    if not host or host in {"localhost", "127.0.0.1"}:
+        return None
+
+    if resolve_payment_processor(None, campaign_id) != "paypal":
+        return None
+    account = resolve_paypal_account_for_checkout(campaign_id, checkout_view)
+    if not _account_has_keys(account):
+        return None
+
+    cid = str(account.get("client_id") or "")
+    secret = str(account.get("client_secret") or "")
+    merchant = str(account.get("paypal_merchant_id") or "")
+    result = register_paypal_apple_pay_domain(
+        host,
+        client_id=cid,
+        client_secret=secret,
+        merchant_id=merchant,
+    )
+    parent = _parent_apple_pay_host(host)
+    if parent and parent != host:
+        try:
+            register_paypal_apple_pay_domain(
+                parent,
+                client_id=cid,
+                client_secret=secret,
+                merchant_id=merchant,
+            )
+            result["parent_domain"] = parent
+        except RuntimeError:
+            pass
+    return result
+
+
+def schedule_campaign_paypal_apple_pay_domain_registration(
+    hostname: str,
+    *,
+    campaign_id: str | None = None,
+    checkout_view: str = "homepage",
+) -> None:
+    """Fire-and-forget domain registration so subdomain create stays fast."""
+    import logging
+    import threading
+
+    logger = logging.getLogger(__name__)
+
+    def _run() -> None:
+        try:
+            register_campaign_paypal_apple_pay_domains(
+                hostname,
+                campaign_id=campaign_id,
+                checkout_view=checkout_view,
+            )
+        except Exception:
+            logger.debug("PayPal Apple Pay domain auto-register skipped", exc_info=True)
+
+    threading.Thread(target=_run, daemon=True).start()
 
 
 class PayPalDonor(BaseModel):
@@ -386,7 +468,6 @@ class RegisterApplePayDomainRequest(BaseModel):
 @router.post("/register-apple-pay-domain")
 def paypal_register_apple_pay_domain(payload: RegisterApplePayDomainRequest) -> dict[str, object]:
     """Register this hostname with PayPal so native Apple Pay merchant validation works."""
-    from paypal_client import register_paypal_apple_pay_domain
     from routers.payment_accounts import resolve_payment_processor
     from routers.paypal_connect import _account_has_keys, resolve_paypal_account_for_checkout
 
@@ -402,32 +483,13 @@ def paypal_register_apple_pay_domain(payload: RegisterApplePayDomainRequest) -> 
             detail="Attach PayPal API keys before registering Apple Pay domains",
         )
     try:
-        result = register_paypal_apple_pay_domain(
+        result = register_campaign_paypal_apple_pay_domains(
             payload.domain,
-            client_id=str(account.get("client_id") or ""),
-            client_secret=str(account.get("client_secret") or ""),
-            merchant_id=str(account.get("paypal_merchant_id") or ""),
+            campaign_id=payload.campaign_id,
+            checkout_view=payload.checkout_view,
         )
-        # Also register apex platform host when on a campaign subdomain
-        # (e.g. child.fundraiseup.us.com → fundraiseup.us.com).
-        host = str(result.get("domain") or payload.domain).lower()
-        parts = [p for p in host.split(".") if p]
-        parent = ""
-        if host.endswith(".us.com") and len(parts) >= 4:
-            parent = ".".join(parts[-3:])
-        elif len(parts) >= 3:
-            parent = ".".join(parts[-2:])
-        if parent and parent != host:
-            try:
-                register_paypal_apple_pay_domain(
-                    parent,
-                    client_id=str(account.get("client_id") or ""),
-                    client_secret=str(account.get("client_secret") or ""),
-                    merchant_id=str(account.get("paypal_merchant_id") or ""),
-                )
-                result["parent_domain"] = parent
-            except RuntimeError:
-                pass
+        if not result:
+            raise RuntimeError("Unable to register Apple Pay domain")
         return result
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

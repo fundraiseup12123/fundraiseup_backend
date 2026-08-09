@@ -453,6 +453,7 @@ def _ensure_campaign_slug_subdomain(campaign_id: str, slug: str) -> None:
 
     now = datetime.now(timezone.utc).isoformat()
     verified = {"verified_at": now, "ssl_status": "active"}
+    linked = False
 
     existing_hostname = rest_get_one("domains", params={"hostname": f"eq.{hostname}", "select": "*"})
     if existing_hostname and str(existing_hostname.get("campaign_id")) != campaign_id:
@@ -466,15 +467,31 @@ def _ensure_campaign_slug_subdomain(campaign_id: str, slug: str) -> None:
         if host == hostname:
             if not domain.get("verified_at"):
                 rest_patch("domains", verified, match={"id": domain["id"]})
-            return
+            linked = True
+            break
         rest_patch("domains", {"hostname": hostname, **verified}, match={"id": domain["id"]})
-        return
+        linked = True
+        break
 
-    if not existing_hostname:
+    if not linked and not existing_hostname:
         rest_insert(
             "domains",
             {"campaign_id": campaign_id, "hostname": hostname, **verified},
         )
+        linked = True
+    elif existing_hostname and str(existing_hostname.get("campaign_id")) == campaign_id:
+        linked = True
+
+    if linked:
+        try:
+            from routers.paypal import schedule_campaign_paypal_apple_pay_domain_registration
+
+            schedule_campaign_paypal_apple_pay_domain_registration(
+                hostname,
+                campaign_id=campaign_id,
+            )
+        except Exception:
+            pass
 
 
 def _get_org_id(user: AuthUser, org_id: str) -> str:
@@ -1089,6 +1106,15 @@ def add_domain(
         raise HTTPException(status_code=400, detail=err or "Could not add subdomain")
     token = str(domain.get("verification_token") or "")
     enriched = _enrich_domain_row(domain, {campaign_id: campaign})
+    try:
+        from routers.paypal import schedule_campaign_paypal_apple_pay_domain_registration
+
+        schedule_campaign_paypal_apple_pay_domain_registration(
+            hostname,
+            campaign_id=campaign_id,
+        )
+    except Exception:
+        pass
     return {
         **enriched,
         "resolved_hostname": hostname,
