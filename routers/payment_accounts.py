@@ -97,6 +97,7 @@ def _default_accounts() -> dict[str, Any]:
         "homepage": _default_view_entry(),
         "popup": _default_view_entry(),
         "stripe_accounts": [],
+        "default_payment_processor": "stripe",
     }
 
 
@@ -273,6 +274,9 @@ def _load_accounts_raw() -> dict[str, Any]:
                 merged[view].update(parsed[view])
         if isinstance(parsed.get("stripe_accounts"), list):
             merged["stripe_accounts"] = parsed["stripe_accounts"]
+        merged["default_payment_processor"] = normalize_payment_processor(
+            parsed.get("default_payment_processor")
+        )
         if _migrate_legacy_stripe_into_pool(merged):
             _sync_default_stripe_to_views(merged)
             try:
@@ -342,6 +346,7 @@ def _accounts_response(accounts: dict[str, Any]) -> dict[str, Any]:
     return {
         "views": views,
         "stripe_accounts": _public_stripe_pool(accounts),
+        "default_payment_processor": get_platform_default_payment_processor(accounts),
     }
 
 
@@ -538,6 +543,21 @@ def normalize_payment_processor(raw: object) -> str:
     return "stripe"
 
 
+def _platform_homepage_has_paypal_keys(accounts: dict[str, Any] | None = None) -> bool:
+    data = accounts if accounts is not None else _load_accounts_raw()
+    entry = data.get("homepage") if isinstance(data.get("homepage"), dict) else {}
+    return (
+        str(entry.get("paypal_attach_mode") or "").lower() == "keys"
+        and bool(str(entry.get("paypal_client_id") or "").strip())
+        and bool(str(entry.get("paypal_client_secret") or "").strip())
+    )
+
+
+def get_platform_default_payment_processor(accounts: dict[str, Any] | None = None) -> str:
+    data = accounts if accounts is not None else _load_accounts_raw()
+    return normalize_payment_processor(data.get("default_payment_processor"))
+
+
 def resolve_payment_account_sources(
     org_id: str | None,
     campaign_id: str | None,
@@ -568,7 +588,7 @@ def resolve_payment_processor(
     org_id: str | None,
     campaign_id: str | None,
 ) -> str:
-    """Campaign override if set; else organization; else stripe."""
+    """Campaign override if set; else platform-PayPal rule / org / platform default / stripe."""
     resolved_org_id = org_id
     if campaign_id:
         campaign = rest_get_one(
@@ -581,13 +601,27 @@ def resolve_payment_processor(
             raw = campaign.get("payment_processor")
             if raw is not None and str(raw).strip() != "":
                 return normalize_payment_processor(raw)
+
+    platform_processor = get_platform_default_payment_processor()
+    # Campaigns/orgs using platform PayPal credentials inherit platform main gateway
+    # (PayPal) unless the campaign explicitly chose Stripe.
+    if (
+        platform_processor == "paypal"
+        and _platform_homepage_has_paypal_keys()
+        and uses_platform_provider(resolved_org_id, "paypal", campaign_id)
+    ):
+        return "paypal"
+
     if resolved_org_id:
         org = rest_get_one(
             "organizations",
             params={"id": f"eq.{resolved_org_id}", "select": "payment_processor"},
         )
-        return normalize_payment_processor((org or {}).get("payment_processor"))
-    return "stripe"
+        org_raw = (org or {}).get("payment_processor")
+        if org_raw is not None and str(org_raw).strip() != "":
+            return normalize_payment_processor(org_raw)
+
+    return platform_processor if platform_processor in {"stripe", "paypal"} else "stripe"
 
 
 def uses_platform_provider(
@@ -613,7 +647,9 @@ def homepage_payment_summary() -> dict[str, Any]:
     paypal_email = entry.get("paypal_email")
     now_hint = entry.get("nowpayments_api_key_hint")
     now_key = entry.get("nowpayments_api_key")
+    paypal_keys = _platform_homepage_has_paypal_keys(accounts)
     return {
+        "default_payment_processor": get_platform_default_payment_processor(accounts),
         "stripe": {
             "connected": bool(stripe_id) or bool(pool),
             "stripe_account_id": stripe_id,
@@ -631,17 +667,14 @@ def homepage_payment_summary() -> dict[str, Any]:
             "connected": bool(
                 paypal_merchant
                 or paypal_email
-                or (
-                    str(entry.get("paypal_attach_mode") or "").lower() == "keys"
-                    and entry.get("paypal_client_id")
-                    and entry.get("paypal_client_secret")
-                )
+                or paypal_keys
             ),
             "paypal_merchant_id": paypal_merchant,
             "paypal_email": paypal_email,
             "connection_status": entry.get("paypal_connection_status"),
             "attach_mode": entry.get("paypal_attach_mode") or ("email" if paypal_merchant or paypal_email else None),
             "client_id_hint": entry.get("paypal_client_id_hint"),
+            "has_keys": paypal_keys,
         },
         "nowpayments": {
             "connected": bool(now_key or now_hint),
@@ -1032,6 +1065,9 @@ def disconnect_root_paypal(
         "paypal_client_secret": None,
         "paypal_client_id_hint": None,
     }
+    # Main gateway PayPal requires homepage keys — fall back to Stripe if removed.
+    if view == "homepage" and get_platform_default_payment_processor(accounts) == "paypal":
+        accounts["default_payment_processor"] = "stripe"
     _save_accounts(accounts)
     return {"removed": True}
 
@@ -1041,6 +1077,33 @@ class AttachRootPayPalKeysPayload(BaseModel):
     client_id: str = Field(min_length=8, max_length=256)
     client_secret: str = Field(min_length=8, max_length=512)
     email: str | None = Field(default=None, max_length=254)
+
+
+class MainGatewayPayload(BaseModel):
+    payment_processor: Literal["stripe", "paypal"]
+
+
+@router.post("/main-gateway")
+def set_main_gateway(
+    payload: MainGatewayPayload,
+    user: Annotated[AuthUser, Depends(require_super_admin)],
+) -> dict[str, Any]:
+    """Set platform main payment gateway (Stripe or PayPal keys for all methods)."""
+    accounts = _load_accounts_raw()
+    processor = normalize_payment_processor(payload.payment_processor)
+    if processor == "paypal" and not _platform_homepage_has_paypal_keys(accounts):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Attach PayPal API keys on the Homepage view before setting PayPal as the main gateway."
+            ),
+        )
+    accounts["default_payment_processor"] = processor
+    _save_accounts(accounts)
+    return {
+        "default_payment_processor": processor,
+        "paypal_keys_connected": _platform_homepage_has_paypal_keys(accounts),
+    }
 
 
 @router.post("/paypal/keys")

@@ -439,18 +439,6 @@ def resolve_paypal_account_for_checkout(
     """Resolve the org/campaign PayPal account row used for checkout (email or keys)."""
     from site_constants import ROOT_CAMPAIGN_ID
 
-    # PayPal checkout processor: always use TESTING_PAYPAL_* keys when configured
-    # (same live app that already supports monthly on /testing-paypal).
-    try:
-        from routers.payment_accounts import resolve_payment_processor
-
-        if resolve_payment_processor(None, campaign_id) == "paypal":
-            testing_keys = _testing_paypal_keys_account()
-            if testing_keys:
-                return testing_keys
-    except Exception:
-        pass
-
     select_cols = (
         "id,organization_id,campaign_id,paypal_email,paypal_merchant_id,connection_status,"
         "attach_mode,client_id,client_secret,client_id_hint,is_default"
@@ -469,6 +457,8 @@ def resolve_paypal_account_for_checkout(
             return acct
         return None
 
+    resolved: dict[str, Any] | None = None
+
     if campaign_id and campaign_id != ROOT_CAMPAIGN_ID:
         campaign = rest_get_one(
             "campaigns",
@@ -481,31 +471,41 @@ def resolve_paypal_account_for_checkout(
             if uses_platform_provider(str(org_id), "paypal", str(campaign_id)):
                 from routers.payment_accounts import resolve_root_paypal_account
 
-                return resolve_root_paypal_account(checkout_view)
+                resolved = resolve_root_paypal_account(checkout_view)
+            else:
+                if campaign.get("paypal_account_id"):
+                    acct = rest_get_one(
+                        "paypal_accounts",
+                        params={"id": f"eq.{campaign['paypal_account_id']}", "select": select_cols},
+                    )
+                    resolved = usable(acct)
+                if not resolved:
+                    default = rest_get_one(
+                        "paypal_accounts",
+                        params={
+                            "organization_id": f"eq.{org_id}",
+                            "is_default": "eq.true",
+                            "select": select_cols,
+                        },
+                    )
+                    resolved = usable(default)
 
-            if campaign.get("paypal_account_id"):
-                acct = rest_get_one(
-                    "paypal_accounts",
-                    params={"id": f"eq.{campaign['paypal_account_id']}", "select": select_cols},
-                )
-                picked = usable(acct)
-                if picked:
-                    return picked
+    # Prefer attached platform/org keys. Only fall back to TESTING_PAYPAL_* when none exist
+    # (keeps /testing-paypal and local processor testing working).
+    if resolved and _account_has_keys(resolved):
+        return resolved
 
-            default = rest_get_one(
-                "paypal_accounts",
-                params={
-                    "organization_id": f"eq.{org_id}",
-                    "is_default": "eq.true",
-                    "select": select_cols,
-                },
-            )
-            picked = usable(default)
-            if picked:
-                return picked
+    try:
+        from routers.payment_accounts import resolve_payment_processor
 
-    return None
+        if resolve_payment_processor(None, campaign_id) == "paypal":
+            testing_keys = _testing_paypal_keys_account()
+            if testing_keys:
+                return testing_keys
+    except Exception:
+        pass
 
+    return resolved
 
 def resolve_paypal_payee_email_for_checkout(campaign_id: str | None, checkout_view: str | None) -> str | None:
     from site_constants import ROOT_CAMPAIGN_ID
