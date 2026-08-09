@@ -883,6 +883,10 @@ def register_paypal_apple_pay_domain(
     """
     Register a web domain for Apple Pay with PayPal (wallet-domains API).
     Required before native ApplePaySession merchant validation succeeds.
+
+    Direct REST apps (org/platform API keys) usually succeed without
+    PayPal-Auth-Assertion. Multiparty/partner flows need the assertion with the
+    merchant payer_id. Wrong assertion → "Subject Authentication failed".
     """
     host = (domain or "").strip().lower().split(":")[0].strip(".")
     if not host or host in {"localhost", "127.0.0.1"}:
@@ -898,16 +902,8 @@ def register_paypal_apple_pay_domain(
         preferred_merchant_id=merchant_id,
     )
 
-    headers: dict[str, str] = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-    }
-    if cid and payer_id:
-        headers["PayPal-Auth-Assertion"] = _paypal_auth_assertion(cid, payer_id)
-
-    try:
-        response = _http.post(
+    def _post(headers: dict[str, str]) -> httpx.Response:
+        return _http.post(
             f"{api_base}/v1/customer/wallet-domains",
             headers=headers,
             json={
@@ -915,38 +911,72 @@ def register_paypal_apple_pay_domain(
                 "domain": {"name": host},
             },
         )
+
+    base_headers: dict[str, str] = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+
+    attempts: list[dict[str, str]] = [dict(base_headers)]
+    # Prefer direct (no assertion) first — org API keys are first-party apps.
+    # Then retry with assertion when we have a real merchant payer id.
+    if cid and payer_id:
+        with_assertion = dict(base_headers)
+        with_assertion["PayPal-Auth-Assertion"] = _paypal_auth_assertion(cid, payer_id)
+        attempts.append(with_assertion)
+
+    last_response: httpx.Response | None = None
+    try:
+        for headers in attempts:
+            response = _post(headers)
+            last_response = response
+            if response.status_code in {200, 201, 204}:
+                return {
+                    "domain": host,
+                    "registered": True,
+                    "created": True,
+                    "client_id_hint": cid[:12] if cid else "",
+                    "payer_id": payer_id or "",
+                    "used_auth_assertion": "PayPal-Auth-Assertion" in headers,
+                }
+            if response.status_code in {409, 422}:
+                detail = ""
+                try:
+                    detail = json.dumps(response.json())
+                except Exception:
+                    detail = response.text or ""
+                lowered = detail.lower()
+                if any(
+                    phrase in lowered
+                    for phrase in ("already", "exist", "duplicate", "registered", "conflict")
+                ):
+                    return {
+                        "domain": host,
+                        "registered": True,
+                        "created": False,
+                        "client_id_hint": cid[:12] if cid else "",
+                        "payer_id": payer_id or "",
+                        "used_auth_assertion": "PayPal-Auth-Assertion" in headers,
+                    }
+            # Subject Authentication failed → try next strategy (with/without assertion)
+            body_text = (response.text or "").lower()
+            if "subject authentication" in body_text or response.status_code in {401, 403}:
+                continue
+            break
     except httpx.HTTPError as exc:
         raise RuntimeError("Unable to reach PayPal to register Apple Pay domain") from exc
 
-    # Already registered is success for our purposes.
-    if response.status_code in {200, 201, 204}:
-        return {
-            "domain": host,
-            "registered": True,
-            "created": True,
-            "client_id_hint": cid[:12] if cid else "",
-            "payer_id": payer_id or "",
-        }
-    if response.status_code in {409, 422}:
-        detail = ""
-        try:
-            detail = json.dumps(response.json())
-        except Exception:
-            detail = response.text or ""
-        lowered = detail.lower()
-        if any(
-            phrase in lowered
-            for phrase in ("already", "exist", "duplicate", "registered", "conflict")
-        ):
-            return {
-                "domain": host,
-                "registered": True,
-                "created": False,
-                "client_id_hint": cid[:12] if cid else "",
-                "payer_id": payer_id or "",
-            }
+    response = last_response
+    if response is None:
+        raise RuntimeError("Unable to register Apple Pay domain")
     if response.status_code >= 400:
-        raise RuntimeError(_paypal_error_detail(response, "Unable to register Apple Pay domain"))
+        hint = (
+            f" Register '{host}' under PayPal Developer Dashboard → Live app → Features → "
+            "Apple Pay → Manage → Add Domain (association file is already hosted on this site)."
+        )
+        detail = _paypal_error_detail(response, "Unable to register Apple Pay domain")
+        raise RuntimeError(f"{detail}{hint}")
     return {
         "domain": host,
         "registered": True,
