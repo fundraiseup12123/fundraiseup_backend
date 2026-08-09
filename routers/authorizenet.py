@@ -74,16 +74,18 @@ def _clear_org_defaults(org_id: str) -> None:
 
 def resolve_authorizenet_credentials_for_checkout(
     campaign_id: str | None,
-    checkout_view: Literal["homepage", "popup"] = "homepage",
+    checkout_view: Literal["homepage", "popup", "landing"] = "homepage",
 ) -> dict[str, str] | None:
-    """Platform homepage keys or org default authorizenet_accounts row."""
+    """Platform homepage/popup/landing keys or org default authorizenet_accounts row."""
     from routers.payment_accounts import (
         get_platform_authorizenet_credentials,
+        normalize_payment_view,
         resolve_payment_account_sources,
         uses_platform_provider,
     )
     from site_constants import ROOT_CAMPAIGN_ID, ROOT_ORG_ID
 
+    view = normalize_payment_view(checkout_view)
     org_id: str | None = None
     if campaign_id:
         campaign = rest_get_one(
@@ -96,7 +98,11 @@ def resolve_authorizenet_credentials_for_checkout(
         if campaign:
             org_id = str(campaign.get("organization_id") or "") or None
             acct_id = campaign.get("authorizenet_account_id")
-            if acct_id and not uses_platform_provider(org_id, "authorizenet", campaign_id):
+            if (
+                view != "landing"
+                and acct_id
+                and not uses_platform_provider(org_id, "authorizenet", campaign_id)
+            ):
                 row = rest_get_one(
                     "authorizenet_accounts",
                     params={"id": f"eq.{acct_id}", "select": "*"},
@@ -115,11 +121,11 @@ def resolve_authorizenet_credentials_for_checkout(
         org_id = ROOT_ORG_ID
 
     sources = resolve_payment_account_sources(org_id, campaign_id)
-    if str(sources.get("authorizenet") or "").lower() == "platform" or not org_id:
-        platform = get_platform_authorizenet_credentials(checkout_view)
+    if view == "landing" or str(sources.get("authorizenet") or "").lower() == "platform" or not org_id:
+        platform = get_platform_authorizenet_credentials(view)
         if platform:
             return platform
-        if checkout_view != "homepage":
+        if view != "homepage":
             return get_platform_authorizenet_credentials("homepage")
         return None
 
@@ -141,7 +147,9 @@ def resolve_authorizenet_credentials_for_checkout(
         row = rows[0] if rows else None
     if not row:
         # Fall back to platform if org has no keys
-        return get_platform_authorizenet_credentials("homepage")
+        return get_platform_authorizenet_credentials(view) or get_platform_authorizenet_credentials(
+            "homepage"
+        )
     return {
         "api_login_id": str(row.get("api_login_id") or ""),
         "transaction_key": str(row.get("transaction_key") or ""),
@@ -293,7 +301,7 @@ class AnetChargeRequest(BaseModel):
     honoree_name: str | None = None
     comment: str | None = None
     campaign_id: str | None = None
-    checkout_view: Literal["homepage", "popup"] = "homepage"
+    checkout_view: Literal["homepage", "popup", "landing"] = "homepage"
     donor: AnetDonor
     utm: AnetUtm | None = None
     device: AnetDevice | None = None
@@ -316,7 +324,7 @@ class AnetPayPalPrepareRequest(BaseModel):
     honoree_name: str | None = None
     comment: str | None = None
     campaign_id: str | None = None
-    checkout_view: Literal["homepage", "popup"] = "homepage"
+    checkout_view: Literal["homepage", "popup", "landing"] = "homepage"
     donor: AnetDonor
     utm: AnetUtm | None = None
     device: AnetDevice | None = None
@@ -336,7 +344,7 @@ class AnetPayPalCompleteRequest(BaseModel):
     honoree_name: str | None = None
     comment: str | None = None
     campaign_id: str | None = None
-    checkout_view: Literal["homepage", "popup"] = "homepage"
+    checkout_view: Literal["homepage", "popup", "landing"] = "homepage"
     donor: AnetDonor
     utm: AnetUtm | None = None
     device: AnetDevice | None = None
@@ -439,7 +447,7 @@ def _record_anet_donation(
             }.items()
             if v
         }
-    device_data["checkout_view"] = checkout_view if checkout_view in ("homepage", "popup") else "homepage"
+    device_data["checkout_view"] = checkout_view if checkout_view in ("homepage", "popup", "landing") else "homepage"
     device_data["processor"] = "authorizenet"
     row["device"] = device_data
     if utm:
@@ -511,7 +519,7 @@ def _record_failed_anet_charge(
 @router.get("/checkout-config")
 def authorizenet_checkout_config(
     campaign_id: str | None = Query(None),
-    checkout_view: Literal["homepage", "popup"] = Query("homepage"),
+    checkout_view: Literal["homepage", "popup", "landing"] = Query("homepage"),
 ) -> dict[str, Any]:
     from routers.payment_accounts import resolve_payment_processor
 

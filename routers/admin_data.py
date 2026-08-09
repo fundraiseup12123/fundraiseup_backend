@@ -929,8 +929,8 @@ def _donation_checkout_view(row: dict[str, Any]) -> str:
     device = row.get("device")
     if isinstance(device, dict):
         view = device.get("checkout_view")
-        if view == "popup":
-            return "popup"
+        if view in ("popup", "landing"):
+            return str(view)
     return "homepage"
 
 

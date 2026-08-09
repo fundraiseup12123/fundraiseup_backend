@@ -63,7 +63,7 @@ class PrepareNowPaymentsRedirectRequest(BaseModel):
     honoree_name: str | None = None
     comment: str | None = None
     campaign_id: str | None = None
-    checkout_view: Literal["homepage", "popup"] = "homepage"
+    checkout_view: Literal["homepage", "popup", "landing"] = "homepage"
     donor: DonorDetails
     utm: UtmParams | None = None
     device: DeviceInfo | None = None
@@ -203,6 +203,7 @@ def resolve_nowpayments_account_for_checkout(
     campaign_id: str | None,
     checkout_view: str | None,
 ) -> dict[str, Any] | None:
+    from routers.payment_accounts import normalize_payment_view, resolve_root_nowpayments_account
     from site_constants import ROOT_CAMPAIGN_ID
 
     def pick(acct: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -214,6 +215,10 @@ def resolve_nowpayments_account_for_checkout(
             return None
         return acct
 
+    view = normalize_payment_view(checkout_view)
+    if view == "landing" or not campaign_id or campaign_id == ROOT_CAMPAIGN_ID:
+        return pick(resolve_root_nowpayments_account(checkout_view))
+
     if campaign_id and campaign_id != ROOT_CAMPAIGN_ID:
         campaign = rest_get_one(
             "campaigns",
@@ -221,10 +226,10 @@ def resolve_nowpayments_account_for_checkout(
         )
         if campaign:
             org_id = campaign["organization_id"]
-            from routers.payment_accounts import resolve_root_nowpayments_account, uses_platform_provider
+            from routers.payment_accounts import uses_platform_provider
 
             if uses_platform_provider(str(org_id), "nowpayments", str(campaign_id)):
-                return pick(resolve_root_nowpayments_account("homepage"))
+                return pick(resolve_root_nowpayments_account(checkout_view))
 
             if campaign.get("nowpayments_account_id"):
                 acct = rest_get_one(
@@ -246,8 +251,6 @@ def resolve_nowpayments_account_for_checkout(
             picked = pick(default)
             if picked:
                 return picked
-
-    from routers.payment_accounts import resolve_root_nowpayments_account
 
     return pick(resolve_root_nowpayments_account(checkout_view))
 
@@ -330,7 +333,7 @@ def _record_nowpayments_donation(
             if v
         }
     checkout_view = getattr(payload, "checkout_view", None)
-    device["checkout_view"] = checkout_view if checkout_view in ("homepage", "popup") else "homepage"
+    device["checkout_view"] = checkout_view if checkout_view in ("homepage", "popup", "landing") else "homepage"
     row["device"] = device
     if payload.utm:
         utm = {
@@ -451,7 +454,7 @@ def disconnect_nowpayments_account(
 @router.get("/checkout-config")
 def nowpayments_checkout_config(
     campaign_id: str | None = Query(None),
-    checkout_view: Literal["homepage", "popup"] = Query("homepage"),
+    checkout_view: Literal["homepage", "popup", "landing"] = Query("homepage"),
 ) -> dict[str, object]:
     account = resolve_nowpayments_account_for_checkout(campaign_id, checkout_view)
     return {
@@ -499,19 +502,20 @@ def nowpayments_prepare_redirect(payload: PrepareNowPaymentsRedirectRequest) -> 
     payment_ref = str(uuid.uuid4())
     frontend_url = resolve_frontend_url()
 
+    return_path = (
+        "/landing-page"
+        if payload.checkout_view == "landing"
+        else ("/pop-up-view" if payload.checkout_view == "popup" else "/")
+    )
     return_url = payload.return_url or (
-        f"{frontend_url}/pop-up-view?donation=success&provider=nowpayments&payment_ref={payment_ref}"
-        if payload.checkout_view == "popup"
-        else f"{frontend_url}/?donation=success&provider=nowpayments&payment_ref={payment_ref}"
+        f"{frontend_url}{return_path}?donation=success&provider=nowpayments&payment_ref={payment_ref}"
     )
     if "payment_ref=" not in return_url:
         joiner = "&" if "?" in return_url else "?"
         return_url = f"{return_url}{joiner}payment_ref={payment_ref}"
 
     cancel_url = payload.cancel_url or (
-        f"{frontend_url}/pop-up-view?donation=cancelled&provider=nowpayments"
-        if payload.checkout_view == "popup"
-        else f"{frontend_url}/?donation=cancelled&provider=nowpayments"
+        f"{frontend_url}{return_path}?donation=cancelled&provider=nowpayments"
     )
 
     try:
@@ -642,7 +646,7 @@ async def nowpayments_ipn(request: Request) -> dict[str, str]:
     from routers.payment_accounts import _load_accounts_raw
 
     root_accounts = _load_accounts_raw()
-    for view in ("homepage", "popup"):
+    for view in ("homepage", "popup", "landing"):
         entry = root_accounts.get(view) or {}
         if entry.get("nowpayments_ipn_secret"):
             accounts.append(

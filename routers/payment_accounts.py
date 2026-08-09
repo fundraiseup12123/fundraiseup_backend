@@ -30,7 +30,17 @@ from routers.stripe_connect import (
 
 router = APIRouter(prefix="/super/payment-accounts", tags=["payment-accounts"])
 
-PaymentView = Literal["homepage", "popup"]
+PaymentView = Literal["homepage", "popup", "landing"]
+PAYMENT_VIEWS: tuple[PaymentView, ...] = ("homepage", "popup", "landing")
+
+
+def normalize_payment_view(checkout_view: str | None) -> PaymentView:
+    raw = (checkout_view or "").strip().lower()
+    if raw == "landing":
+        return "landing"
+    if raw == "popup":
+        return "popup"
+    return "homepage"
 
 EXPRESS_ACCOUNT_CAPABILITIES = {
     "card_payments": {"requested": True},
@@ -104,6 +114,7 @@ def _default_accounts() -> dict[str, Any]:
     return {
         "homepage": _default_view_entry(),
         "popup": _default_view_entry(),
+        "landing": _default_view_entry(),
         "stripe_accounts": [],
         "default_payment_processor": "stripe",
     }
@@ -253,7 +264,7 @@ def _set_pool_default(accounts: dict[str, Any], entry_id: str) -> dict[str, Any]
         raise HTTPException(status_code=404, detail="Stripe account not found")
     for entry in pool:
         entry["is_default"] = str(entry.get("id")) == str(entry_id)
-    # Explicit default change updates both public views.
+    # Explicit default change updates homepage + pop-up (not landing-specific keys).
     for view in ("homepage", "popup"):
         view_entry = accounts.get(view)
         if not isinstance(view_entry, dict):
@@ -277,7 +288,7 @@ def _load_accounts_raw() -> dict[str, Any]:
         if not isinstance(parsed, dict):
             return _default_accounts()
         merged = _default_accounts()
-        for view in ("homepage", "popup"):
+        for view in PAYMENT_VIEWS:
             if isinstance(parsed.get(view), dict):
                 merged[view].update(parsed[view])
         if isinstance(parsed.get("stripe_accounts"), list):
@@ -345,7 +356,7 @@ def _refresh_stripe_pool(accounts: dict[str, Any]) -> None:
 
 def _accounts_response(accounts: dict[str, Any]) -> dict[str, Any]:
     views: list[dict[str, Any]] = []
-    for view in ("homepage", "popup"):
+    for view in PAYMENT_VIEWS:
         entry = dict(accounts[view])
         entry.pop("nowpayments_api_key", None)
         entry.pop("nowpayments_ipn_secret", None)
@@ -402,8 +413,8 @@ def list_payment_accounts(
 ) -> dict[str, Any]:
     accounts = _load_accounts_raw()
     _refresh_stripe_pool(accounts)
-    for view in ("homepage", "popup"):
-        _refresh_stripe_view(view, accounts)  # type: ignore[arg-type]
+    for view in PAYMENT_VIEWS:
+        _refresh_stripe_view(view, accounts)
     _sync_default_stripe_to_views(accounts)
     _save_accounts(accounts)
     return _accounts_response(accounts)
@@ -412,7 +423,7 @@ def list_payment_accounts(
 def resolve_root_stripe_account(checkout_view: str | None) -> str | None:
     from routers.stripe_connect import stripe_account_accessible
 
-    view: PaymentView = "popup" if checkout_view == "popup" else "homepage"
+    view = normalize_payment_view(checkout_view)
     accounts = _load_accounts_raw()
     if view == "homepage":
         pool = _ensure_stripe_pool(accounts)
@@ -426,6 +437,8 @@ def resolve_root_stripe_account(checkout_view: str | None) -> str | None:
             return account_id
     entry = accounts.get(view, {})
     account_id = entry.get("stripe_account_id")
+    if not account_id and view == "landing":
+        return resolve_root_stripe_account("popup") or resolve_root_stripe_account("homepage")
     if not account_id:
         return None
     if entry.get("stripe_connection_status") not in ("active", "pending", None):
@@ -468,12 +481,14 @@ def resolve_platform_stripe_for_campaign(campaign_id: str | None) -> str | None:
 
 
 def resolve_root_paypal_payee(checkout_view: str | None) -> str | None:
-    view: PaymentView = "popup" if checkout_view == "popup" else "homepage"
+    view = normalize_payment_view(checkout_view)
     accounts = _load_accounts_raw()
     entry = accounts.get(view, {})
     email = entry.get("paypal_email")
     merchant = entry.get("paypal_merchant_id")
     if not email and not merchant:
+        if view == "landing":
+            return resolve_root_paypal_payee("popup") or resolve_root_paypal_payee("homepage")
         return None
     status = entry.get("paypal_connection_status")
     if status and status not in ("active", "pending", "connected", None):
@@ -482,6 +497,8 @@ def resolve_root_paypal_payee(checkout_view: str | None) -> str | None:
     if str(entry.get("paypal_attach_mode") or "").lower() == "keys" and not (
         (email and "@" in str(email)) or (merchant and "@" in str(merchant))
     ):
+        if view == "landing":
+            return resolve_root_paypal_payee("popup") or resolve_root_paypal_payee("homepage")
         return None
     if email and "@" in str(email):
         return str(email).strip()
@@ -492,11 +509,13 @@ def resolve_root_paypal_payee(checkout_view: str | None) -> str | None:
 
 def resolve_root_paypal_account(checkout_view: str | None) -> dict[str, Any] | None:
     """Platform PayPal row for checkout (email Connect or API keys)."""
-    view: PaymentView = "popup" if checkout_view == "popup" else "homepage"
+    view = normalize_payment_view(checkout_view)
     accounts = _load_accounts_raw()
     entry = accounts.get(view) or {}
     status = entry.get("paypal_connection_status")
     if status and status not in ("active", "pending", "connected", None):
+        if view == "landing":
+            return resolve_root_paypal_account("popup") or resolve_root_paypal_account("homepage")
         return None
     client_id = str(entry.get("paypal_client_id") or "").strip()
     client_secret = str(entry.get("paypal_client_secret") or "").strip()
@@ -524,6 +543,8 @@ def resolve_root_paypal_account(checkout_view: str | None) -> dict[str, Any] | N
             "connection_status": status or "active",
             "is_default": True,
         }
+    if view == "landing":
+        return resolve_root_paypal_account("popup") or resolve_root_paypal_account("homepage")
     return None
 
 
@@ -583,11 +604,16 @@ def get_platform_authorizenet_credentials(
     accounts: dict[str, Any] | None = None,
 ) -> dict[str, str] | None:
     data = accounts if accounts is not None else _load_accounts_raw()
-    entry = data.get(view) if isinstance(data.get(view), dict) else {}
+    resolved = normalize_payment_view(view)
+    entry = data.get(resolved) if isinstance(data.get(resolved), dict) else {}
     login = str(entry.get("authorizenet_api_login_id") or "").strip()
     txn_key = str(entry.get("authorizenet_transaction_key") or "").strip()
     public_key = str(entry.get("authorizenet_public_client_key") or "").strip()
     if not (login and txn_key and public_key):
+        if resolved == "landing":
+            return get_platform_authorizenet_credentials("popup", data) or get_platform_authorizenet_credentials(
+                "homepage", data
+            )
         return None
     env = str(entry.get("authorizenet_env") or "production").strip().lower()
     if env not in {"sandbox", "production"}:
@@ -601,7 +627,7 @@ def get_platform_authorizenet_credentials(
         "api_login_id_hint": str(entry.get("authorizenet_api_login_id_hint") or "").strip(),
         "public_client_key_hint": str(entry.get("authorizenet_public_client_key_hint") or "").strip(),
         "connection_status": str(entry.get("authorizenet_connection_status") or "active"),
-        "keys_source": f"platform:{view}",
+        "keys_source": f"platform:{resolved}",
     }
 
 
@@ -809,7 +835,11 @@ def _start_view_or_pool_stripe_connect(
     display_name = (
         (entry or {}).get("name")
         or (name or "").strip()
-        or ("Default" if view == "homepage" else ("Pop-up" if view == "popup" else "Stripe account"))
+        or (
+            "Default"
+            if view == "homepage"
+            else ("Pop-up" if view == "popup" else ("Landing" if view == "landing" else "Stripe account"))
+        )
     )
     display_name = str(display_name).strip()[:120] or "Stripe account"
 
@@ -1038,7 +1068,7 @@ def complete_root_stripe_oauth(code: str, state: str) -> str:
             frontend_origin = unpack_origin_token(parts[4])
         else:
             frontend_origin = unpack_origin_token(parts[3]) if len(parts) > 3 else None
-    elif kind in ("homepage", "popup"):
+    elif kind in PAYMENT_VIEWS:
         view = kind  # type: ignore[assignment]
         frontend_origin = unpack_origin_token(parts[2]) if len(parts) > 2 else None
     else:
@@ -1100,7 +1130,7 @@ def save_root_paypal_account(state: str, merchant_id: str, email: str | None = N
         raise HTTPException(status_code=400, detail="Invalid state")
 
     view = state.split(":", 1)[1]
-    if view not in ("homepage", "popup"):
+    if view not in PAYMENT_VIEWS:
         raise HTTPException(status_code=400, detail="Invalid view")
 
     accounts = _load_accounts_raw()
@@ -1363,7 +1393,7 @@ def disconnect_root_stripe(
         _save_accounts(accounts)
         return {"removed": True}
 
-    if payload.view not in ("homepage", "popup"):
+    if payload.view not in PAYMENT_VIEWS:
         raise HTTPException(status_code=400, detail="account_entry_id or view is required")
 
     view = payload.view
@@ -1392,7 +1422,7 @@ def handle_root_paypal_callback(code: str, state: str) -> RedirectResponse | Non
     from routers.paypal_connect import exchange_paypal_code
 
     view = state.split(":", 1)[1]
-    if view not in ("homepage", "popup"):
+    if view not in PAYMENT_VIEWS:
         raise HTTPException(status_code=400, detail="Invalid view")
 
     merchant_id, email = exchange_paypal_code(code, f"{resolve_frontend_url()}/api/paypal/callback")
@@ -1404,15 +1434,19 @@ def handle_root_paypal_callback(code: str, state: str) -> RedirectResponse | Non
 
 
 def resolve_root_nowpayments_account(checkout_view: str | None) -> dict[str, Any] | None:
-    view: PaymentView = "popup" if checkout_view == "popup" else "homepage"
+    view = normalize_payment_view(checkout_view)
     accounts = _load_accounts_raw()
     entry = accounts.get(view, {})
     api_key = entry.get("nowpayments_api_key")
     ipn_secret = entry.get("nowpayments_ipn_secret")
     if not api_key or not ipn_secret:
+        if view == "landing":
+            return resolve_root_nowpayments_account("popup") or resolve_root_nowpayments_account("homepage")
         return None
     status = entry.get("nowpayments_connection_status")
     if status and status not in ("active", "pending", "connected", None):
+        if view == "landing":
+            return resolve_root_nowpayments_account("popup") or resolve_root_nowpayments_account("homepage")
         return None
     return {
         "api_key": api_key,

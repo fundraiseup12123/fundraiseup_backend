@@ -102,7 +102,7 @@ class CreateCheckoutRequest(BaseModel):
     donor: DonorDetails
     payment_method: PaymentMethodType = "card"
     campaign_id: str | None = None
-    checkout_view: Literal["homepage", "popup"] = "homepage"
+    checkout_view: Literal["homepage", "popup", "landing"] = "homepage"
     utm: UtmParams | None = None
     device: DeviceInfo | None = None
 
@@ -318,7 +318,9 @@ def _checkout_metadata(
     if stripe_account:
         meta["stripe_connect_account"] = stripe_account
     meta["checkout_view"] = (
-        payload.checkout_view if payload.checkout_view in ("homepage", "popup") else "homepage"
+        payload.checkout_view
+        if payload.checkout_view in ("homepage", "popup", "landing")
+        else "homepage"
     )
     if payload.utm:
         utm_fields = {
@@ -358,7 +360,7 @@ def _device_from_meta(meta: dict[str, str]) -> dict[str, str]:
     cleaned = {key: value for key, value in fields.items() if value}
     checkout_view = meta.get("checkout_view")
     cleaned["checkout_view"] = (
-        checkout_view if checkout_view in ("homepage", "popup") else "homepage"
+        checkout_view if checkout_view in ("homepage", "popup", "landing") else "homepage"
     )
     return cleaned
 
@@ -550,9 +552,10 @@ def create_checkout(payload: CreateCheckoutRequest) -> CheckoutResponse:
     stripe_account: str | None = None
 
     is_root_checkout = not payload.campaign_id or payload.campaign_id == ROOT_CAMPAIGN_ID
+    use_platform_payment_accounts = is_root_checkout or payload.checkout_view == "landing"
 
-    # Homepage / pop-up must use Super Admin → Payment accounts (Connect), not org settings.
-    if is_root_checkout:
+    # Homepage / pop-up / landing must use Super Admin → Payment accounts (Connect), not org settings.
+    if use_platform_payment_accounts:
         from routers.payment_accounts import resolve_root_stripe_account
 
         stripe_account = resolve_root_stripe_account(payload.checkout_view)
@@ -578,7 +581,7 @@ def create_checkout(payload: CreateCheckoutRequest) -> CheckoutResponse:
             )
             organization_id = campaign["organization_id"]
             campaign_slug = campaign["slug"]
-            if not is_root_checkout:
+            if not use_platform_payment_accounts:
                 stripe_account, _ = resolve_stripe_account_for_checkout(
                     organization_id, payload.campaign_id
                 )
@@ -590,7 +593,7 @@ def create_checkout(payload: CreateCheckoutRequest) -> CheckoutResponse:
         organization_id = ROOT_ORG_ID
         checkout_campaign_id = ROOT_CAMPAIGN_ID
 
-    if not stripe_account and not is_root_checkout:
+    if not stripe_account and not use_platform_payment_accounts:
         raise HTTPException(
             status_code=400,
             detail=(

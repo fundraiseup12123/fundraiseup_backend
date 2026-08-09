@@ -437,6 +437,7 @@ def resolve_paypal_account_for_checkout(
     checkout_view: str | None,
 ) -> dict[str, Any] | None:
     """Resolve the org/campaign PayPal account row used for checkout (email or keys)."""
+    from routers.payment_accounts import normalize_payment_view, resolve_root_paypal_account
     from site_constants import ROOT_CAMPAIGN_ID
 
     select_cols = (
@@ -457,9 +458,11 @@ def resolve_paypal_account_for_checkout(
             return acct
         return None
 
-    resolved: dict[str, Any] | None = None
-
-    if campaign_id and campaign_id != ROOT_CAMPAIGN_ID:
+    view = normalize_payment_view(checkout_view)
+    if view == "landing" or not campaign_id or campaign_id == ROOT_CAMPAIGN_ID:
+        resolved = usable(resolve_root_paypal_account(checkout_view))
+    else:
+        resolved = None
         campaign = rest_get_one(
             "campaigns",
             params={"id": f"eq.{campaign_id}", "select": "id,organization_id,paypal_account_id"},
@@ -469,9 +472,7 @@ def resolve_paypal_account_for_checkout(
             from routers.payment_accounts import uses_platform_provider
 
             if uses_platform_provider(str(org_id), "paypal", str(campaign_id)):
-                from routers.payment_accounts import resolve_root_paypal_account
-
-                resolved = resolve_root_paypal_account(checkout_view)
+                resolved = usable(resolve_root_paypal_account(checkout_view))
             else:
                 if campaign.get("paypal_account_id"):
                     acct = rest_get_one(
@@ -508,6 +509,7 @@ def resolve_paypal_account_for_checkout(
     return resolved
 
 def resolve_paypal_payee_email_for_checkout(campaign_id: str | None, checkout_view: str | None) -> str | None:
+    from routers.payment_accounts import normalize_payment_view, resolve_root_paypal_payee
     from site_constants import ROOT_CAMPAIGN_ID
 
     def pick_email(acct: dict[str, Any] | None) -> str | None:
@@ -532,6 +534,10 @@ def resolve_paypal_payee_email_for_checkout(campaign_id: str | None, checkout_vi
     if picked:
         return picked
 
+    view = normalize_payment_view(checkout_view)
+    if view == "landing" or not campaign_id or campaign_id == ROOT_CAMPAIGN_ID:
+        return resolve_root_paypal_payee(checkout_view)
+
     if campaign_id and campaign_id != ROOT_CAMPAIGN_ID:
         campaign = rest_get_one(
             "campaigns",
@@ -539,10 +545,10 @@ def resolve_paypal_payee_email_for_checkout(campaign_id: str | None, checkout_vi
         )
         if campaign:
             org_id = campaign["organization_id"]
-            from routers.payment_accounts import resolve_root_paypal_payee, uses_platform_provider
+            from routers.payment_accounts import uses_platform_provider
 
             if uses_platform_provider(str(org_id), "paypal", str(campaign_id)):
-                return resolve_root_paypal_payee("homepage")
+                return resolve_root_paypal_payee(checkout_view)
 
             if campaign.get("paypal_account_id"):
                 acct = rest_get_one(
@@ -567,8 +573,6 @@ def resolve_paypal_payee_email_for_checkout(campaign_id: str | None, checkout_vi
             picked = pick_email(default)
             if picked:
                 return picked
-
-    from routers.payment_accounts import resolve_root_paypal_payee
 
     return resolve_root_paypal_payee(checkout_view)
 

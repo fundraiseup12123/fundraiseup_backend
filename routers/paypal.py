@@ -148,7 +148,7 @@ class CreatePayPalOrderRequest(BaseModel):
     honoree_name: str | None = None
     comment: str | None = None
     campaign_id: str | None = None
-    checkout_view: Literal["homepage", "popup"] = "homepage"
+    checkout_view: Literal["homepage", "popup", "landing"] = "homepage"
     donor: PayPalDonor
     utm: PayPalUtm | None = None
     device: PayPalDevice | None = None
@@ -170,7 +170,7 @@ class CompletePayPalRedirectRequest(BaseModel):
     honoree_name: str | None = None
     comment: str | None = None
     campaign_id: str | None = None
-    checkout_view: Literal["homepage", "popup"] = "homepage"
+    checkout_view: Literal["homepage", "popup", "landing"] = "homepage"
     donor: PayPalDonor
     utm: PayPalUtm | None = None
     device: PayPalDevice | None = None
@@ -183,7 +183,7 @@ class EnsurePayPalPlanRequest(BaseModel):
     currency: str = Field(min_length=3, max_length=3)
     cover_fees: bool = False
     campaign_id: str | None = None
-    checkout_view: Literal["homepage", "popup"] = "homepage"
+    checkout_view: Literal["homepage", "popup", "landing"] = "homepage"
 
 
 class CreatePayPalSubscriptionRequest(CreatePayPalOrderRequest):
@@ -200,7 +200,7 @@ class ActivatePayPalSubscriptionRequest(BaseModel):
     honoree_name: str | None = None
     comment: str | None = None
     campaign_id: str | None = None
-    checkout_view: Literal["homepage", "popup"] = "homepage"
+    checkout_view: Literal["homepage", "popup", "landing"] = "homepage"
     donor: PayPalDonor
     utm: PayPalUtm | None = None
     device: PayPalDevice | None = None
@@ -226,7 +226,7 @@ class CapturePayPalOrderRequest(BaseModel):
     honoree_name: str | None = None
     comment: str | None = None
     campaign_id: str | None = None
-    checkout_view: Literal["homepage", "popup"] = "homepage"
+    checkout_view: Literal["homepage", "popup", "landing"] = "homepage"
     donor: PayPalDonor
     utm: PayPalUtm | None = None
     device: PayPalDevice | None = None
@@ -362,7 +362,7 @@ def _record_paypal_donation(
             if v
         }
     checkout_view = getattr(payload, "checkout_view", None)
-    device["checkout_view"] = checkout_view if checkout_view in ("homepage", "popup") else "homepage"
+    device["checkout_view"] = checkout_view if checkout_view in ("homepage", "popup", "landing") else "homepage"
     row["device"] = device
     if payload.utm:
         utm = {
@@ -387,7 +387,7 @@ def _record_paypal_donation(
 @router.get("/checkout-config")
 def paypal_checkout_config(
     campaign_id: str | None = Query(None),
-    checkout_view: Literal["homepage", "popup"] = Query("homepage"),
+    checkout_view: Literal["homepage", "popup", "landing"] = Query("homepage"),
 ) -> dict[str, object]:
     from routers.payment_accounts import resolve_payment_processor
     from routers.paypal_connect import (
@@ -440,7 +440,7 @@ def paypal_checkout_config(
 @router.get("/client-token")
 def paypal_client_token(
     campaign_id: str | None = Query(None),
-    checkout_view: Literal["homepage", "popup"] = Query("homepage"),
+    checkout_view: Literal["homepage", "popup", "landing"] = Query("homepage"),
 ) -> dict[str, object]:
     """Client token for Advanced Card Fields when payment_processor=paypal (keys account)."""
     from paypal_client import create_paypal_client_token
@@ -475,7 +475,7 @@ def paypal_client_token(
 class RegisterApplePayDomainRequest(BaseModel):
     domain: str = Field(min_length=1, max_length=253)
     campaign_id: str | None = None
-    checkout_view: Literal["homepage", "popup"] = "homepage"
+    checkout_view: Literal["homepage", "popup", "landing"] = "homepage"
 
 
 @router.post("/register-apple-pay-domain")
@@ -580,15 +580,16 @@ def paypal_prepare_redirect(payload: PreparePayPalRedirectRequest) -> dict[str, 
 
     if keys_ready and account:
         payment_ref = str(uuid.uuid4())
+        return_path = (
+            "/landing-page"
+            if payload.checkout_view == "landing"
+            else ("/pop-up-view" if payload.checkout_view == "popup" else "/")
+        )
         return_url = payload.return_url or (
-            f"{frontend_url}/pop-up-view?donation=success&provider=paypal"
-            if payload.checkout_view == "popup"
-            else f"{frontend_url}/?donation=success&provider=paypal"
+            f"{frontend_url}{return_path}?donation=success&provider=paypal"
         )
         cancel_url = payload.cancel_url or (
-            f"{frontend_url}/pop-up-view?donation=cancelled&provider=paypal"
-            if payload.checkout_view == "popup"
-            else f"{frontend_url}/?donation=cancelled&provider=paypal"
+            f"{frontend_url}{return_path}?donation=cancelled&provider=paypal"
         )
         sep = "&" if "?" in return_url else "?"
         return_url = f"{return_url}{sep}payment_ref={payment_ref}"
@@ -670,15 +671,16 @@ def paypal_prepare_redirect(payload: PreparePayPalRedirectRequest) -> dict[str, 
         )
 
     payment_ref = str(uuid.uuid4())
+    return_path = (
+        "/landing-page"
+        if payload.checkout_view == "landing"
+        else ("/pop-up-view" if payload.checkout_view == "popup" else "/")
+    )
     return_url = payload.return_url or (
-        f"{frontend_url}/pop-up-view?donation=success&provider=paypal&payment_ref={payment_ref}"
-        if payload.checkout_view == "popup"
-        else f"{frontend_url}/?donation=success&provider=paypal&payment_ref={payment_ref}"
+        f"{frontend_url}{return_path}?donation=success&provider=paypal&payment_ref={payment_ref}"
     )
     cancel_url = payload.cancel_url or (
-        f"{frontend_url}/pop-up-view?donation=cancelled&provider=paypal"
-        if payload.checkout_view == "popup"
-        else f"{frontend_url}/?donation=cancelled&provider=paypal"
+        f"{frontend_url}{return_path}?donation=cancelled&provider=paypal"
     )
 
     params = {
@@ -1092,7 +1094,7 @@ def paypal_capture_order(payload: CapturePayPalOrderRequest) -> CapturePayPalOrd
 @router.get("/config")
 def paypal_config(
     campaign_id: str | None = Query(None),
-    checkout_view: Literal["homepage", "popup"] = Query("homepage"),
+    checkout_view: Literal["homepage", "popup", "landing"] = Query("homepage"),
 ) -> dict[str, str | bool]:
     from routers.paypal_connect import resolve_paypal_payee_email_for_checkout
 
