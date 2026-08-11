@@ -630,8 +630,9 @@ def _create_monthly_subscription(
             "save_default_payment_method": "on_subscription",
         },
         "expand": [
+            # Stripe allows at most 4 expand levels — do not add payment_intent under payments.
             "latest_invoice.confirmation_secret",
-            "latest_invoice.payments.data.payment.payment_intent",
+            "latest_invoice.payments.data.payment",
         ],
         "metadata": full_metadata,
     }
@@ -677,9 +678,12 @@ def _subscription_payment_details(
         retrieve_kwargs["stripe_account"] = stripe_account
 
     invoice = subscription.latest_invoice
-    if isinstance(invoice, str):
+    invoice_id = invoice if isinstance(invoice, str) else getattr(invoice, "id", None)
+    needs_retrieve = isinstance(invoice, str) or not getattr(invoice, "confirmation_secret", None)
+    if needs_retrieve and invoice_id:
+        # Max 4 expand levels on Invoice (payments.data.payment.payment_intent).
         invoice = stripe.Invoice.retrieve(
-            invoice,
+            str(invoice_id),
             expand=["confirmation_secret", "payments.data.payment.payment_intent", "payment_intent"],
             **retrieve_kwargs,
         )
@@ -699,6 +703,13 @@ def _subscription_payment_details(
     if payment_intent:
         if isinstance(payment_intent, str):
             payment_intent = stripe.PaymentIntent.retrieve(payment_intent, **retrieve_kwargs)
+        if payment_intent.client_secret:
+            return payment_intent.client_secret, payment_intent.id
+
+    # Newer invoice-payment objects may only expose the PI id on payments[].payment.
+    pi_id = _payment_intent_id_from_invoice(invoice)
+    if pi_id:
+        payment_intent = stripe.PaymentIntent.retrieve(pi_id, **retrieve_kwargs)
         if payment_intent.client_secret:
             return payment_intent.client_secret, payment_intent.id
 
