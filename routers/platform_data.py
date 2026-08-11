@@ -493,6 +493,119 @@ def _merge_keyed_rows(
             bucket[field] = float(bucket.get(field) or 0) + float(row.get(field) or 0)
 
 
+@router.get("/utm-report")
+def platform_utm_report(
+    user: Annotated[AuthUser, Depends(require_super_admin)],
+    organization_id: str | None = Query(None),
+    campaign_id: str | None = Query(None),
+    date_preset: str = Query("7d"),
+    date_from: str | None = Query(None),
+    date_to: str | None = Query(None),
+    timezone: str | None = Query(None),
+    reporting_currency: str = Query("USD"),
+) -> dict[str, Any]:
+    """Collective utm_campaign results across all organizations (super-admin)."""
+    reporting_currency = (reporting_currency or "USD").strip().upper() or "USD"
+    tz_name = ad._org_zone(timezone or "UTC").key
+    org_names = _org_name_map()
+    campaigns = _all_campaigns(organization_id)
+    filter_opts = _filter_options(org_names, campaigns, include_sources=False)
+
+    resolved_from, resolved_to = ad._insights_date_range(
+        date_preset, date_from, date_to, tz_name
+    )
+
+    params: dict[str, str] = {
+        "select": "amount,currency,created_at,campaign_id,utm,status,organization_id",
+        "order": "created_at.desc",
+        "limit": "10000",
+    }
+    if organization_id:
+        params["organization_id"] = f"eq.{organization_id}"
+    if campaign_id:
+        params["campaign_id"] = f"eq.{campaign_id}"
+    if resolved_from and resolved_to:
+        params["and"] = f"(created_at.gte.{resolved_from},created_at.lte.{resolved_to})"
+    elif resolved_from:
+        params["created_at"] = f"gte.{resolved_from}"
+    elif resolved_to:
+        params["created_at"] = f"lte.{resolved_to}"
+
+    rows = rest_get("donations", params=params) or []
+    if organization_id:
+        rows = ad._merge_orphan_donations(
+            organization_id,
+            rows,
+            campaigns,
+            campaign_id=campaign_id,
+            designation=None,
+            status=None,
+            frequency=None,
+            date_from=resolved_from,
+            date_to=resolved_to,
+            select="amount,currency,created_at,campaign_id,utm,status,organization_id",
+        )
+
+    rows = ad._insights_countable(rows)
+
+    counts: dict[str, int] = {}
+    amounts: dict[str, float] = {}
+    for row in rows:
+        label = ad._utm_campaign_label(row.get("utm"))
+        counts[label] = counts.get(label, 0) + 1
+        amounts[label] = round(
+            amounts.get(label, 0.0)
+            + convert_to_reporting(
+                float(row.get("amount") or 0),
+                str(row.get("currency") or reporting_currency).upper(),
+                reporting_currency,
+            ),
+            2,
+        )
+
+    table_rows = [
+        {
+            "campaign": label,
+            "results": counts[label],
+            "amount": amounts.get(label, 0.0),
+        }
+        for label in sorted(counts.keys(), key=lambda key: (-counts[key], key.lower()))
+    ]
+
+    empty_results = counts.get("", 0)
+    named_results = sum(count for label, count in counts.items() if label)
+    return {
+        "reporting_currency": reporting_currency,
+        "date_preset": date_preset,
+        "date_from": date_from or (resolved_from[:10] if resolved_from else None),
+        "date_to": date_to or (resolved_to[:10] if resolved_to else None),
+        "date_label": ad._date_label(date_preset, date_from, date_to, tz_name),
+        "timezone": tz_name,
+        "selected_organization_id": organization_id or "all",
+        "selected_campaign_id": campaign_id or "all",
+        "organizations": filter_opts["organizations"],
+        "campaigns": [
+            {
+                "id": c.get("id"),
+                "name": c.get("name") or "Campaign",
+                "slug": c.get("slug") or "",
+                "organization_id": c.get("organization_id") or "",
+                "organization_name": org_names.get(str(c.get("organization_id") or ""), ""),
+            }
+            for c in campaigns
+            if c.get("id")
+        ],
+        "summary": {
+            "total_results": len(rows),
+            "utm_campaign_values": len([label for label in counts if label]),
+            "named_campaign_results": named_results,
+            "empty_campaign_results": empty_results,
+            "unique_rows": len(table_rows),
+        },
+        "rows": table_rows,
+    }
+
+
 @router.get("/google-analytics")
 def platform_google_analytics(
     user: Annotated[AuthUser, Depends(require_super_admin)],
