@@ -604,6 +604,12 @@ def authorizenet_charge(payload: AnetChargeRequest) -> dict[str, Any]:
 @router.post("/subscribe")
 def authorizenet_subscribe(payload: AnetSubscribeRequest) -> dict[str, Any]:
     _require_hybrid(payload.campaign_id)
+    email = (payload.donor.email or "").strip().lower()
+    if not email or email in {"pending@wallet.local", "donor@example.com"}:
+        raise HTTPException(
+            status_code=400,
+            detail="Enter a valid email address before starting a monthly donation.",
+        )
     creds = resolve_authorizenet_credentials_for_checkout(payload.campaign_id, payload.checkout_view)
     if not creds:
         raise HTTPException(status_code=400, detail="Authorize.net credentials are not configured")
@@ -634,7 +640,11 @@ def authorizenet_subscribe(payload: AnetSubscribeRequest) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     sub_id = result["subscription_id"]
+    txn_id = str(result.get("transaction_id") or "").strip()
     order_id = f"authorizenet:sub:{sub_id}"
+    if txn_id:
+        # Keep a stable link to the first-month charge as well.
+        order_id = f"authorizenet:sub:{sub_id}:txn:{txn_id}"
     saved = _record_anet_donation(
         order_id=order_id,
         payment_method=payload.payment_method,
@@ -657,6 +667,7 @@ def authorizenet_subscribe(payload: AnetSubscribeRequest) -> dict[str, Any]:
         "order_id": order_id,
         "status": "ACTIVE",
         "recorded": bool(saved),
+        "transaction_id": txn_id or None,
     }
 
 

@@ -49,19 +49,22 @@ def retrieve_payment_intent(
     payment_intent_id: str,
     *,
     stripe_account: str | None = None,
+    expand: list[str] | None = None,
 ) -> tuple[stripe.PaymentIntent, str | None]:
     """Retrieve a payment intent from the platform or a connected account."""
+    expand_opts = {"expand": expand} if expand else {}
     if stripe_account:
         return (
             stripe.PaymentIntent.retrieve(
                 payment_intent_id,
                 stripe_account=stripe_account,
+                **expand_opts,
             ),
             stripe_account,
         )
 
     try:
-        return stripe.PaymentIntent.retrieve(payment_intent_id), None
+        return stripe.PaymentIntent.retrieve(payment_intent_id, **expand_opts), None
     except stripe.error.InvalidRequestError as exc:
         message = str(exc.user_message or exc).lower()
         if "no such payment_intent" not in message and "no such paymentintent" not in message:
@@ -73,6 +76,7 @@ def retrieve_payment_intent(
                 stripe.PaymentIntent.retrieve(
                     payment_intent_id,
                     stripe_account=account_id,
+                    **expand_opts,
                 ),
                 account_id,
             )

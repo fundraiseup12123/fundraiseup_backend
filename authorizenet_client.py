@@ -146,6 +146,9 @@ def create_transaction_opaque(
     data_value: str,
     order_invoice: str | None = None,
     customer_email: str | None = None,
+    first_name: str | None = None,
+    last_name: str | None = None,
+    create_profile: bool = False,
     env: str = "production",
 ) -> dict[str, Any]:
     transaction_request: dict[str, Any] = {
@@ -163,28 +166,198 @@ def create_transaction_opaque(
         transaction_request["order"] = {"invoiceNumber": order_invoice[:20]}
     if customer_email:
         transaction_request["customer"] = {"email": customer_email[:255]}
-
-    body = {
-        "createTransactionRequest": {
-            "merchantAuthentication": {
-                "name": api_login_id,
-                "transactionKey": transaction_key,
-            },
-            "transactionRequest": transaction_request,
+    if first_name or last_name:
+        transaction_request["billTo"] = {
+            "firstName": (first_name or "Donor")[:50],
+            "lastName": (last_name or "Donor")[:50],
         }
+
+    request_body: dict[str, Any] = {
+        "merchantAuthentication": {
+            "name": api_login_id,
+            "transactionKey": transaction_key,
+        },
+        "transactionRequest": transaction_request,
     }
+    # createProfile on the initial charge lets us ARB from the customer profile next.
+    if create_profile:
+        request_body["transactionRequest"] = transaction_request
+        request_body["profile"] = {"createProfile": True}
+
+    body = {"createTransactionRequest": request_body}
     data = _post(body, env=env)
     txn = data.get("transactionResponse") if isinstance(data.get("transactionResponse"), dict) else {}
     # Approved (1) only — held-for-review (4) is not a completed gift.
     response_code = str(txn.get("responseCode") or "")
     if not _messages_ok(data) or response_code != "1":
         raise RuntimeError(_first_error(data))
+
+    profile_response = (
+        data.get("profileResponse") if isinstance(data.get("profileResponse"), dict) else {}
+    )
+    txn_profile = txn.get("profile") if isinstance(txn.get("profile"), dict) else {}
+    customer_profile_id = str(
+        profile_response.get("customerProfileId")
+        or txn_profile.get("customerProfileId")
+        or ""
+    )
+    payment_profile_ids = (
+        profile_response.get("customerPaymentProfileIdList")
+        or txn_profile.get("customerPaymentProfileIdList")
+    )
+    customer_payment_profile_id = ""
+    if isinstance(payment_profile_ids, list) and payment_profile_ids:
+        customer_payment_profile_id = str(payment_profile_ids[0] or "")
+    elif isinstance(payment_profile_ids, dict):
+        numeric = payment_profile_ids.get("numericString")
+        if isinstance(numeric, list) and numeric:
+            customer_payment_profile_id = str(numeric[0] or "")
+        elif numeric:
+            customer_payment_profile_id = str(numeric)
+    if not customer_payment_profile_id:
+        single = profile_response.get("customerPaymentProfileId") or txn_profile.get(
+            "customerPaymentProfileId"
+        )
+        if single:
+            customer_payment_profile_id = str(single)
+
     return {
         "transaction_id": str(txn.get("transId") or ""),
         "auth_code": str(txn.get("authCode") or ""),
         "response_code": response_code,
         "account_type": str(txn.get("accountType") or ""),
+        "customer_profile_id": customer_profile_id,
+        "customer_payment_profile_id": customer_payment_profile_id,
         "raw": data,
+    }
+
+
+def create_arb_subscription_from_profile(
+    *,
+    api_login_id: str,
+    transaction_key: str,
+    amount: float,
+    customer_profile_id: str,
+    customer_payment_profile_id: str,
+    customer_email: str,
+    first_name: str,
+    last_name: str,
+    subscription_name: str,
+    start_date: str,
+    env: str = "production",
+) -> dict[str, Any]:
+    """Create monthly ARB from an existing CIM profile (after first-month charge)."""
+    body = {
+        "ARBCreateSubscriptionRequest": {
+            "merchantAuthentication": {
+                "name": api_login_id,
+                "transactionKey": transaction_key,
+            },
+            "subscription": {
+                "name": (subscription_name or "Monthly donation")[:50],
+                "paymentSchedule": {
+                    "interval": {"length": 1, "unit": "months"},
+                    "startDate": start_date,
+                    "totalOccurrences": 9999,
+                },
+                "amount": f"{amount:.2f}",
+                "profile": {
+                    "customerProfileId": customer_profile_id,
+                    "customerPaymentProfileId": customer_payment_profile_id,
+                },
+                "order": {
+                    "invoiceNumber": f"sub{__import__('time').time_ns() % 10**12}"[:20],
+                    "description": "Monthly donation",
+                },
+                "customer": {"email": (customer_email or "")[:255]},
+                "billTo": {
+                    "firstName": (first_name or "Donor")[:50],
+                    "lastName": (last_name or "Donor")[:50],
+                },
+            },
+        }
+    }
+    data = _post(body, env=env)
+    if not _messages_ok(data):
+        raise RuntimeError(_first_error(data))
+    sub_id = str(data.get("subscriptionId") or "")
+    if not sub_id:
+        raise RuntimeError("Authorize.net did not return a subscription id")
+    return {"subscription_id": sub_id, "raw": data}
+
+
+def create_arb_subscription_from_opaque(
+    *,
+    api_login_id: str,
+    transaction_key: str,
+    amount: float,
+    currency: str,
+    data_descriptor: str,
+    data_value: str,
+    customer_email: str,
+    first_name: str,
+    last_name: str,
+    subscription_name: str,
+    env: str = "production",
+) -> dict[str, Any]:
+    """
+    Monthly donation: charge month 1 immediately (creates CIM profile), then ARB
+    renewals start next month. Accept.js nonces cannot reliably drive ARB alone
+    and must not be reused.
+    """
+    from datetime import date
+
+    today = date.today()
+    if today.month == 12:
+        next_month = date(today.year + 1, 1, min(today.day, 28))
+    else:
+        # Keep day-of-month stable when possible (cap at 28 for simplicity).
+        day = min(today.day, 28)
+        next_month = date(today.year, today.month + 1, day)
+
+    invoice = f"d{int(__import__('time').time())}{__import__('uuid').uuid4().hex[:6]}"[:20]
+    first_charge = create_transaction_opaque(
+        api_login_id=api_login_id,
+        transaction_key=transaction_key,
+        amount=amount,
+        currency=currency,
+        data_descriptor=data_descriptor,
+        data_value=data_value,
+        order_invoice=invoice,
+        customer_email=customer_email,
+        first_name=first_name,
+        last_name=last_name,
+        create_profile=True,
+        env=env,
+    )
+
+    profile_id = (first_charge.get("customer_profile_id") or "").strip()
+    payment_profile_id = (first_charge.get("customer_payment_profile_id") or "").strip()
+    if not profile_id or not payment_profile_id:
+        raise RuntimeError(
+            "Authorize.net charged the first month but did not return a customer profile "
+            "for renewals. Enable Customer Information Manager (CIM) on the merchant account."
+        )
+
+    subscription = create_arb_subscription_from_profile(
+        api_login_id=api_login_id,
+        transaction_key=transaction_key,
+        amount=amount,
+        customer_profile_id=profile_id,
+        customer_payment_profile_id=payment_profile_id,
+        customer_email=customer_email,
+        first_name=first_name,
+        last_name=last_name,
+        subscription_name=subscription_name,
+        start_date=next_month.isoformat(),
+        env=env,
+    )
+    return {
+        "subscription_id": subscription["subscription_id"],
+        "transaction_id": first_charge.get("transaction_id") or "",
+        "customer_profile_id": profile_id,
+        "customer_payment_profile_id": payment_profile_id,
+        "raw": {"charge": first_charge.get("raw"), "subscription": subscription.get("raw")},
     }
 
 
@@ -289,61 +462,3 @@ def complete_paypal_express(
         "response_code": response_code,
         "raw": data,
     }
-
-
-def create_arb_subscription_from_opaque(
-    *,
-    api_login_id: str,
-    transaction_key: str,
-    amount: float,
-    currency: str,
-    data_descriptor: str,
-    data_value: str,
-    customer_email: str,
-    first_name: str,
-    last_name: str,
-    subscription_name: str,
-    env: str = "production",
-) -> dict[str, Any]:
-    """Create a monthly ARB subscription using Accept.js opaque payment data."""
-    body = {
-        "ARBCreateSubscriptionRequest": {
-            "merchantAuthentication": {
-                "name": api_login_id,
-                "transactionKey": transaction_key,
-            },
-            "subscription": {
-                "name": (subscription_name or "Monthly donation")[:50],
-                "paymentSchedule": {
-                    "interval": {"length": 1, "unit": "months"},
-                    "startDate": __import__("datetime").date.today().isoformat(),
-                    "totalOccurrences": 9999,
-                },
-                "amount": f"{amount:.2f}",
-                "payment": {
-                    "opaqueData": {
-                        "dataDescriptor": data_descriptor,
-                        "dataValue": data_value,
-                    }
-                },
-                "order": {
-                    "invoiceNumber": f"sub{__import__('time').time_ns() % 10**12}"[:20],
-                    "description": "Monthly donation",
-                },
-                "customer": {"email": customer_email[:255]},
-                "billTo": {
-                    "firstName": (first_name or "Donor")[:50],
-                    "lastName": (last_name or "Donor")[:50],
-                },
-            },
-        }
-    }
-    # currency is not always accepted on ARB; merchant account currency applies
-    _ = currency
-    data = _post(body, env=env)
-    if not _messages_ok(data):
-        raise RuntimeError(_first_error(data))
-    sub_id = str(data.get("subscriptionId") or "")
-    if not sub_id:
-        raise RuntimeError("Authorize.net did not return a subscription id")
-    return {"subscription_id": sub_id, "raw": data}

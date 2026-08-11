@@ -434,6 +434,143 @@ def _payment_intent_id_from_invoice(invoice: stripe.Invoice) -> str | None:
     return None
 
 
+def _payment_intent_id_from_client_secret(client_secret: str | None) -> str | None:
+    """Parse pi_… from a PaymentIntent client_secret when invoice expansion omits the id."""
+    if not client_secret or not isinstance(client_secret, str):
+        return None
+    if client_secret.startswith("pi_") and "_secret_" in client_secret:
+        return client_secret.split("_secret_", 1)[0]
+    return None
+
+
+def _attach_metadata_to_payment_intent(
+    payment_intent_id: str | None,
+    metadata: dict[str, str],
+    *,
+    stripe_account: str | None = None,
+) -> None:
+    """Copy checkout metadata onto the first invoice PI (webhook + /donations/record)."""
+    if not payment_intent_id:
+        return
+    try:
+        from stripe_intents import stripe_request_kwargs as _srk
+
+        stripe.PaymentIntent.modify(
+            payment_intent_id,
+            metadata=metadata,
+            **_srk(stripe_account),
+        )
+    except Exception:
+        logging.getLogger(__name__).exception(
+            "Failed to attach checkout metadata to PaymentIntent %s",
+            payment_intent_id,
+        )
+
+
+def _cancel_incomplete_subscription(
+    subscription_id: str | None,
+    *,
+    stripe_account: str | None = None,
+) -> None:
+    if not subscription_id:
+        return
+    try:
+        from stripe_intents import stripe_request_kwargs as _srk
+
+        stripe.Subscription.cancel(subscription_id, **_srk(stripe_account))
+    except Exception:
+        try:
+            from stripe_intents import stripe_request_kwargs as _srk
+
+            stripe.Subscription.delete(subscription_id, **_srk(stripe_account))
+        except Exception:
+            logging.getLogger(__name__).exception(
+                "Failed to cancel incomplete subscription %s",
+                subscription_id,
+            )
+
+
+def _create_monthly_subscription(
+    *,
+    customer_id: str,
+    display_currency: str,
+    payment_method: PaymentMethodType,
+    base_amount: float,
+    total_display: float,
+    cover_fees: bool,
+    metadata: dict[str, str],
+    stripe_account: str | None = None,
+) -> CheckoutResponse:
+    """Create an incomplete monthly subscription and return checkout secrets."""
+    charge_curr = charge_currency(display_currency, payment_method)
+    charge_total = convert_for_charge(total_display, display_currency, payment_method)
+    stripe_amount = to_stripe_amount(charge_total, charge_curr)
+
+    full_metadata = {
+        **metadata,
+        "frequency": "monthly",
+        "cover_fees": str(cover_fees).lower(),
+        "base_amount": str(base_amount),
+        "charge_currency": charge_curr.upper(),
+        "charge_amount": str(charge_total),
+        "total_display": str(total_display),
+    }
+
+    product_kwargs: dict = {"name": "Monthly Donation"}
+    if stripe_account:
+        product_kwargs["stripe_account"] = stripe_account
+    product = stripe.Product.create(**product_kwargs)
+    price_kwargs: dict = {
+        "unit_amount": stripe_amount,
+        "currency": charge_curr,
+        "recurring": {"interval": "month"},
+        "product": product.id,
+    }
+    if stripe_account:
+        price_kwargs["stripe_account"] = stripe_account
+    price = stripe.Price.create(**price_kwargs)
+    sub_kwargs: dict = {
+        "customer": customer_id,
+        "items": [{"price": price.id}],
+        "payment_behavior": "default_incomplete",
+        "payment_settings": {
+            "payment_method_types": _payment_method_types(charge_curr, payment_method),
+            "save_default_payment_method": "on_subscription",
+        },
+        "expand": ["latest_invoice.confirmation_secret"],
+        "metadata": full_metadata,
+    }
+    if stripe_account:
+        sub_kwargs["stripe_account"] = stripe_account
+    subscription = stripe.Subscription.create(**sub_kwargs)
+    client_secret, payment_intent_id = _subscription_payment_details(
+        subscription,
+        stripe_account=stripe_account,
+    )
+    pi_metadata = {
+        **full_metadata,
+        "subscription_id": subscription.id,
+        "stripe_customer_id": customer_id,
+    }
+    _attach_metadata_to_payment_intent(
+        payment_intent_id,
+        pi_metadata,
+        stripe_account=stripe_account,
+    )
+
+    return _build_checkout_response(
+        client_secret=client_secret,
+        payment_intent_id=payment_intent_id,
+        display_currency=display_currency,
+        payment_method=payment_method,
+        base_amount=base_amount,
+        total_display=total_display,
+        frequency="monthly",
+        subscription_id=subscription.id,
+        stripe_connect_account=stripe_account,
+    )
+
+
 def _subscription_payment_details(
     subscription: stripe.Subscription,
     *,
@@ -457,7 +594,11 @@ def _subscription_payment_details(
 
     confirmation = getattr(invoice, "confirmation_secret", None)
     if confirmation and getattr(confirmation, "client_secret", None):
-        return confirmation.client_secret, _payment_intent_id_from_invoice(invoice)
+        secret = confirmation.client_secret
+        pi_id = _payment_intent_id_from_invoice(invoice) or _payment_intent_id_from_client_secret(
+            secret
+        )
+        return secret, pi_id
 
     payment_intent = getattr(invoice, "payment_intent", None)
     if payment_intent:
@@ -485,7 +626,11 @@ def _build_checkout_response(
     charge_curr = charge_currency(display_currency, payment_method)
     charge_total = convert_for_charge(total_display, display_currency, payment_method)
     resolved_secret = client_secret or (payment_intent.client_secret if payment_intent else None)
-    resolved_payment_intent_id = payment_intent_id or (payment_intent.id if payment_intent else None)
+    resolved_payment_intent_id = (
+        payment_intent_id
+        or (payment_intent.id if payment_intent else None)
+        or _payment_intent_id_from_client_secret(resolved_secret)
+    )
 
     if not resolved_secret:
         raise HTTPException(status_code=500, detail="Unable to create subscription payment")
@@ -516,10 +661,19 @@ def _intent_metadata(payment_intent: stripe.PaymentIntent) -> dict[str, str]:
     return raw.to_dict()
 
 
-def _payload_from_intent(existing: stripe.PaymentIntent, payment_method: PaymentMethodType, cover_fees: bool) -> CreateCheckoutRequest:
-    meta = _intent_metadata(existing)
+def _payload_from_intent(
+    existing: stripe.PaymentIntent,
+    payment_method: PaymentMethodType,
+    cover_fees: bool,
+    *,
+    stripe_account: str | None = None,
+) -> CreateCheckoutRequest:
+    meta = _metadata_from_payment_intent(existing, stripe_account=stripe_account)
     display_currency = meta.get("display_currency", existing.currency.upper())
     base_amount = float(meta.get("base_amount", from_stripe_amount(existing.amount, existing.currency)))
+    checkout_view = meta.get("checkout_view", "homepage")
+    if checkout_view not in {"homepage", "popup", "landing"}:
+        checkout_view = "homepage"
 
     return CreateCheckoutRequest(
         amount=base_amount,
@@ -530,6 +684,8 @@ def _payload_from_intent(existing: stripe.PaymentIntent, payment_method: Payment
         honoree_name=meta.get("honoree_name") or None,
         comment=meta.get("comment") or None,
         payment_method=payment_method,
+        campaign_id=meta.get("campaign_id"),
+        checkout_view=checkout_view,  # type: ignore[arg-type]
         donor=DonorDetails(
             first_name=meta.get("first_name", ""),
             last_name=meta.get("last_name", ""),
@@ -626,69 +782,15 @@ def create_checkout(payload: CreateCheckoutRequest) -> CheckoutResponse:
         customer = stripe.Customer.create(**customer_kwargs)
 
         if payload.frequency == "monthly":
-            charge_curr = charge_currency(display_currency, payment_method)
-            charge_total = convert_for_charge(total_display, display_currency, payment_method)
-            stripe_amount = to_stripe_amount(charge_total, charge_curr)
-
-            product_kwargs: dict = {"name": "Monthly Donation"}
-            if stripe_account:
-                product_kwargs["stripe_account"] = stripe_account
-            product = stripe.Product.create(**product_kwargs)
-            price_kwargs: dict = {
-                "unit_amount": stripe_amount,
-                "currency": charge_curr,
-                "recurring": {"interval": "month"},
-                "product": product.id,
-            }
-            if stripe_account:
-                price_kwargs["stripe_account"] = stripe_account
-            price = stripe.Price.create(**price_kwargs)
-            sub_kwargs: dict = {
-                "customer": customer.id,
-                "items": [{"price": price.id}],
-                "payment_behavior": "default_incomplete",
-                "payment_settings": {
-                    "payment_method_types": _payment_method_types(charge_curr, payment_method),
-                    "save_default_payment_method": "on_subscription",
-                },
-                "expand": ["latest_invoice.confirmation_secret"],
-                "metadata": metadata,
-            }
-            if stripe_account:
-                sub_kwargs["stripe_account"] = stripe_account
-            subscription = stripe.Subscription.create(**sub_kwargs)
-            client_secret, payment_intent_id = _subscription_payment_details(
-                subscription,
-                stripe_account=stripe_account,
-            )
-            # Persist IDs onto the first invoice PI metadata when available (webhook /record).
-            try:
-                if payment_intent_id:
-                    from stripe_intents import stripe_request_kwargs as _srk
-
-                    stripe.PaymentIntent.modify(
-                        payment_intent_id,
-                        receipt_email="",
-                        metadata={
-                            **metadata,
-                            "subscription_id": subscription.id,
-                            "stripe_customer_id": customer.id,
-                        },
-                        **_srk(stripe_account),
-                    )
-            except Exception:
-                pass
-
-            return _build_checkout_response(
-                client_secret=client_secret,
-                payment_intent_id=payment_intent_id,
+            return _create_monthly_subscription(
+                customer_id=customer.id,
                 display_currency=display_currency,
                 payment_method=payment_method,
                 base_amount=base_amount,
                 total_display=total_display,
-                frequency="monthly",
-                subscription_id=subscription.id,
-                stripe_connect_account=stripe_account,
+                cover_fees=payload.cover_fees,
+                metadata=metadata,
+                stripe_account=stripe_account,
             )
 
         payment_intent = _create_once_payment_intent(
@@ -733,19 +835,47 @@ def switch_payment_method(payment_intent_id: str, payload: SwitchPaymentMethodRe
         if existing.status in {"canceled", "succeeded"}:
             raise HTTPException(status_code=400, detail="This payment session is no longer active.")
 
-        meta = _intent_metadata(existing)
+        meta = _metadata_from_payment_intent(existing, stripe_account=stripe_account)
         display_currency = meta.get("display_currency", existing.currency.upper()).lower()
         payment_method = payload.payment_method
 
         if payment_method == "paypal" and not supports_paypal(display_currency):
             raise HTTPException(status_code=400, detail="PayPal is only available for USD donations.")
 
-        checkout_payload = _payload_from_intent(existing, payment_method, payload.cover_fees)
+        checkout_payload = _payload_from_intent(
+            existing,
+            payment_method,
+            payload.cover_fees,
+            stripe_account=stripe_account,
+        )
         base_amount, total_display = _resolve_amounts(
             checkout_payload.amount,
             display_currency,
             payload.cover_fees,
         )
+
+        frequency = meta.get("frequency", "once")
+        subscription_id = meta.get("subscription_id")
+        if frequency == "monthly" or subscription_id:
+            customer_id = _customer_id(getattr(existing, "customer", None) or meta.get("stripe_customer_id"))
+            _cancel_incomplete_subscription(subscription_id, stripe_account=stripe_account)
+            switch_meta = {
+                k: str(v)
+                for k, v in meta.items()
+                if v is not None and k not in {"subscription_id"}
+            }
+            switch_meta["payment_method"] = payment_method
+            switch_meta["cover_fees"] = str(payload.cover_fees).lower()
+            return _create_monthly_subscription(
+                customer_id=customer_id,
+                display_currency=display_currency,
+                payment_method=payment_method,
+                base_amount=base_amount,
+                total_display=total_display,
+                cover_fees=payload.cover_fees,
+                metadata=switch_meta,
+                stripe_account=stripe_account,
+            )
 
         charge_curr = charge_currency(display_currency, payment_method)
         charge_total = convert_for_charge(total_display, display_currency, payment_method)
@@ -768,7 +898,6 @@ def switch_payment_method(payment_intent_id: str, payload: SwitchPaymentMethodRe
             **stripe_kwargs,
         )
 
-        frequency = meta.get("frequency", "once")
         return _build_checkout_response(
             payment_intent=payment_intent,
             display_currency=display_currency,
@@ -793,11 +922,37 @@ def update_checkout(payment_intent_id: str, payload: UpdateCheckoutRequest) -> C
     try:
         existing, stripe_account = retrieve_payment_intent(payment_intent_id)
         stripe_kwargs = stripe_request_kwargs(stripe_account)
-        meta = _intent_metadata(existing)
+        meta = _metadata_from_payment_intent(existing, stripe_account=stripe_account)
         display_currency = meta.get("display_currency", existing.currency.upper()).lower()
         payment_method: PaymentMethodType = meta.get("payment_method", "card")  # type: ignore[assignment]
         base_amount = float(meta.get("base_amount", from_stripe_amount(existing.amount, existing.currency)))
         _, total_display = _resolve_amounts(base_amount, display_currency, payload.cover_fees)
+        frequency = meta.get("frequency", "once")
+        subscription_id = meta.get("subscription_id")
+
+        # Invoice-backed subscription PaymentIntents cannot have their amount modified.
+        # Cancel the incomplete subscription and create a new one with the updated total.
+        if frequency == "monthly" or subscription_id:
+            customer_id = _customer_id(getattr(existing, "customer", None) or meta.get("stripe_customer_id"))
+            if not customer_id:
+                raise HTTPException(status_code=400, detail="Payment intent has no customer.")
+            _cancel_incomplete_subscription(subscription_id, stripe_account=stripe_account)
+            refreshed_meta = {
+                k: str(v)
+                for k, v in meta.items()
+                if v is not None and k not in {"subscription_id"}
+            }
+            return _create_monthly_subscription(
+                customer_id=customer_id,
+                display_currency=display_currency,
+                payment_method=payment_method,
+                base_amount=base_amount,
+                total_display=total_display,
+                cover_fees=payload.cover_fees,
+                metadata=refreshed_meta,
+                stripe_account=stripe_account,
+            )
+
         charge_total = convert_for_charge(total_display, display_currency, payment_method)
         charge_curr = charge_currency(display_currency, payment_method)
         stripe_amount = to_stripe_amount(charge_total, charge_curr)
@@ -814,7 +969,6 @@ def update_checkout(payment_intent_id: str, payload: UpdateCheckoutRequest) -> C
             **stripe_kwargs,
         )
 
-        frequency = meta.get("frequency", "once")
         return _build_checkout_response(
             payment_intent=updated,
             display_currency=display_currency,
@@ -824,6 +978,8 @@ def update_checkout(payment_intent_id: str, payload: UpdateCheckoutRequest) -> C
             frequency=frequency if frequency in {"once", "monthly"} else "once",
             stripe_connect_account=stripe_account or meta.get("stripe_connect_account"),
         )
+    except HTTPException:
+        raise
     except stripe.error.StripeError as exc:
         raise HTTPException(status_code=400, detail=str(exc.user_message or exc)) from exc
 
@@ -836,15 +992,27 @@ def _metadata_from_payment_intent(
     from stripe_intents import stripe_request_kwargs
 
     meta = _intent_metadata(payment_intent)
-    if meta.get("first_name"):
-        return meta
+    sub_meta: dict[str, str] = {}
 
     try:
         invoice_id = payment_intent["invoice"]
     except (KeyError, TypeError, AttributeError):
         invoice_id = None
     if not invoice_id:
-        return meta
+        # Prefer explicit subscription_id on PI metadata when invoice is absent.
+        subscription_id = meta.get("subscription_id")
+        if subscription_id:
+            try:
+                subscription = stripe.Subscription.retrieve(
+                    subscription_id,
+                    **stripe_request_kwargs(stripe_account),
+                )
+                raw = getattr(subscription, "metadata", None)
+                if raw:
+                    sub_meta = raw.to_dict() if hasattr(raw, "to_dict") else dict(raw)
+            except Exception:
+                pass
+        return {**sub_meta, **meta}
 
     try:
         invoice_id_str = invoice_id if isinstance(invoice_id, str) else getattr(invoice_id, "id", None)
@@ -859,16 +1027,112 @@ def _metadata_from_payment_intent(
             subscription = invoice["subscription"]
         except (KeyError, TypeError, AttributeError):
             subscription = None
-        if subscription and not isinstance(subscription, str):
-            sub_meta = (
-                subscription.metadata.to_dict()
-                if getattr(subscription, "metadata", None)
-                else {}
+        if isinstance(subscription, str) and subscription:
+            subscription = stripe.Subscription.retrieve(
+                subscription,
+                **stripe_request_kwargs(stripe_account),
             )
-            return {**meta, **sub_meta}
+        if subscription and not isinstance(subscription, str):
+            raw = getattr(subscription, "metadata", None)
+            if raw:
+                sub_meta = raw.to_dict() if hasattr(raw, "to_dict") else dict(raw)
+            if not meta.get("subscription_id") and getattr(subscription, "id", None):
+                sub_meta = {**sub_meta, "subscription_id": subscription.id}
     except Exception:
-        return meta
-    return meta
+        return {**sub_meta, **meta}
+
+    # Subscription holds the checkout fields; non-empty PI keys win when present.
+    return {**sub_meta, **{k: v for k, v in meta.items() if v not in (None, "")}}
+
+
+def _split_payer_name(full_name: str | None) -> tuple[str, str]:
+    cleaned = " ".join((full_name or "").split()).strip()
+    if not cleaned:
+        return "", ""
+    parts = cleaned.split(" ")
+    if len(parts) == 1:
+        return parts[0], ""
+    return parts[0], " ".join(parts[1:])
+
+
+def _is_placeholder_donor(first_name: str | None, last_name: str | None, email: str | None) -> bool:
+    first = (first_name or "").strip().lower()
+    last = (last_name or "").strip().lower()
+    mail = (email or "").strip().lower()
+    placeholder_first = first in {"", "donor", "anonymous", "guest"}
+    placeholder_last = last in {"", "guest", "donor", "anonymous"}
+    placeholder_email = mail in {"", "pending@wallet.local", "donor@example.com"}
+    return (placeholder_first and placeholder_last) or placeholder_email
+
+
+def _billing_details_from_intent(
+    payment_intent: stripe.PaymentIntent,
+    *,
+    stripe_account: str | None = None,
+) -> tuple[str, str, str | None]:
+    """Return (first_name, last_name, email) from the charged payment method when present."""
+    from stripe_intents import stripe_request_kwargs
+
+    billing_name = ""
+    billing_email: str | None = None
+
+    def read_billing(obj: object | None) -> None:
+        nonlocal billing_name, billing_email
+        if obj is None:
+            return
+        try:
+            details = obj["billing_details"]  # type: ignore[index]
+        except Exception:
+            details = getattr(obj, "billing_details", None)
+        if not details:
+            return
+        try:
+            name = details["name"]
+        except Exception:
+            name = getattr(details, "name", None)
+        try:
+            email = details["email"]
+        except Exception:
+            email = getattr(details, "email", None)
+        if isinstance(name, str) and name.strip() and not billing_name:
+            billing_name = name.strip()
+        if isinstance(email, str) and email.strip() and not billing_email:
+            billing_email = email.strip()
+
+    payment_method = None
+    try:
+        payment_method = payment_intent["payment_method"]
+    except Exception:
+        payment_method = getattr(payment_intent, "payment_method", None)
+
+    if isinstance(payment_method, str) and payment_method.strip():
+        try:
+            payment_method = stripe.PaymentMethod.retrieve(
+                payment_method.strip(),
+                **stripe_request_kwargs(stripe_account),
+            )
+        except Exception:
+            payment_method = None
+
+    read_billing(payment_method)
+
+    if not billing_name or not billing_email:
+        try:
+            latest_charge = payment_intent["latest_charge"]
+        except Exception:
+            latest_charge = getattr(payment_intent, "latest_charge", None)
+        if isinstance(latest_charge, str) and latest_charge.strip():
+            try:
+                latest_charge = stripe.Charge.retrieve(
+                    latest_charge.strip(),
+                    **stripe_request_kwargs(stripe_account),
+                )
+            except Exception:
+                latest_charge = None
+        read_billing(latest_charge)
+
+    first_name, last_name = _split_payer_name(billing_name)
+    return first_name, last_name, billing_email
 
 
 def _donation_row_from_intent(
@@ -929,11 +1193,25 @@ def _donation_row_from_intent(
         except Exception:
             subscription_id = None
 
+    first_name = meta.get("first_name", "Anonymous") or "Anonymous"
+    last_name = meta.get("last_name", "") or ""
+    email = meta.get("email") or None
+    if _is_placeholder_donor(first_name, last_name, email):
+        billing_first, billing_last, billing_email = _billing_details_from_intent(
+            payment_intent,
+            stripe_account=stripe_account,
+        )
+        if billing_first:
+            first_name = billing_first
+            last_name = billing_last
+        if billing_email:
+            email = billing_email
+
     row: dict[str, str | float | None | dict[str, str] | bool] = {
         "stripe_payment_intent_id": payment_intent.id,
-        "first_name": meta.get("first_name", "Anonymous"),
-        "last_name": meta.get("last_name", ""),
-        "email": meta.get("email") or None,
+        "first_name": first_name,
+        "last_name": last_name,
+        "email": email,
         "amount": total_display,
         "base_amount": base_amount,
         "currency": display_currency,
@@ -1031,7 +1309,51 @@ async def stripe_webhook(request: Request) -> dict[str, str]:
 
     if event["type"] == "payment_intent.succeeded":
         pi = event["data"]["object"]
-        meta = pi.get("metadata", {})
+        meta = dict(pi.get("metadata", {}) or {})
+        stripe_account = (
+            meta.get("stripe_connect_account")
+            or pi.get("on_behalf_of")
+            or (pi.get("transfer_data") or {}).get("destination")
+        )
+        # Monthly invoice PIs often lack checkout metadata; merge from the subscription.
+        invoice_id = pi.get("invoice")
+        subscription_id = meta.get("subscription_id")
+        try:
+            from stripe_intents import stripe_request_kwargs as _srk
+
+            acct_kwargs = _srk(stripe_account if isinstance(stripe_account, str) else None)
+            subscription = None
+            if invoice_id:
+                invoice = stripe.Invoice.retrieve(
+                    invoice_id if isinstance(invoice_id, str) else invoice_id.get("id"),
+                    expand=["subscription"],
+                    **acct_kwargs,
+                )
+                subscription = invoice.get("subscription") if isinstance(invoice, dict) else None
+                if subscription is None:
+                    subscription = getattr(invoice, "subscription", None)
+            elif subscription_id:
+                subscription = stripe.Subscription.retrieve(subscription_id, **acct_kwargs)
+            if isinstance(subscription, str) and subscription:
+                subscription = stripe.Subscription.retrieve(subscription, **acct_kwargs)
+            if subscription is not None and not isinstance(subscription, str):
+                raw = getattr(subscription, "metadata", None)
+                if raw is None and isinstance(subscription, dict):
+                    raw = subscription.get("metadata")
+                sub_meta = raw.to_dict() if hasattr(raw, "to_dict") else dict(raw or {})
+                meta = {**sub_meta, **{k: v for k, v in meta.items() if v not in (None, "")}}
+                if not meta.get("subscription_id"):
+                    sid = getattr(subscription, "id", None) or (
+                        subscription.get("id") if isinstance(subscription, dict) else None
+                    )
+                    if sid:
+                        meta["subscription_id"] = sid
+        except Exception:
+            logging.getLogger(__name__).exception(
+                "Failed to merge subscription metadata for PaymentIntent %s",
+                pi.get("id"),
+            )
+
         display_currency = meta.get("display_currency", pi["currency"]).upper()
         total_display = float(meta.get("total_display", pi["amount"] / 100))
         base_amount = float(meta.get("base_amount", total_display))
@@ -1059,7 +1381,7 @@ async def stripe_webhook(request: Request) -> dict[str, str]:
             "status": "succeeded",
             "organization_id": meta.get("organization_id"),
             "campaign_id": meta.get("campaign_id"),
-            "stripe_account_id": pi.get("on_behalf_of") or (pi.get("transfer_data") or {}).get("destination"),
+            "stripe_account_id": pi.get("on_behalf_of") or (pi.get("transfer_data") or {}).get("destination") or stripe_account,
             "stripe_customer_id": pi.get("customer") if isinstance(pi.get("customer"), str) else None,
             "stripe_subscription_id": meta.get("subscription_id"),
             "fee_covered": cover_fees,
@@ -1417,14 +1739,19 @@ def record_donation(payload: RecordDonationRequest) -> DonationFeedItem:
         raise HTTPException(status_code=503, detail="Donation storage is not configured")
 
     try:
-        payment_intent, stripe_account = retrieve_payment_intent(payload.payment_intent_id)
+        payment_intent, stripe_account = retrieve_payment_intent(
+            payload.payment_intent_id,
+            expand=["payment_method", "latest_charge"],
+        )
     except stripe.error.StripeError as exc:
         raise HTTPException(status_code=400, detail=str(exc.user_message or exc)) from exc
 
-    if payment_intent.status != "succeeded":
+    if payment_intent.status not in {"succeeded", "processing"}:
         raise HTTPException(status_code=400, detail="Payment has not succeeded yet")
 
     row = _ensure_donation_org(_donation_row_from_intent(payment_intent, stripe_account=stripe_account))
+    if payment_intent.status == "processing":
+        row["status"] = "succeeded"
     saved = insert_donation(row)
     if saved:
         _send_donation_emails_safe(saved)
