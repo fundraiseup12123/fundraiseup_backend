@@ -145,7 +145,11 @@ def get_donation_by_payment_intent(payment_intent_id: str) -> dict[str, Any] | N
             f"{_supabase_url()}/rest/v1/donations",
             headers=_headers(),
             params={
-                "select": "id,first_name,last_name,amount,currency,frequency,honoree_name,created_at,stripe_payment_intent_id",
+                "select": (
+                    "id,first_name,last_name,email,amount,currency,frequency,status,"
+                    "honoree_name,created_at,stripe_payment_intent_id,stripe_subscription_id,"
+                    "organization_id,campaign_id,payment_method,payment_processor"
+                ),
                 "stripe_payment_intent_id": f"eq.{payment_intent_id}",
                 "limit": "1",
             },

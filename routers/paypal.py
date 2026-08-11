@@ -117,9 +117,9 @@ def schedule_campaign_paypal_apple_pay_domain_registration(
 
 
 class PayPalDonor(BaseModel):
-    first_name: str = Field(min_length=1, max_length=80)
-    last_name: str = Field(min_length=1, max_length=80)
-    email: str = Field(min_length=3, max_length=254)
+    first_name: str = Field(default="", max_length=80)
+    last_name: str = Field(default="", max_length=80)
+    email: str = Field(default="", max_length=254)
 
 
 class PayPalUtm(BaseModel):
@@ -326,11 +326,26 @@ def _record_paypal_donation(
 
     donation_status = status if status in {"succeeded", "failed", "pending"} else "succeeded"
 
+    first_name = (payload.donor.first_name or "").strip()
+    last_name = (payload.donor.last_name or "").strip()
+    email = (payload.donor.email or "").strip()
+    if first_name.lower() in {"", "donor", "guest", "anonymous"} and last_name.lower() in {
+        "",
+        "donor",
+        "guest",
+        "anonymous",
+    }:
+        first_name, last_name = "Anonymous", ""
+    elif first_name.lower() in {"donor", "guest"}:
+        first_name = "Anonymous" if not last_name else first_name
+    if email.lower() in {"", "pending@wallet.local", "donor@example.com"}:
+        email = ""
+
     row = {
         "stripe_payment_intent_id": order_id,
-        "first_name": payload.donor.first_name,
-        "last_name": payload.donor.last_name,
-        "email": payload.donor.email,
+        "first_name": first_name or "Anonymous",
+        "last_name": last_name,
+        "email": email or None,
         "amount": total_display,
         "base_amount": base_amount,
         "currency": display_currency,
@@ -419,6 +434,20 @@ def paypal_checkout_config(
             },
             daemon=True,
         ).start()
+
+    subscriptions_ready = False
+    subscriptions_detail = ""
+    if keys_ready and account:
+        from paypal_client import probe_paypal_subscriptions_capability
+
+        probe = probe_paypal_subscriptions_capability(
+            str(account.get("client_id") or ""),
+            str(account.get("client_secret") or ""),
+        )
+        subscriptions_ready = bool(probe.get("ok"))
+        if not subscriptions_ready:
+            subscriptions_detail = str(probe.get("detail") or "")
+
     return {
         "available": available,
         "merchant_connected": available,
@@ -434,6 +463,8 @@ def paypal_checkout_config(
         ),
         "paypal_env": env_value,
         "keys_source": str(account.get("keys_source") or "") if keys_ready else "",
+        "subscriptions_ready": subscriptions_ready,
+        "subscriptions_detail": subscriptions_detail,
     }
 
 

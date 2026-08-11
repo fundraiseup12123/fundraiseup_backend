@@ -1287,17 +1287,73 @@ def list_recurring_donations(
     limit: int = Query(50, ge=1, le=100),
 ) -> dict[str, Any]:
     require_org_access(org_id, user, min_role="member")
+    select_cols = (
+        "id,first_name,last_name,email,amount,currency,status,created_at,campaign_id,"
+        "frequency,organization_id,stripe_subscription_id"
+    )
     rows = rest_get(
         "donations",
         params={
             "organization_id": f"eq.{org_id}",
-            "frequency": "eq.monthly",
-            "select": "id,first_name,last_name,email,amount,currency,status,created_at,campaign_id",
+            # Include subscription-backed gifts even if frequency was wrongly saved as once.
+            "or": "(frequency.eq.monthly,stripe_subscription_id.not.is.null)",
+            "select": select_cols,
             "order": "created_at.desc",
             "limit": str(limit),
         },
+    ) or []
+
+    # Same orphan merge as Donations list — older rows may lack organization_id.
+    org_campaigns = rest_get(
+        "campaigns",
+        params={"organization_id": f"eq.{org_id}", "select": "id", "limit": "200"},
     )
-    total = sum(float(r.get("amount", 0)) for r in rows)
+    campaign_ids = [str(c["id"]) for c in org_campaigns if c.get("id")]
+    from site_constants import ROOT_CAMPAIGN_ID, ROOT_ORG_ID
+
+    if org_id == ROOT_ORG_ID and ROOT_CAMPAIGN_ID not in campaign_ids:
+        campaign_ids.append(ROOT_CAMPAIGN_ID)
+    if campaign_ids:
+        orphans = rest_get(
+            "donations",
+            params={
+                "organization_id": "is.null",
+                "campaign_id": f"in.({','.join(campaign_ids)})",
+                "or": "(frequency.eq.monthly,stripe_subscription_id.not.is.null)",
+                "select": select_cols,
+                "order": "created_at.desc",
+                "limit": str(limit),
+            },
+        ) or []
+        seen = {str(r.get("id")) for r in rows}
+        for row in orphans:
+            row_id = str(row.get("id") or "")
+            if row_id and row_id not in seen:
+                rows.append(row)
+                seen.add(row_id)
+
+    # Prefer active / succeeded gifts in the Recurring tab.
+    excluded = {"failed", "canceled", "cancelled", "refunded", "disputed"}
+    rows = [r for r in rows if str(r.get("status") or "succeeded").lower() not in excluded]
+
+    # Heal legacy rows saved as once despite having a Stripe subscription id.
+    for row in rows:
+        if (
+            str(row.get("frequency") or "").lower() != "monthly"
+            and row.get("stripe_subscription_id")
+        ):
+            row["frequency"] = "monthly"
+            try:
+                rest_patch(
+                    "donations",
+                    {"frequency": "monthly"},
+                    match={"id": row["id"]},
+                )
+            except Exception:
+                pass
+    rows.sort(key=lambda r: str(r.get("created_at") or ""), reverse=True)
+    rows = rows[:limit]
+    total = sum(float(r.get("amount") or 0) for r in rows)
     return {"donations": rows, "total_amount": total, "count": len(rows)}
 
 

@@ -22,6 +22,8 @@ _token_lock = threading.Lock()
 _token_cache: dict[str, tuple[str, float]] = {}
 # client_id -> "live" | "sandbox" (detected from which OAuth host accepts the keys)
 _cred_env_cache: dict[str, str] = {}
+# client_id -> (expires_at_monotonic, probe_result)
+_subscriptions_probe_cache: dict[str, tuple[float, dict[str, object]]] = {}
 
 
 def _clean_env(name: str, fallback: str = "") -> str:
@@ -212,6 +214,17 @@ def probe_paypal_subscriptions_capability(
     """
     cid = (client_id or "").strip()
     secret = (client_secret or "").strip()
+    if not cid or not secret:
+        return {
+            "ok": False,
+            "api_env": paypal_env(),
+            "detail": "PayPal Client ID/Secret are missing.",
+        }
+
+    cached = _subscriptions_probe_cache.get(cid)
+    if cached and cached[0] > time.monotonic():
+        return dict(cached[1])
+
     token = _paypal_access_token(client_id=cid, client_secret=secret)
     api_base = paypal_api_base_for(cid, secret)
     response = _http.get(
@@ -224,16 +237,36 @@ def probe_paypal_subscriptions_capability(
         },
     )
     if response.status_code < 400:
-        return {
+        result: dict[str, object] = {
             "ok": True,
             "api_env": _cred_env_cache.get(cid) or paypal_env(),
         }
-    detail = _paypal_error_detail(response, "Subscriptions API not available for these keys")
-    return {
-        "ok": False,
-        "api_env": _cred_env_cache.get(cid) or paypal_env(),
-        "detail": detail,
-    }
+    else:
+        detail = _paypal_error_detail(response, "Subscriptions API not available for these keys")
+        result = {
+            "ok": False,
+            "api_env": _cred_env_cache.get(cid) or paypal_env(),
+            "detail": detail,
+        }
+    _subscriptions_probe_cache[cid] = (time.monotonic() + 300.0, result)
+    return dict(result)
+
+
+def require_paypal_subscriptions_capability(
+    client_id: str,
+    client_secret: str,
+) -> None:
+    """Raise RuntimeError when monthly Billing/Subscriptions is not enabled on the REST app."""
+    probe = probe_paypal_subscriptions_capability(client_id, client_secret)
+    if probe.get("ok"):
+        return
+    detail = str(probe.get("detail") or "").strip() or (
+        "Monthly PayPal needs Subscriptions on this REST app: "
+        "developer.paypal.com → Apps → your app → Accept payments → Advanced options → "
+        "enable Billing agreements + Future payments (and Subscriptions if shown), Save, "
+        "wait a few minutes, then re-attach the same Client ID/Secret."
+    )
+    raise RuntimeError(detail)
 
 
 def client_id_hint(client_id: str) -> str:
@@ -640,6 +673,8 @@ def ensure_paypal_product(
     client_secret: str | None = None,
 ) -> str:
     cid = (client_id or "").strip() or paypal_client_id()
+    secret = (client_secret or "").strip() or paypal_client_secret()
+    require_paypal_subscriptions_capability(cid, secret)
     with _product_lock:
         cached = _product_cache.get(cid)
         if cached:

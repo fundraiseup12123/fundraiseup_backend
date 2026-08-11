@@ -270,9 +270,9 @@ def remove_authorizenet_account(
 
 
 class AnetDonor(BaseModel):
-    first_name: str = Field(min_length=1, max_length=80)
-    last_name: str = Field(min_length=1, max_length=80)
-    email: str = Field(min_length=3, max_length=254)
+    first_name: str = Field(default="", max_length=80)
+    last_name: str = Field(default="", max_length=80)
+    email: str = Field(default="", max_length=254)
 
 
 class AnetUtm(BaseModel):
@@ -412,11 +412,23 @@ def _record_anet_donation(
 
     cid = campaign_id or ROOT_CAMPAIGN_ID
     donation_status = status if status in {"succeeded", "failed", "pending"} else "succeeded"
+    first_name = (donor.first_name or "").strip()
+    last_name = (donor.last_name or "").strip()
+    email = (donor.email or "").strip()
+    if first_name.lower() in {"", "donor", "guest", "anonymous"} and last_name.lower() in {
+        "",
+        "donor",
+        "guest",
+        "anonymous",
+    }:
+        first_name, last_name = "Anonymous", ""
+    if email.lower() in {"", "pending@wallet.local", "donor@example.com"}:
+        email = ""
     row: dict[str, Any] = {
         "stripe_payment_intent_id": order_id,
-        "first_name": donor.first_name,
-        "last_name": donor.last_name,
-        "email": donor.email,
+        "first_name": first_name or "Anonymous",
+        "last_name": last_name,
+        "email": email or None,
         "amount": total_display,
         "base_amount": base_amount,
         "currency": currency.upper(),

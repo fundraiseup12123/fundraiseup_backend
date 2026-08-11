@@ -168,8 +168,8 @@ def create_transaction_opaque(
         transaction_request["customer"] = {"email": customer_email[:255]}
     if first_name or last_name:
         transaction_request["billTo"] = {
-            "firstName": (first_name or "Donor")[:50],
-            "lastName": (last_name or "Donor")[:50],
+            "firstName": (first_name or "")[:50],
+            "lastName": (last_name or "")[:50],
         }
 
     request_body: dict[str, Any] = {
@@ -271,8 +271,8 @@ def create_arb_subscription_from_profile(
                 },
                 "customer": {"email": (customer_email or "")[:255]},
                 "billTo": {
-                    "firstName": (first_name or "Donor")[:50],
-                    "lastName": (last_name or "Donor")[:50],
+                    "firstName": (first_name or "")[:50],
+                    "lastName": (last_name or "")[:50],
                 },
             },
         }

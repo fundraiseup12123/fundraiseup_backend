@@ -199,7 +199,24 @@ def list_paypal_accounts(
 ) -> list[dict[str, Any]]:
     require_org_access(org_id, user, min_role="member")
     rows = rest_get("paypal_accounts", params={"organization_id": f"eq.{org_id}", "select": "*"})
-    return [_public_paypal_account(row) for row in rows]
+    from paypal_client import probe_paypal_subscriptions_capability
+
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        public = _public_paypal_account(row)
+        if _account_has_keys(row):
+            probe = probe_paypal_subscriptions_capability(
+                str(row.get("client_id") or ""),
+                str(row.get("client_secret") or ""),
+            )
+            public["subscriptions_ready"] = bool(probe.get("ok"))
+            if not probe.get("ok"):
+                public["subscriptions_warning"] = (
+                    "Monthly PayPal is blocked until Billing agreements + Future payments "
+                    "(Subscriptions) are enabled on this REST app in the PayPal Developer Dashboard."
+                )
+        out.append(public)
+    return out
 
 
 @router.post("/orgs/{org_id}/accounts")

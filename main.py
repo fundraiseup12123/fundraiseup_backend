@@ -4,7 +4,7 @@ import logging
 
 import os
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from dotenv import load_dotenv
 
@@ -68,9 +68,10 @@ app.add_middleware(
 
 
 class DonorDetails(BaseModel):
-    first_name: str = Field(min_length=1, max_length=80)
-    last_name: str = Field(min_length=1, max_length=80)
-    email: str = Field(min_length=3, max_length=254)
+    # Empty allowed for wallet express (Apple/Google Pay) — real payer filled from billing after pay.
+    first_name: str = Field(default="", max_length=80)
+    last_name: str = Field(default="", max_length=80)
+    email: str = Field(default="", max_length=254)
     phone: str | None = None
 
 
@@ -297,10 +298,6 @@ def _checkout_metadata(
     stripe_account: str | None = None,
 ) -> dict[str, str]:
     meta = {
-        "first_name": payload.donor.first_name,
-        "last_name": payload.donor.last_name,
-        "email": payload.donor.email,
-        "phone": payload.donor.phone or "",
         "frequency": payload.frequency,
         "dedicate": str(payload.dedicate).lower(),
         "honoree_name": (payload.honoree_name or "")[:500],
@@ -311,6 +308,18 @@ def _checkout_metadata(
         "display_currency": payload.currency.upper(),
         "payment_method": payment_method,
     }
+    first_name = _clean_donor_name(payload.donor.first_name)
+    last_name = _clean_donor_name(payload.donor.last_name)
+    email = _clean_donor_email(payload.donor.email)
+    if first_name:
+        meta["first_name"] = first_name
+    if last_name:
+        meta["last_name"] = last_name
+    if email:
+        meta["email"] = email
+    phone = (payload.donor.phone or "").strip()
+    if phone:
+        meta["phone"] = phone
     if organization_id:
         meta["organization_id"] = organization_id
     if campaign_id:
@@ -443,6 +452,89 @@ def _payment_intent_id_from_client_secret(client_secret: str | None) -> str | No
     return None
 
 
+def _invoice_id_from_payment_intent(payment_intent: Any) -> str | None:
+    """Resolve invoice id for subscription PIs (legacy `invoice` or new payment_details)."""
+    try:
+        invoice_ref = payment_intent["invoice"]
+    except (KeyError, TypeError, AttributeError):
+        invoice_ref = None
+    if isinstance(invoice_ref, str) and invoice_ref:
+        return invoice_ref
+    if invoice_ref is not None:
+        invoice_id = getattr(invoice_ref, "id", None)
+        if invoice_id:
+            return str(invoice_id)
+        if isinstance(invoice_ref, dict) and invoice_ref.get("id"):
+            return str(invoice_ref["id"])
+
+    # Newer Stripe invoice-payment PIs omit `invoice` and link via order_reference.
+    try:
+        details = payment_intent["payment_details"]
+    except (KeyError, TypeError, AttributeError):
+        details = getattr(payment_intent, "payment_details", None)
+    if details is not None:
+        if isinstance(details, dict):
+            order_ref = details.get("order_reference")
+        else:
+            order_ref = getattr(details, "order_reference", None)
+        if isinstance(order_ref, str) and order_ref.startswith("in_"):
+            return order_ref
+    return None
+
+
+def _subscription_ref_from_invoice(invoice: Any) -> Any:
+    """Legacy `invoice.subscription` or new `invoice.parent.subscription_details`."""
+    try:
+        subscription = invoice["subscription"]
+    except (KeyError, TypeError, AttributeError):
+        subscription = getattr(invoice, "subscription", None)
+    if subscription:
+        return subscription
+
+    try:
+        parent = invoice["parent"]
+    except (KeyError, TypeError, AttributeError):
+        parent = getattr(invoice, "parent", None)
+    if not parent:
+        return None
+    if isinstance(parent, dict):
+        details = parent.get("subscription_details") or {}
+        return details.get("subscription")
+    details = getattr(parent, "subscription_details", None)
+    if details is None:
+        return None
+    if isinstance(details, dict):
+        return details.get("subscription")
+    return getattr(details, "subscription", None)
+
+
+def _subscription_metadata_from_invoice(invoice: Any) -> dict[str, str]:
+    """Checkout metadata may live on invoice.parent.subscription_details.metadata."""
+    try:
+        parent = invoice["parent"]
+    except (KeyError, TypeError, AttributeError):
+        parent = getattr(invoice, "parent", None)
+    if not parent:
+        return {}
+    if isinstance(parent, dict):
+        details = parent.get("subscription_details") or {}
+        raw = details.get("metadata") or {}
+    else:
+        details = getattr(parent, "subscription_details", None)
+        if details is None:
+            return {}
+        raw = (
+            details.get("metadata")
+            if isinstance(details, dict)
+            else getattr(details, "metadata", None)
+        )
+    if not raw:
+        return {}
+    if hasattr(raw, "to_dict"):
+        raw = raw.to_dict()
+    return {str(k): str(v) for k, v in dict(raw or {}).items() if v not in (None, "")}
+
+
 def _attach_metadata_to_payment_intent(
     payment_intent_id: str | None,
     metadata: dict[str, str],
@@ -537,7 +629,10 @@ def _create_monthly_subscription(
             "payment_method_types": _payment_method_types(charge_curr, payment_method),
             "save_default_payment_method": "on_subscription",
         },
-        "expand": ["latest_invoice.confirmation_secret"],
+        "expand": [
+            "latest_invoice.confirmation_secret",
+            "latest_invoice.payments.data.payment.payment_intent",
+        ],
         "metadata": full_metadata,
     }
     if stripe_account:
@@ -772,11 +867,23 @@ def create_checkout(payload: CreateCheckoutRequest) -> CheckoutResponse:
 
     try:
         customer_kwargs: dict = {
-            "email": payload.donor.email,
-            "name": f"{payload.donor.first_name} {payload.donor.last_name}",
-            "phone": payload.donor.phone,
             "metadata": metadata,
         }
+        donor_email = _clean_donor_email(payload.donor.email)
+        donor_name = " ".join(
+            part
+            for part in (
+                _clean_donor_name(payload.donor.first_name),
+                _clean_donor_name(payload.donor.last_name),
+            )
+            if part
+        ).strip()
+        if donor_email:
+            customer_kwargs["email"] = donor_email
+        if donor_name:
+            customer_kwargs["name"] = donor_name
+        if payload.donor.phone:
+            customer_kwargs["phone"] = payload.donor.phone
         if stripe_account:
             customer_kwargs["stripe_account"] = stripe_account
         customer = stripe.Customer.create(**customer_kwargs)
@@ -993,52 +1100,46 @@ def _metadata_from_payment_intent(
 
     meta = _intent_metadata(payment_intent)
     sub_meta: dict[str, str] = {}
+    acct_kwargs = stripe_request_kwargs(stripe_account)
+
+    subscription = None
+    subscription_id = meta.get("subscription_id")
+    invoice_id = _invoice_id_from_payment_intent(payment_intent)
 
     try:
-        invoice_id = payment_intent["invoice"]
-    except (KeyError, TypeError, AttributeError):
-        invoice_id = None
-    if not invoice_id:
-        # Prefer explicit subscription_id on PI metadata when invoice is absent.
-        subscription_id = meta.get("subscription_id")
-        if subscription_id:
-            try:
-                subscription = stripe.Subscription.retrieve(
-                    subscription_id,
-                    **stripe_request_kwargs(stripe_account),
-                )
-                raw = getattr(subscription, "metadata", None)
-                if raw:
-                    sub_meta = raw.to_dict() if hasattr(raw, "to_dict") else dict(raw)
-            except Exception:
-                pass
-        return {**sub_meta, **meta}
-
-    try:
-        invoice_id_str = invoice_id if isinstance(invoice_id, str) else getattr(invoice_id, "id", None)
-        if not invoice_id_str:
-            return meta
-        invoice = stripe.Invoice.retrieve(
-            str(invoice_id_str),
-            expand=["subscription"],
-            **stripe_request_kwargs(stripe_account),
-        )
-        try:
-            subscription = invoice["subscription"]
-        except (KeyError, TypeError, AttributeError):
-            subscription = None
-        if isinstance(subscription, str) and subscription:
-            subscription = stripe.Subscription.retrieve(
-                subscription,
-                **stripe_request_kwargs(stripe_account),
+        if invoice_id:
+            invoice = stripe.Invoice.retrieve(
+                str(invoice_id),
+                expand=["subscription", "parent"],
+                **acct_kwargs,
             )
-        if subscription and not isinstance(subscription, str):
+            # New Stripe invoices often carry checkout metadata on parent.subscription_details.
+            sub_meta = {**_subscription_metadata_from_invoice(invoice), **sub_meta}
+            subscription = _subscription_ref_from_invoice(invoice)
+        elif subscription_id:
+            subscription = stripe.Subscription.retrieve(subscription_id, **acct_kwargs)
+
+        if isinstance(subscription, str) and subscription:
+            subscription = stripe.Subscription.retrieve(subscription, **acct_kwargs)
+        if subscription is not None and not isinstance(subscription, str):
             raw = getattr(subscription, "metadata", None)
             if raw:
-                sub_meta = raw.to_dict() if hasattr(raw, "to_dict") else dict(raw)
-            if not meta.get("subscription_id") and getattr(subscription, "id", None):
-                sub_meta = {**sub_meta, "subscription_id": subscription.id}
+                from_sub = raw.to_dict() if hasattr(raw, "to_dict") else dict(raw)
+                sub_meta = {**from_sub, **sub_meta}
+            sid = getattr(subscription, "id", None) or (
+                subscription.get("id") if isinstance(subscription, dict) else None
+            )
+            if sid and not meta.get("subscription_id") and not sub_meta.get("subscription_id"):
+                sub_meta = {**sub_meta, "subscription_id": str(sid)}
+        elif isinstance(subscription, str) and subscription and not sub_meta.get("subscription_id"):
+            sub_meta = {**sub_meta, "subscription_id": subscription}
+        elif subscription_id and not sub_meta.get("subscription_id"):
+            sub_meta = {**sub_meta, "subscription_id": subscription_id}
     except Exception:
+        logging.getLogger(__name__).exception(
+            "Failed to merge subscription metadata for PaymentIntent %s",
+            getattr(payment_intent, "id", None),
+        )
         return {**sub_meta, **meta}
 
     # Subscription holds the checkout fields; non-empty PI keys win when present.
@@ -1063,6 +1164,35 @@ def _is_placeholder_donor(first_name: str | None, last_name: str | None, email: 
     placeholder_last = last in {"", "guest", "donor", "anonymous"}
     placeholder_email = mail in {"", "pending@wallet.local", "donor@example.com"}
     return (placeholder_first and placeholder_last) or placeholder_email
+
+
+def _clean_donor_name(value: str | None) -> str:
+    cleaned = (value or "").strip()
+    if cleaned.lower() in {"", "donor", "anonymous", "guest"}:
+        return ""
+    return cleaned
+
+
+def _clean_donor_email(value: str | None) -> str:
+    cleaned = (value or "").strip()
+    if cleaned.lower() in {"", "pending@wallet.local", "donor@example.com"}:
+        return ""
+    return cleaned
+
+
+def _normalize_donation_donor(
+    first_name: str | None,
+    last_name: str | None,
+    email: str | None,
+) -> tuple[str, str, str | None]:
+    """Never persist Guest / Donor / pending@wallet.local placeholders."""
+    first = _clean_donor_name(first_name)
+    last = _clean_donor_name(last_name)
+    mail = _clean_donor_email(email) or None
+    if not first and not last:
+        first = "Anonymous"
+        last = ""
+    return first, last, mail
 
 
 def _billing_details_from_intent(
@@ -1143,9 +1273,6 @@ def _donation_row_from_intent(
     meta = _metadata_from_payment_intent(payment_intent, stripe_account=stripe_account)
     display_currency = meta.get("display_currency", payment_intent.currency.upper()).upper()
     total_display = float(meta.get("total_display", from_stripe_amount(payment_intent.amount, payment_intent.currency)))
-    frequency = meta.get("frequency", "once")
-    if frequency not in {"once", "monthly"}:
-        frequency = "once"
 
     base_amount = float(meta.get("base_amount", total_display))
     cover_fees = meta.get("cover_fees", "false").lower() == "true"
@@ -1164,36 +1291,33 @@ def _donation_row_from_intent(
     if customer_ref:
         customer_id = customer_ref if isinstance(customer_ref, str) else getattr(customer_ref, "id", None)
 
-    subscription_id = None
-    # One-time card PaymentIntents often omit `invoice`. StripeObject.__getattr__
-    # raises KeyError for missing keys — never use attribute access here.
-    try:
-        invoice_ref = payment_intent["invoice"]
-    except (KeyError, TypeError, AttributeError):
-        invoice_ref = None
-    if invoice_ref:
+    subscription_id = meta.get("subscription_id") or None
+    invoice_id = _invoice_id_from_payment_intent(payment_intent)
+    if invoice_id and not subscription_id:
         try:
             from stripe_intents import stripe_request_kwargs
 
-            invoice_id = invoice_ref if isinstance(invoice_ref, str) else getattr(invoice_ref, "id", None)
-            if invoice_id:
-                invoice = stripe.Invoice.retrieve(
-                    str(invoice_id),
-                    expand=["subscription"],
-                    **stripe_request_kwargs(stripe_account),
-                )
-                try:
-                    sub = invoice["subscription"]
-                except (KeyError, TypeError, AttributeError):
-                    sub = None
-                if isinstance(sub, str):
-                    subscription_id = sub
-                elif sub is not None:
-                    subscription_id = getattr(sub, "id", None)
+            invoice = stripe.Invoice.retrieve(
+                str(invoice_id),
+                expand=["subscription", "parent"],
+                **stripe_request_kwargs(stripe_account),
+            )
+            sub = _subscription_ref_from_invoice(invoice)
+            if isinstance(sub, str):
+                subscription_id = sub
+            elif sub is not None:
+                subscription_id = getattr(sub, "id", None)
         except Exception:
-            subscription_id = None
+            subscription_id = subscription_id or None
 
-    first_name = meta.get("first_name", "Anonymous") or "Anonymous"
+    frequency = meta.get("frequency", "once")
+    # Subscription / invoice-backed PaymentIntents must count as monthly (admin Recurring tab).
+    if subscription_id or invoice_id:
+        frequency = "monthly"
+    elif frequency not in {"once", "monthly"}:
+        frequency = "once"
+
+    first_name = meta.get("first_name", "") or ""
     last_name = meta.get("last_name", "") or ""
     email = meta.get("email") or None
     if _is_placeholder_donor(first_name, last_name, email):
@@ -1206,6 +1330,8 @@ def _donation_row_from_intent(
             last_name = billing_last
         if billing_email:
             email = billing_email
+
+    first_name, last_name, email = _normalize_donation_donor(first_name, last_name, email)
 
     row: dict[str, str | float | None | dict[str, str] | bool] = {
         "stripe_payment_intent_id": payment_intent.id,
@@ -1317,21 +1443,38 @@ async def stripe_webhook(request: Request) -> dict[str, str]:
         )
         # Monthly invoice PIs often lack checkout metadata; merge from the subscription.
         invoice_id = pi.get("invoice")
+        if not invoice_id:
+            details = pi.get("payment_details") if isinstance(pi.get("payment_details"), dict) else {}
+            order_ref = details.get("order_reference")
+            if isinstance(order_ref, str) and order_ref.startswith("in_"):
+                invoice_id = order_ref
         subscription_id = meta.get("subscription_id")
         try:
             from stripe_intents import stripe_request_kwargs as _srk
 
             acct_kwargs = _srk(stripe_account if isinstance(stripe_account, str) else None)
+            # Connect subscription PIs often omit account hints on the event object.
+            if not acct_kwargs.get("stripe_account"):
+                try:
+                    from stripe_intents import retrieve_payment_intent as _retrieve_pi
+
+                    _, resolved_acct = _retrieve_pi(pi["id"])
+                    if resolved_acct:
+                        stripe_account = resolved_acct
+                        acct_kwargs = _srk(resolved_acct)
+                except Exception:
+                    pass
             subscription = None
             if invoice_id:
                 invoice = stripe.Invoice.retrieve(
                     invoice_id if isinstance(invoice_id, str) else invoice_id.get("id"),
-                    expand=["subscription"],
+                    expand=["subscription", "parent"],
                     **acct_kwargs,
                 )
-                subscription = invoice.get("subscription") if isinstance(invoice, dict) else None
-                if subscription is None:
-                    subscription = getattr(invoice, "subscription", None)
+                parent_meta = _subscription_metadata_from_invoice(invoice)
+                if parent_meta:
+                    meta = {**parent_meta, **{k: v for k, v in meta.items() if v not in (None, "")}}
+                subscription = _subscription_ref_from_invoice(invoice)
             elif subscription_id:
                 subscription = stripe.Subscription.retrieve(subscription_id, **acct_kwargs)
             if isinstance(subscription, str) and subscription:
@@ -1348,6 +1491,8 @@ async def stripe_webhook(request: Request) -> dict[str, str]:
                     )
                     if sid:
                         meta["subscription_id"] = sid
+                if not stripe_account:
+                    stripe_account = meta.get("stripe_connect_account")
         except Exception:
             logging.getLogger(__name__).exception(
                 "Failed to merge subscription metadata for PaymentIntent %s",
@@ -1365,15 +1510,51 @@ async def stripe_webhook(request: Request) -> dict[str, str]:
             processing_fee = estimate_processing_fee(base_amount, display_currency)
             payout_amount = max(0.0, round(base_amount - processing_fee, 2))
 
+        first_name, last_name, email = _normalize_donation_donor(
+            meta.get("first_name"),
+            meta.get("last_name"),
+            meta.get("email"),
+        )
+        # Prefer PaymentMethod billing when checkout still had empty wallet donor fields.
+        if _is_placeholder_donor(first_name, last_name, email) or first_name == "Anonymous":
+            try:
+                from stripe_intents import retrieve_payment_intent
+
+                pi_obj, acct = retrieve_payment_intent(
+                    pi["id"],
+                    stripe_account=stripe_account if isinstance(stripe_account, str) else None,
+                    expand=["payment_method", "latest_charge"],
+                )
+                billing_first, billing_last, billing_email = _billing_details_from_intent(
+                    pi_obj,
+                    stripe_account=acct,
+                )
+                if billing_first or billing_email:
+                    first_name, last_name, email = _normalize_donation_donor(
+                        billing_first or first_name,
+                        billing_last if billing_first else last_name,
+                        billing_email or email,
+                    )
+            except Exception:
+                pass
+
+        frequency = meta.get("frequency", "once")
+        subscription_id = meta.get("subscription_id")
+        # Invoice-backed subscription charges are monthly even when PI metadata is thin.
+        if subscription_id or invoice_id:
+            frequency = "monthly"
+        elif frequency not in {"once", "monthly"}:
+            frequency = "once"
+
         row = {
             "stripe_payment_intent_id": pi["id"],
-            "first_name": meta.get("first_name", "Anonymous"),
-            "last_name": meta.get("last_name", ""),
-            "email": meta.get("email"),
+            "first_name": first_name,
+            "last_name": last_name,
+            "email": email,
             "amount": total_display,
             "base_amount": base_amount,
             "currency": display_currency,
-            "frequency": meta.get("frequency", "once"),
+            "frequency": frequency,
             "payment_method": meta.get("payment_method"),
             "payment_processor": "stripe",
             "honoree_name": meta.get("honoree_name"),
@@ -1383,7 +1564,7 @@ async def stripe_webhook(request: Request) -> dict[str, str]:
             "campaign_id": meta.get("campaign_id"),
             "stripe_account_id": pi.get("on_behalf_of") or (pi.get("transfer_data") or {}).get("destination") or stripe_account,
             "stripe_customer_id": pi.get("customer") if isinstance(pi.get("customer"), str) else None,
-            "stripe_subscription_id": meta.get("subscription_id"),
+            "stripe_subscription_id": subscription_id,
             "fee_covered": cover_fees,
             "platform_fee": 0,
             "processing_fee": processing_fee,
@@ -1401,14 +1582,37 @@ async def stripe_webhook(request: Request) -> dict[str, str]:
                 "donations",
                 {
                     "status": "succeeded",
+                    "frequency": frequency,
                     "processing_fee": processing_fee,
                     "payout_amount": payout_amount,
+                    "first_name": first_name,
+                    "last_name": last_name,
+                    "email": email,
+                    "stripe_subscription_id": subscription_id,
+                    "organization_id": row.get("organization_id"),
+                    "campaign_id": row.get("campaign_id"),
                 },
                 match={"id": existing["id"]},
             )
             saved = get_donation_by_payment_intent(pi["id"])
         else:
             saved = insert_donation(_ensure_donation_org({k: v for k, v in row.items() if v is not None}))
+            if not saved:
+                # Duplicate PI (e.g. race): upgrade existing row if it is not succeeded monthly yet.
+                existing = get_donation_by_payment_intent(pi["id"])
+                if existing:
+                    from db import rest_patch
+
+                    rest_patch(
+                        "donations",
+                        {
+                            k: v
+                            for k, v in _ensure_donation_org(row).items()
+                            if v is not None and k != "stripe_payment_intent_id"
+                        },
+                        match={"id": existing["id"]},
+                    )
+                    saved = get_donation_by_payment_intent(pi["id"])
         if saved:
             _send_donation_emails_safe(saved)
 
@@ -1759,6 +1963,25 @@ def record_donation(payload: RecordDonationRequest) -> DonationFeedItem:
 
     existing = get_donation_by_payment_intent(payment_intent.id)
     if existing:
+        existing_status = str(existing.get("status") or "").lower()
+        needs_upgrade = existing_status in {"failed", "pending", "processing", ""}
+        needs_monthly = (
+            row.get("frequency") == "monthly"
+            and str(existing.get("frequency") or "").lower() != "monthly"
+        )
+        if needs_upgrade or needs_monthly or not existing.get("organization_id"):
+            from db import rest_patch
+
+            updates = {
+                k: v
+                for k, v in row.items()
+                if v is not None and k != "stripe_payment_intent_id"
+            }
+            rest_patch("donations", updates, match={"id": existing["id"]})
+            refreshed = get_donation_by_payment_intent(payment_intent.id) or {**existing, **updates}
+            if needs_upgrade and str(refreshed.get("status") or "").lower() == "succeeded":
+                _send_donation_emails_safe(refreshed)
+            return _feed_item_from_row(refreshed)
         return _feed_item_from_row(existing)
 
     raise HTTPException(
