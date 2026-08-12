@@ -201,8 +201,13 @@ def platform_list_donations(
     has_more = len(rows) > offset + limit
     page = rows[offset : offset + limit]
 
-    total_amount = 0.0
+    # Sum every filtered donation in the selected reporting currency (not just the page).
+    total_amount = round(
+        sum(ad._row_amount(row, reporting_currency) for row in rows),
+        2,
+    )
     total_payout_amount = 0.0
+
     for row in page:
         ad._enrich_donation_fees(row)
         original_currency = str(row.get("currency") or "USD").upper()
@@ -229,18 +234,92 @@ def platform_list_donations(
         row["reporting_platform_fee"] = convert_to_reporting(
             platform, original_currency, reporting_currency
         )
-        total_amount += float(row["reporting_amount"] or 0)
         total_payout_amount += float(row["reporting_payout_amount"] or 0)
+
+    # Full-set payout total in reporting currency (best-effort from raw payout fields).
+    full_payout_total = 0.0
+    for row in rows:
+        original_currency = str(row.get("currency") or "USD").upper()
+        payout = float(row.get("payout_amount") or 0)
+        full_payout_total += convert_to_reporting(
+            payout, original_currency, reporting_currency
+        )
+    if full_payout_total > 0:
+        total_payout_amount = full_payout_total
 
     ad._attach_last_emails(page)
 
     return {
         "donations": page,
         "has_more": has_more,
-        "total_amount": round(total_amount, 2),
+        "count": len(rows),
+        "total_amount": total_amount,
         "total_payout_amount": round(total_payout_amount, 2),
         "reporting_currency": reporting_currency,
         "filter_options": _filter_options(org_names, campaigns),
+    }
+
+
+@router.get("/recurring")
+def platform_list_recurring(
+    user: Annotated[AuthUser, Depends(require_super_admin)],
+    organization_id: str | None = Query(None),
+    limit: int = Query(500, ge=1, le=2000),
+    reporting_currency: str = Query("USD"),
+) -> dict[str, Any]:
+    """Platform-wide recurring (monthly / subscription-backed) donations."""
+    reporting_currency = (reporting_currency or "USD").strip().upper() or "USD"
+    org_names = _org_name_map()
+    select_cols = (
+        "id,first_name,last_name,email,amount,currency,status,created_at,campaign_id,"
+        "frequency,organization_id,stripe_subscription_id,payment_method,payment_processor"
+    )
+    params: dict[str, str] = {
+        "or": "(frequency.eq.monthly,stripe_subscription_id.not.is.null)",
+        "select": select_cols,
+        "order": "created_at.desc",
+        "limit": str(min(limit * 2, 2000)),
+    }
+    if organization_id:
+        params["organization_id"] = f"eq.{organization_id}"
+
+    rows = rest_get("donations", params=params) or []
+
+    excluded = {"failed", "canceled", "cancelled", "refunded", "disputed"}
+    rows = [r for r in rows if str(r.get("status") or "succeeded").lower() not in excluded]
+
+    for row in rows:
+        if (
+            str(row.get("frequency") or "").lower() != "monthly"
+            and row.get("stripe_subscription_id")
+        ):
+            row["frequency"] = "monthly"
+
+    rows.sort(key=lambda r: str(r.get("created_at") or ""), reverse=True)
+    rows = rows[:limit]
+
+    total_amount = 0.0
+    for row in rows:
+        original_currency = str(row.get("currency") or "USD").upper()
+        row["original_amount"] = float(row.get("amount") or 0)
+        row["original_currency"] = original_currency
+        row["reporting_amount"] = ad._row_amount(row, reporting_currency)
+        row["reporting_currency"] = reporting_currency
+        oid = str(row.get("organization_id") or "")
+        row["organization_name"] = org_names.get(oid, "Unknown")
+        total_amount += float(row["reporting_amount"] or 0)
+
+    return {
+        "donations": rows,
+        "total_amount": round(total_amount, 2),
+        "count": len(rows),
+        "reporting_currency": reporting_currency,
+        "filter_options": {
+            "organizations": [
+                {"id": oid, "name": name}
+                for oid, name in sorted(org_names.items(), key=lambda item: item[1].lower())
+            ],
+        },
     }
 
 
