@@ -438,6 +438,36 @@ def _unique_copy_slug(org_id: str, base_slug: str) -> str:
     return f"{root}-copy-{secrets.token_hex(3)}"
 
 
+def _assert_slug_available(org_id: str, slug: str, campaign_id: str) -> None:
+    org_hit = rest_get_one(
+        "campaigns",
+        params={"organization_id": f"eq.{org_id}", "slug": f"eq.{slug}", "select": "id,name"},
+    )
+    if org_hit and str(org_hit.get("id")) != campaign_id:
+        raise HTTPException(
+            status_code=409,
+            detail=f'Slug "{slug}" is already used by campaign "{org_hit.get("name") or slug}". Choose a different subdomain.',
+        )
+    global_hit = rest_get_one(
+        "campaigns",
+        params={"slug": f"eq.{slug}", "select": "id,name,organization_id"},
+    )
+    if global_hit and str(global_hit.get("id")) != campaign_id:
+        raise HTTPException(
+            status_code=409,
+            detail=f'Subdomain "{slug}" is already taken. Choose a different name.',
+        )
+
+
+def _sync_campaign_slug(org_id: str, campaign_id: str, slug: str) -> str:
+    label = _slugify(slug)
+    if not label:
+        raise HTTPException(status_code=400, detail="Campaign slug cannot be empty")
+    _assert_slug_available(org_id, label, campaign_id)
+    rest_patch("campaigns", {"slug": label}, match={"id": campaign_id})
+    return label
+
+
 def _copy_row(row: dict[str, Any], extra: dict[str, Any], skip: set[str]) -> dict[str, Any]:
     out = {k: v for k, v in row.items() if k not in skip}
     out.update(extra)
@@ -1181,7 +1211,7 @@ def add_domain(
     require_org_access(org_id, user, min_role="admin")
     campaign = rest_get_one(
         "campaigns",
-        params={"id": f"eq.{campaign_id}", "organization_id": f"eq.{org_id}", "select": "id,name,status"},
+        params={"id": f"eq.{campaign_id}", "organization_id": f"eq.{org_id}", "select": "id,name,status,slug"},
     )
     if not campaign:
         raise HTTPException(status_code=404, detail="Campaign not found")
@@ -1193,9 +1223,13 @@ def add_domain(
 
     root = platform_root_domain()
     label = subdomain_label_from_hostname(hostname) or payload.hostname.strip().lower()
+    previous_hostname: str | None = None
+
+    if is_platform_subdomain and label:
+        _assert_slug_available(org_id, _slugify(label), campaign_id)
 
     existing_hostname = rest_get_one("domains", params={"hostname": f"eq.{hostname}", "select": "*"})
-    if existing_hostname:
+    if existing_hostname and str(existing_hostname.get("campaign_id")) != campaign_id:
         owner = rest_get_one(
             "campaigns",
             params={"id": f"eq.{existing_hostname['campaign_id']}", "select": "name,organization_id"},
@@ -1206,36 +1240,55 @@ def add_domain(
             detail=f'Subdomain "{label}" is already taken by campaign "{owner_name}". Choose a different name.',
         )
 
+    domain: dict[str, Any] | None = None
     if is_platform_subdomain and root:
         existing_for_campaign = rest_get(
             "domains",
             params={"campaign_id": f"eq.{campaign_id}", "select": "*"},
         )
-        for existing in existing_for_campaign:
-            existing_host = str(existing.get("hostname") or "")
-            if existing_host.endswith(f".{root}"):
-                raise HTTPException(
-                    status_code=409,
-                    detail=(
-                        f'Campaign "{campaign["name"]}" already uses subdomain '
-                        f'"{subdomain_label_from_hostname(existing_host) or existing_host}". '
-                        "Remove it first to assign a new one."
-                    ),
+        platform_row = next(
+            (
+                existing
+                for existing in existing_for_campaign
+                if str(existing.get("hostname") or "").endswith(f".{root}")
+            ),
+            None,
+        )
+        if platform_row:
+            previous_hostname = str(platform_row.get("hostname") or "")
+            if previous_hostname != hostname:
+                from datetime import datetime, timezone
+
+                now = datetime.now(timezone.utc).isoformat()
+                rest_patch(
+                    "domains",
+                    {"hostname": hostname, "verified_at": now, "ssl_status": "active"},
+                    match={"id": platform_row["id"]},
                 )
+            domain = rest_get_one("domains", params={"id": f"eq.{platform_row['id']}", "select": "*"})
+        elif existing_hostname and str(existing_hostname.get("campaign_id")) == campaign_id:
+            domain = existing_hostname
 
-    row: dict[str, Any] = {"campaign_id": campaign_id, "hostname": hostname}
-    if is_platform_subdomain:
-        from datetime import datetime, timezone
+    if domain is None:
+        row: dict[str, Any] = {"campaign_id": campaign_id, "hostname": hostname}
+        if is_platform_subdomain:
+            from datetime import datetime, timezone
 
-        row["verified_at"] = datetime.now(timezone.utc).isoformat()
-        row["ssl_status"] = "active"
+            row["verified_at"] = datetime.now(timezone.utc).isoformat()
+            row["ssl_status"] = "active"
 
-    domain = rest_insert("domains", row)
-    if not domain:
-        err = rest_insert_error("domains", row)
-        raise HTTPException(status_code=400, detail=err or "Could not add subdomain")
-    token = str(domain.get("verification_token") or "")
-    enriched = _enrich_domain_row(domain, {campaign_id: campaign})
+        domain = rest_insert("domains", row)
+        if not domain:
+            err = rest_insert_error("domains", row)
+            raise HTTPException(status_code=400, detail=err or "Could not add subdomain")
+
+    synced_slug = campaign.get("slug")
+    if is_platform_subdomain and label:
+        synced_slug = _sync_campaign_slug(org_id, campaign_id, label)
+        campaign = {**campaign, "slug": synced_slug}
+
+    token = str((domain or {}).get("verification_token") or "")
+    enriched = _enrich_domain_row(domain or {}, {campaign_id: campaign})
     try:
         from routers.paypal import schedule_campaign_paypal_apple_pay_domain_registration
 
@@ -1248,6 +1301,8 @@ def add_domain(
     return {
         **enriched,
         "resolved_hostname": hostname,
+        "previous_hostname": previous_hostname,
+        "slug": synced_slug,
         "auto_configured": is_platform_subdomain,
         "dns_instructions": build_dns_instructions(hostname, token, auto_configured=is_platform_subdomain),
     }
