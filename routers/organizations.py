@@ -418,6 +418,32 @@ def _slugify(name: str) -> str:
     return slug or secrets.token_hex(4)
 
 
+def _unique_copy_slug(org_id: str, base_slug: str) -> str:
+    """Return `{slug}-copy`, then `-copy-2`, … unique in this org and globally."""
+    root = _slugify(base_slug) or secrets.token_hex(4)
+    n = 1
+    while n < 200:
+        candidate = f"{root}-copy" if n == 1 else f"{root}-copy-{n}"
+        org_hit = rest_get_one(
+            "campaigns",
+            params={"organization_id": f"eq.{org_id}", "slug": f"eq.{candidate}", "select": "id"},
+        )
+        global_hit = rest_get_one(
+            "campaigns",
+            params={"slug": f"eq.{candidate}", "select": "id"},
+        )
+        if not org_hit and not global_hit:
+            return candidate
+        n += 1
+    return f"{root}-copy-{secrets.token_hex(3)}"
+
+
+def _copy_row(row: dict[str, Any], extra: dict[str, Any], skip: set[str]) -> dict[str, Any]:
+    out = {k: v for k, v in row.items() if k not in skip}
+    out.update(extra)
+    return out
+
+
 def ensure_root_campaign_subdomain() -> None:
     """Link the homepage campaign to {ROOT_CAMPAIGN_SUBDOMAIN}.{PLATFORM_ROOT_DOMAIN}."""
     from site_constants import ROOT_CAMPAIGN_ID
@@ -638,6 +664,110 @@ def get_campaign(
         "paypal_accounts": paypal_accounts,
         "nowpayments_accounts": nowpayments_accounts,
     }
+
+
+_CAMPAIGN_COPY_FIELDS = (
+    "default_currency",
+    "stripe_account_id",
+    "platform_stripe_account_id",
+    "paypal_account_id",
+    "nowpayments_account_id",
+    "payment_account_sources",
+    "payment_processor",
+    "min_donation_amount",
+    "min_donation_amount_once",
+    "min_donation_amount_monthly",
+)
+_CONTENT_SKIP = {
+    "id",
+    "campaign_id",
+    "created_at",
+    "updated_at",
+    "payment_accounts_json",
+}
+_CURRENCY_SKIP = {"id", "campaign_id", "created_at", "updated_at"}
+_QUESTION_SKIP = {"id", "campaign_id", "created_at", "updated_at"}
+
+
+@router.post("/{org_id}/campaigns/{campaign_id}/duplicate")
+def duplicate_campaign(
+    org_id: str,
+    campaign_id: str,
+    user: Annotated[AuthUser, Depends(require_auth)],
+) -> dict[str, Any]:
+    """Clone a campaign as a draft with a unique slug. Publish stays manual."""
+    require_org_access(org_id, user, min_role="member")
+    source = rest_get_one(
+        "campaigns",
+        params={"id": f"eq.{campaign_id}", "organization_id": f"eq.{org_id}", "select": "*"},
+    )
+    if not source:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+
+    source_name = str(source.get("name") or "Campaign").strip() or "Campaign"
+    source_slug = str(source.get("slug") or _slugify(source_name))
+    copy_name = f"{source_name} (copy)"
+    copy_slug = _unique_copy_slug(org_id, source_slug)
+
+    row: dict[str, Any] = {
+        "organization_id": org_id,
+        "name": copy_name,
+        "slug": copy_slug,
+        "status": "draft",
+    }
+    for field in _CAMPAIGN_COPY_FIELDS:
+        if field in source:
+            row[field] = source.get(field)
+
+    campaign = rest_insert("campaigns", row)
+    if not campaign:
+        err = rest_insert_error("campaigns", row)
+        raise HTTPException(status_code=500, detail=err or "Failed to duplicate campaign")
+
+    new_id = str(campaign["id"])
+
+    content = rest_get_one("campaign_content", params={"campaign_id": f"eq.{campaign_id}", "select": "*"})
+    if content:
+        content_row = _copy_row(content, {"campaign_id": new_id}, _CONTENT_SKIP)
+        if not content_row.get("title"):
+            content_row["title"] = copy_name
+        inserted = rest_insert("campaign_content", content_row)
+        if not inserted and "popup_view_json" in content_row:
+            fallback = {k: v for k, v in content_row.items() if k != "popup_view_json"}
+            inserted = rest_insert("campaign_content", fallback)
+        if not inserted:
+            rest_insert(
+                "campaign_content",
+                {"campaign_id": new_id, **_default_campaign_content(copy_name)},
+            )
+    else:
+        rest_insert("campaign_content", {"campaign_id": new_id, **_default_campaign_content(copy_name)})
+
+    currencies = rest_get(
+        "campaign_currencies",
+        params={"campaign_id": f"eq.{campaign_id}", "select": "*"},
+    )
+    if currencies:
+        for currency in currencies:
+            rest_insert("campaign_currencies", _copy_row(currency, {"campaign_id": new_id}, _CURRENCY_SKIP))
+    else:
+        _seed_default_campaign_currencies(new_id, str(source.get("default_currency") or "USD"))
+
+    questions = rest_get(
+        "questions",
+        params={"campaign_id": f"eq.{campaign_id}", "select": "*", "order": "sort_order.asc"},
+    )
+    for question in questions:
+        rest_insert("questions", _copy_row(question, {"campaign_id": new_id}, _QUESTION_SKIP))
+
+    try:
+        from campaign_translations import warm_campaign_translations_async
+
+        warm_campaign_translations_async(new_id)
+    except Exception:
+        pass
+
+    return get_campaign(org_id, new_id, user)
 
 
 @router.patch("/{org_id}/campaigns/{campaign_id}")
