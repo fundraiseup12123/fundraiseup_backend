@@ -146,7 +146,7 @@ def platform_list_donations(
     elif method_filter:
         params["payment_method"] = f"eq.{method_filter}"
     if processor_filter:
-        params["payment_processor"] = f"eq.{processor_filter}"
+        params["payment_processor"] = ad.payment_processor_rest_filter(processor_filter)
 
     resolved_from: str | None = None
     resolved_to: str | None = None
@@ -191,7 +191,7 @@ def platform_list_donations(
             rows = [
                 r
                 for r in rows
-                if str(r.get("payment_processor") or "").lower() == processor_filter
+                if ad.donation_matches_processor_filter(r, processor_filter)
             ]
 
     rows.sort(key=lambda r: str(r.get("created_at") or ""), reverse=True)

@@ -20,6 +20,37 @@ from pydantic import BaseModel, Field
 
 router = APIRouter(prefix="/admin", tags=["admin-data"])
 
+# Gateway profile filters mirror connected processors in payment settings:
+# - Authorize.net hybrid: Anet + Stripe + PayPal rails (+ crypto)
+# - Stripe profile: Stripe + PayPal (+ crypto)
+# - PayPal profile: PayPal (+ crypto)
+_GATEWAY_PROFILE_PROCESSORS: dict[str, frozenset[str]] = {
+    "authorizenet_paypal": frozenset(
+        {"authorizenet_paypal", "authorizenet", "stripe", "paypal", "nowpayments"}
+    ),
+    "stripe": frozenset({"stripe", "paypal", "nowpayments"}),
+    "paypal": frozenset({"paypal", "nowpayments"}),
+    "nowpayments": frozenset({"nowpayments"}),
+}
+
+
+def payment_processor_rest_filter(processor_filter: str) -> str:
+    """PostgREST value for the payment_processor query param (eq./in.)."""
+    processors = _GATEWAY_PROFILE_PROCESSORS.get(processor_filter)
+    if processors:
+        return f"in.({','.join(sorted(processors))})"
+    return f"eq.{processor_filter}"
+
+
+def donation_matches_processor_filter(row: dict[str, Any], processor_filter: str) -> bool:
+    if not processor_filter:
+        return True
+    value = str(row.get("payment_processor") or "").strip().lower()
+    processors = _GATEWAY_PROFILE_PROCESSORS.get(processor_filter)
+    if processors:
+        return value in processors
+    return value == processor_filter
+
 
 @router.get("/orgs/{org_id}/donations")
 def admin_list_donations(
@@ -81,7 +112,7 @@ def admin_list_donations(
     elif method_filter:
         params["payment_method"] = f"eq.{method_filter}"
     if processor_filter:
-        params["payment_processor"] = f"eq.{processor_filter}"
+        params["payment_processor"] = payment_processor_rest_filter(processor_filter)
     resolved_from: str | None = None
     resolved_to: str | None = None
     if date_preset and date_preset != "all":
@@ -126,7 +157,9 @@ def admin_list_donations(
             elif method_filter:
                 orphan_params["payment_method"] = f"eq.{method_filter}"
             if processor_filter:
-                orphan_params["payment_processor"] = f"eq.{processor_filter}"
+                orphan_params["payment_processor"] = payment_processor_rest_filter(
+                    processor_filter
+                )
             if resolved_from and resolved_to:
                 orphan_params["and"] = f"(created_at.gte.{resolved_from},created_at.lte.{resolved_to})"
             elif resolved_from:
