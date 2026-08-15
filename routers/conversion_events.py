@@ -16,6 +16,7 @@ router = APIRouter(prefix="/analytics", tags=["conversion-analytics"])
 _ALLOWED_EVENTS = {
     "amount_view",
     "amount_selected",
+    "checkout_engaged",
     "monthly_upsell_view",
     "monthly_upsell_accept",
     "monthly_upsell_decline",
