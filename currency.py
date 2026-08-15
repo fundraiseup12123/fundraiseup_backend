@@ -375,6 +375,23 @@ def assert_meets_min_donation(
         )
 
 
+NOWPAYMENTS_MIN_USD = 12.0
+
+
+def assert_meets_nowpayments_minimum(amount: float, currency: str) -> None:
+    """Keep API enforcement aligned with the client-side crypto floor."""
+    from fastapi import HTTPException
+
+    donor = (currency or "USD").upper()
+    amount_usd = convert_to_reporting(float(amount), donor, "USD")
+    if amount_usd + 1e-9 < NOWPAYMENTS_MIN_USD:
+        required = convert_min_donation(NOWPAYMENTS_MIN_USD, "USD", donor)
+        raise HTTPException(
+            status_code=400,
+            detail=f"Crypto minimum {format_display_amount(required, donor)}",
+        )
+
+
 
 
 def supports_nowpayments_fiat(currency: str) -> bool:

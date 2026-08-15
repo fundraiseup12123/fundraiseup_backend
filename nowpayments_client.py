@@ -98,6 +98,19 @@ def get_payment_status(*, api_key: str, payment_id: str) -> dict[str, Any] | Non
     return data if isinstance(data, dict) else None
 
 
+def get_invoice_status(*, api_key: str, invoice_id: str) -> dict[str, Any] | None:
+    """Fetch an invoice from NOWPayments before trusting a browser success redirect."""
+    with httpx.Client(timeout=20.0) as client:
+        response = client.get(
+            f"{nowpayments_api_base()}/invoice/{invoice_id}",
+            headers={"x-api-key": api_key.strip()},
+        )
+    if response.status_code >= 400:
+        return None
+    data = response.json()
+    return data if isinstance(data, dict) else None
+
+
 def verify_ipn_signature(payload: dict[str, Any], signature: str | None, ipn_secret: str) -> bool:
     if not signature or not ipn_secret:
         return False

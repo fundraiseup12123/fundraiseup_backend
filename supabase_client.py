@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import time
 from pathlib import Path
 from typing import Any
 
@@ -83,21 +84,38 @@ def insert_donation(row: dict[str, Any]) -> dict[str, Any] | None:
     )
 
     for _ in range(len(optional_columns) + 1):
-        try:
-            response = httpx.post(
-                f"{_supabase_url()}/rest/v1/donations",
-                headers=_headers(prefer="return=representation,resolution=ignore-duplicates"),
-                json=payload,
-                timeout=15.0,
-            )
-        except httpx.HTTPError:
+        response: httpx.Response | None = None
+        for attempt in range(3):
+            try:
+                response = httpx.post(
+                    f"{_supabase_url()}/rest/v1/donations",
+                    headers=_headers(prefer="return=representation,resolution=ignore-duplicates"),
+                    json=payload,
+                    timeout=15.0,
+                )
+            except httpx.HTTPError:
+                response = None
+            if response is not None and response.status_code < 500:
+                break
+            if attempt < 2:
+                time.sleep(0.25 * (attempt + 1))
+
+        if response is None:
             return None
 
         if response.status_code in {200, 201}:
             data = response.json()
-            return data[0] if isinstance(data, list) and data else data
+            saved = data[0] if isinstance(data, list) and data else data
+            if saved:
+                return saved
+            payment_id = str(payload.get("stripe_payment_intent_id") or "")
+            return get_donation_by_payment_intent(payment_id) if payment_id else None
 
-        if response.status_code in {404, 409}:
+        if response.status_code == 409:
+            payment_id = str(payload.get("stripe_payment_intent_id") or "")
+            return get_donation_by_payment_intent(payment_id) if payment_id else None
+
+        if response.status_code == 404:
             return None
 
         error = _parse_insert_error(response)

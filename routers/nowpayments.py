@@ -14,6 +14,7 @@ from frontend_url import resolve_frontend_url
 from nowpayments_client import (
     api_key_hint,
     create_invoice,
+    get_invoice_status,
     verify_api_key,
     verify_ipn_signature,
 )
@@ -466,10 +467,15 @@ def nowpayments_checkout_config(
 
 @router.post("/prepare-redirect")
 def nowpayments_prepare_redirect(payload: PrepareNowPaymentsRedirectRequest) -> dict[str, str]:
-    from currency import assert_meets_min_donation, resolve_min_donation_for_frequency
+    from currency import (
+        assert_meets_min_donation,
+        assert_meets_nowpayments_minimum,
+        resolve_min_donation_for_frequency,
+    )
 
     if payload.frequency != "once":
         raise HTTPException(status_code=400, detail="Crypto (NOWPayments) is only available for one-time donations")
+    assert_meets_nowpayments_minimum(payload.amount, payload.currency)
 
     if payload.campaign_id:
         campaign = rest_get_one(
@@ -550,15 +556,14 @@ def nowpayments_complete_redirect(payload: CompleteNowPaymentsRedirectRequest) -
     if not account:
         raise HTTPException(status_code=400, detail="NOWPayments is not connected for this page.")
 
-    display_currency = payload.currency.lower()
-    base_amount, total_display = _resolve_total(payload.amount, display_currency, payload.cover_fees)
-    payment_id = f"np_{payload.payment_ref}"
-    if payload.invoice_id:
-        payment_id = f"np_inv_{payload.invoice_id}"
-
-    existing = _find_donation_by_nowpayments_keys(
+    pending = _load_pending_checkout(
         payment_ref=payload.payment_ref,
         invoice_id=payload.invoice_id,
+    )
+    invoice_id = payload.invoice_id or (str(pending.get("invoice_id") or "") if pending else "")
+    existing = _find_donation_by_nowpayments_keys(
+        payment_ref=payload.payment_ref,
+        invoice_id=invoice_id or None,
     )
     if existing:
         return {
@@ -567,18 +572,49 @@ def nowpayments_complete_redirect(payload: CompleteNowPaymentsRedirectRequest) -
             "recorded": True,
         }
 
+    if not invoice_id:
+        raise HTTPException(
+            status_code=409,
+            detail="Crypto payment is awaiting provider confirmation.",
+        )
+
+    try:
+        invoice = get_invoice_status(
+            api_key=str(account["api_key"]),
+            invoice_id=invoice_id,
+        )
+    except Exception:
+        invoice = None
+    provider_status = str(
+        (invoice or {}).get("payment_status")
+        or (invoice or {}).get("invoice_status")
+        or (invoice or {}).get("status")
+        or ""
+    ).lower()
+    if provider_status not in {"finished", "confirmed", "partially_paid"}:
+        raise HTTPException(
+            status_code=409,
+            detail="Crypto payment is still confirming. It will be recorded automatically.",
+        )
+
+    display_currency = payload.currency.lower()
+    base_amount, total_display = _resolve_total(payload.amount, display_currency, payload.cover_fees)
+    payment_id = f"np_inv_{invoice_id}"
+
     _save_pending_checkout(
         payment_ref=payload.payment_ref,
-        invoice_id=payload.invoice_id,
+        invoice_id=invoice_id,
         payload=payload,
     )
 
+    crypto_fields = _crypto_fields_from_ipn(invoice or {})
     recorded = _record_nowpayments_donation(
         payment_id=payment_id,
         payload=payload,
         base_amount=base_amount,
         total_display=total_display,
         status="succeeded",
+        **crypto_fields,
     )
     return {
         "payment_id": payment_id,
@@ -604,7 +640,20 @@ def nowpayments_complete_by_ref(payload: CompleteByRefRequest) -> dict[str, obje
         payment_ref=payload.payment_ref,
         invoice_id=payload.invoice_id,
     )
-    return nowpayments_complete_redirect(complete)
+    result = nowpayments_complete_redirect(complete)
+    _, total_display = _resolve_total(
+        complete.amount,
+        complete.currency.lower(),
+        complete.cover_fees,
+    )
+    return {
+        **result,
+        "amount": total_display,
+        "currency": complete.currency.upper(),
+        "frequency": complete.frequency,
+        "payment_method": "nowpayments",
+        "cover_fees": complete.cover_fees,
+    }
 
 
 def _crypto_fields_from_ipn(payload: dict[str, Any]) -> dict[str, Any]:

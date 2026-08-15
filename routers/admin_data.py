@@ -20,16 +20,12 @@ from pydantic import BaseModel, Field
 
 router = APIRouter(prefix="/admin", tags=["admin-data"])
 
-# Gateway profile filters mirror connected processors in payment settings:
-# - Authorize.net hybrid: Anet + Stripe + PayPal rails (+ crypto)
-# - Stripe profile: Stripe + PayPal (+ crypto)
-# - PayPal profile: PayPal (+ crypto)
+# Exact gateway filters: show only donations settled by that connected gateway.
+# Authorize.net includes legacy `authorizenet` tags as well as `authorizenet_paypal`.
 _GATEWAY_PROFILE_PROCESSORS: dict[str, frozenset[str]] = {
-    "authorizenet_paypal": frozenset(
-        {"authorizenet_paypal", "authorizenet", "stripe", "paypal", "nowpayments"}
-    ),
-    "stripe": frozenset({"stripe", "paypal", "nowpayments"}),
-    "paypal": frozenset({"paypal", "nowpayments"}),
+    "authorizenet_paypal": frozenset({"authorizenet_paypal", "authorizenet"}),
+    "stripe": frozenset({"stripe"}),
+    "paypal": frozenset({"paypal"}),
     "nowpayments": frozenset({"nowpayments"}),
 }
 
@@ -614,6 +610,13 @@ def admin_insights(
         ]
 
     rows = _insights_countable(rows)
+    checkout_funnel = _checkout_funnel_summary(
+        campaign_ids=[str(c["id"]) for c in campaigns if c.get("id")],
+        campaign_id=campaign_id,
+        date_from=resolved_from,
+        date_to=resolved_to,
+        utm_source=utm_source,
+    )
 
     recurring = [r for r in rows if r.get("frequency") == "monthly"]
     one_time = [r for r in rows if r.get("frequency") != "monthly"]
@@ -639,10 +642,17 @@ def admin_insights(
         reporting_currency,
     )
     homepage_rows = [r for r in rows if _donation_checkout_view(r) == "homepage"]
+    landing_rows = [r for r in rows if _donation_checkout_view(r) == "landing"]
+    # Insights UI labels homepage charts as "Landing"; include dedicated landing rows.
+    landing_surface_rows = homepage_rows + landing_rows
     popup_rows = [r for r in rows if _donation_checkout_view(r) == "popup"]
-    country_breakdown_homepage = _breakdown(homepage_rows, _donation_country_label, reporting_currency)
+    country_breakdown_homepage = _breakdown(
+        landing_surface_rows, _donation_country_label, reporting_currency
+    )
     country_breakdown_popup = _breakdown(popup_rows, _donation_country_label, reporting_currency)
-    device_breakdown_homepage = _breakdown(homepage_rows, _donation_device_label, reporting_currency)
+    device_breakdown_homepage = _breakdown(
+        landing_surface_rows, _donation_device_label, reporting_currency
+    )
     device_breakdown_popup = _breakdown(popup_rows, _donation_device_label, reporting_currency)
 
     sources = sorted(
@@ -682,10 +692,88 @@ def admin_insights(
         "country_breakdown_popup": country_breakdown_popup,
         "device_breakdown_homepage": device_breakdown_homepage,
         "device_breakdown_popup": device_breakdown_popup,
+        "country_breakdown_landing": _breakdown(
+            landing_rows, _donation_country_label, reporting_currency
+        ),
+        "device_breakdown_landing": _breakdown(
+            landing_rows, _donation_device_label, reporting_currency
+        ),
+        "checkout_funnel": checkout_funnel,
         "filter_options": {
             "campaigns": campaigns,
             "designations": sorted({c.get("designation") for c in campaigns if c.get("designation")}),
             "sources": sources,
+        },
+    }
+
+
+def _checkout_funnel_summary(
+    *,
+    campaign_ids: list[str],
+    campaign_id: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    utm_source: str | None = None,
+) -> dict[str, Any]:
+    selected_ids = [campaign_id] if campaign_id else campaign_ids
+    empty = {
+        "sessions": 0,
+        "events": {},
+        "payment_methods": {},
+        "processors": {},
+        "checkout_views": {},
+        "upsell": {"views": 0, "accepted": 0, "declined": 0, "accept_rate": 0},
+    }
+    if not selected_ids:
+        return empty
+
+    params = {
+        "campaign_id": f"in.({','.join(selected_ids)})",
+        "select": (
+            "session_id,event_name,payment_method,payment_processor,"
+            "checkout_view,frequency,utm,created_at"
+        ),
+        "order": "created_at.asc",
+        "limit": "10000",
+    }
+    if date_from and date_to:
+        params["and"] = f"(created_at.gte.{date_from},created_at.lte.{date_to})"
+    elif date_from:
+        params["created_at"] = f"gte.{date_from}"
+    elif date_to:
+        params["created_at"] = f"lte.{date_to}"
+
+    attempts = rest_get("checkout_attempts", params=params)
+    if utm_source:
+        attempts = [
+            row
+            for row in attempts
+            if isinstance(row.get("utm"), dict) and row["utm"].get("source") == utm_source
+        ]
+
+    def counts(field: str) -> dict[str, int]:
+        result: dict[str, int] = {}
+        for row in attempts:
+            value = str(row.get(field) or "").strip()
+            if value:
+                result[value] = result.get(value, 0) + 1
+        return result
+
+    event_counts = counts("event_name")
+    upsell_views = event_counts.get("monthly_upsell_view", 0)
+    upsell_accepted = event_counts.get("monthly_upsell_accept", 0)
+    upsell_declined = event_counts.get("monthly_upsell_decline", 0)
+    return {
+        "sessions": len({str(row.get("session_id")) for row in attempts if row.get("session_id")}),
+        "events": event_counts,
+        "payment_methods": counts("payment_method"),
+        "processors": counts("payment_processor"),
+        "checkout_views": counts("checkout_view"),
+        "upsell": {
+            "views": upsell_views,
+            "accepted": upsell_accepted,
+            "declined": upsell_declined,
+            "accept_rate": round((upsell_accepted / upsell_views) * 100, 1) if upsell_views else 0,
         },
     }
 
@@ -699,6 +787,33 @@ def _utm_campaign_label(utm: Any) -> str:
         if value:
             return value
     return ""
+
+
+def _utm_dimension_label(utm: Any, field: str) -> str:
+    if not isinstance(utm, dict):
+        return ""
+    return str(utm.get(field) or utm.get(f"utm_{field}") or "").strip()
+
+
+def _utm_dimension_breakdown(
+    rows: list[dict[str, Any]],
+    field: str,
+    reporting_currency: str,
+) -> list[dict[str, Any]]:
+    counts: dict[str, int] = {}
+    amounts: dict[str, float] = {}
+    for row in rows:
+        label = _utm_dimension_label(row.get("utm"), field)
+        counts[label] = counts.get(label, 0) + 1
+        amounts[label] = amounts.get(label, 0.0) + _row_amount(row, reporting_currency)
+    return [
+        {
+            "value": label,
+            "results": counts[label],
+            "amount": round(amounts.get(label, 0.0), 2),
+        }
+        for label in sorted(counts, key=lambda key: (-counts[key], key.lower()))
+    ]
 
 
 @router.get("/orgs/{org_id}/utm-report")
@@ -785,8 +900,26 @@ def admin_utm_report(
             "named_campaign_results": named_results,
             "empty_campaign_results": empty_results,
             "unique_rows": len(table_rows),
+            "utm_source_values": len(
+                {
+                    _utm_dimension_label(row.get("utm"), "source")
+                    for row in rows
+                    if _utm_dimension_label(row.get("utm"), "source")
+                }
+            ),
+            "utm_medium_values": len(
+                {
+                    _utm_dimension_label(row.get("utm"), "medium")
+                    for row in rows
+                    if _utm_dimension_label(row.get("utm"), "medium")
+                }
+            ),
         },
         "rows": table_rows,
+        "source_breakdown": _utm_dimension_breakdown(rows, "source", reporting_currency),
+        "medium_breakdown": _utm_dimension_breakdown(rows, "medium", reporting_currency),
+        "content_breakdown": _utm_dimension_breakdown(rows, "content", reporting_currency),
+        "checkout_view_breakdown": _breakdown(rows, _donation_checkout_view, reporting_currency),
     }
 
 
@@ -817,8 +950,18 @@ def _empty_insights(
         "hour_breakdown": [],
         "country_breakdown_homepage": [],
         "country_breakdown_popup": [],
+        "country_breakdown_landing": [],
         "device_breakdown_homepage": [],
         "device_breakdown_popup": [],
+        "device_breakdown_landing": [],
+        "checkout_funnel": {
+            "sessions": 0,
+            "events": {},
+            "payment_methods": {},
+            "processors": {},
+            "checkout_views": {},
+            "upsell": {"views": 0, "accepted": 0, "declined": 0, "accept_rate": 0},
+        },
         "filter_options": {
             "campaigns": campaigns,
             "designations": sorted({c.get("designation") for c in campaigns if c.get("designation")}),

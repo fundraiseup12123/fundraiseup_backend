@@ -3,13 +3,14 @@ from __future__ import annotations
 import json
 import os
 import uuid
-from typing import Literal
+from typing import Any, Literal
 from urllib.parse import urlencode
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 
+from db import rest_get_one, rest_insert
 from frontend_url import resolve_frontend_url
 from currency import (
     calculate_total_with_fees,
@@ -24,13 +25,14 @@ from paypal_client import (
     create_paypal_order,
     create_paypal_subscription,
     ensure_paypal_plan,
+    get_paypal_order,
     get_paypal_subscription,
     paypal_configured,
     paypal_env,
     register_paypal_apple_pay_domain,
     warm_paypal_access_token,
 )
-from supabase_client import insert_donation, supabase_enabled
+from supabase_client import get_donation_by_payment_intent, insert_donation, supabase_enabled
 
 router = APIRouter(prefix="/paypal", tags=["paypal"])
 
@@ -178,6 +180,12 @@ class CompletePayPalRedirectRequest(BaseModel):
     subscription_id: str | None = None
 
 
+class CompletePayPalByRefRequest(BaseModel):
+    payment_ref: str = Field(min_length=8, max_length=64)
+    paypal_txn_id: str | None = None
+    subscription_id: str | None = None
+
+
 class EnsurePayPalPlanRequest(BaseModel):
     amount: float = Field(gt=0)
     currency: str = Field(min_length=3, max_length=3)
@@ -294,6 +302,32 @@ def _resolve_paypal_organization_id(campaign_id: str | None) -> str:
         if campaign_id == ROOT_CAMPAIGN_ID:
             return ROOT_ORG_ID
     return ROOT_ORG_ID
+
+
+def _save_paypal_checkout(
+    *,
+    payment_ref: str,
+    payload: PreparePayPalRedirectRequest,
+    order_id: str | None = None,
+    subscription_id: str | None = None,
+) -> None:
+    rest_insert(
+        "paypal_checkouts",
+        {
+            "payment_ref": payment_ref,
+            "order_id": order_id or None,
+            "subscription_id": subscription_id or None,
+            "payload": payload.model_dump(mode="json"),
+        },
+        on_conflict="payment_ref",
+    )
+
+
+def _load_paypal_checkout(payment_ref: str) -> dict[str, Any] | None:
+    return rest_get_one(
+        "paypal_checkouts",
+        params={"payment_ref": f"eq.{payment_ref}", "select": "*"},
+    )
 
 
 def _record_paypal_donation(
@@ -414,8 +448,10 @@ def paypal_checkout_config(
     account = resolve_paypal_account_for_checkout(campaign_id, checkout_view)
     payee = resolve_paypal_payee_email_for_checkout(campaign_id, checkout_view)
     keys_ready = _account_has_keys(account)
-    available = bool(payee or keys_ready)
-    mode = "keys" if keys_ready else ("redirect" if payee else "unavailable")
+    # Browser return URLs are not proof of settlement. Only expose PayPal when
+    # REST API keys let the backend capture/verify the order or subscription.
+    available = bool(keys_ready)
+    mode = "keys" if keys_ready else "unavailable"
     processor = resolve_payment_processor(None, campaign_id)
     env_value = paypal_env()
     if keys_ready and account:
@@ -592,10 +628,10 @@ def paypal_prepare_redirect(payload: PreparePayPalRedirectRequest) -> dict[str, 
     account = resolve_paypal_account_for_checkout(payload.campaign_id, payload.checkout_view)
     payee = resolve_paypal_payee_email_for_checkout(payload.campaign_id, payload.checkout_view)
     keys_ready = _account_has_keys(account)
-    if not payee and not keys_ready:
+    if not keys_ready:
         raise HTTPException(
             status_code=400,
-            detail="PayPal is not connected for this page. Connect a PayPal account in admin first.",
+            detail="PayPal API keys are required so payments can be verified before success.",
         )
 
     if payload.frequency == "monthly" and not keys_ready:
@@ -651,6 +687,11 @@ def paypal_prepare_redirect(payload: PreparePayPalRedirectRequest) -> dict[str, 
                 approve_url = created.get("approve_url")
                 if not approve_url:
                     raise RuntimeError("PayPal did not return an approval link")
+                _save_paypal_checkout(
+                    payment_ref=payment_ref,
+                    payload=payload,
+                    subscription_id=str(created["subscription_id"]),
+                )
                 return {
                     "redirect_url": str(approve_url),
                     "payment_ref": payment_ref,
@@ -683,6 +724,11 @@ def paypal_prepare_redirect(payload: PreparePayPalRedirectRequest) -> dict[str, 
         if not approve_url:
             raise HTTPException(status_code=502, detail="PayPal did not return an approval link")
 
+        _save_paypal_checkout(
+            payment_ref=payment_ref,
+            payload=payload,
+            order_id=order_id,
+        )
         return {
             "redirect_url": str(approve_url),
             "payment_ref": payment_ref,
@@ -771,6 +817,9 @@ def paypal_complete_redirect(payload: CompletePayPalRedirectRequest) -> CaptureP
                 status_code=400,
                 detail="Missing PayPal subscription id. Complete approval on PayPal and return.",
             )
+        order_id = f"paypal-sub:{subscription_id}"
+        if get_donation_by_payment_intent(order_id):
+            return CapturePayPalOrderResponse(order_id=order_id, status="COMPLETED", recorded=True)
         try:
             sub = get_paypal_subscription(
                 subscription_id,
@@ -785,7 +834,6 @@ def paypal_complete_redirect(payload: CompletePayPalRedirectRequest) -> CaptureP
                 status_code=400,
                 detail=f"PayPal subscription not active (status={status_value or 'unknown'})",
             )
-        order_id = f"paypal-sub:{subscription_id}"
         # Ensure donation row is marked monthly.
         payload.frequency = "monthly"
     elif keys_ready and account:
@@ -795,6 +843,9 @@ def paypal_complete_redirect(payload: CompletePayPalRedirectRequest) -> CaptureP
                 status_code=400,
                 detail="Missing PayPal order token. Complete payment on PayPal and return to this page.",
             )
+        order_id = f"paypal:{order_token}"
+        if get_donation_by_payment_intent(order_id):
+            return CapturePayPalOrderResponse(order_id=order_id, status="COMPLETED", recorded=True)
         try:
             capture = capture_paypal_order(
                 order_token,
@@ -802,15 +853,20 @@ def paypal_complete_redirect(payload: CompletePayPalRedirectRequest) -> CaptureP
                 client_secret=str(account.get("client_secret") or ""),
             )
         except RuntimeError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+            try:
+                capture = get_paypal_order(
+                    order_token,
+                    client_id=str(account.get("client_id") or ""),
+                    client_secret=str(account.get("client_secret") or ""),
+                )
+            except RuntimeError:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
         if str(capture.get("status") or "").upper() != "COMPLETED":
             raise HTTPException(status_code=400, detail="PayPal payment was not completed")
-        order_id = f"paypal:{order_token}"
     else:
-        order_id = (
-            f"paypal:{payload.paypal_txn_id}"
-            if payload.paypal_txn_id
-            else f"paypal:{payload.payment_ref}"
+        raise HTTPException(
+            status_code=400,
+            detail="PayPal payment cannot be verified without API keys.",
         )
 
     saved = _record_paypal_donation(
@@ -833,6 +889,45 @@ def paypal_complete_redirect(payload: CompletePayPalRedirectRequest) -> CaptureP
                 (saved or {}).get("id"),
             )
     return CapturePayPalOrderResponse(order_id=order_id, status="COMPLETED", recorded=bool(saved))
+
+
+@router.post("/complete-by-ref")
+def paypal_complete_by_ref(payload: CompletePayPalByRefRequest) -> dict[str, object]:
+    """Recover and verify a PayPal return when browser session storage was lost."""
+    pending = _load_paypal_checkout(payload.payment_ref)
+    if not pending:
+        raise HTTPException(status_code=404, detail="PayPal checkout session not found.")
+
+    raw = pending.get("payload") or {}
+    if isinstance(raw, str):
+        raw = json.loads(raw)
+    data = dict(raw)
+    data["payment_ref"] = payload.payment_ref
+    data["paypal_txn_id"] = (
+        payload.paypal_txn_id
+        or pending.get("order_id")
+        or None
+    )
+    data["subscription_id"] = (
+        payload.subscription_id
+        or pending.get("subscription_id")
+        or None
+    )
+    complete = CompletePayPalRedirectRequest.model_validate(data)
+    result = paypal_complete_redirect(complete)
+    _, total_display = _resolve_total(
+        complete.amount,
+        complete.currency.lower(),
+        complete.cover_fees,
+    )
+    return {
+        **result.model_dump(),
+        "amount": total_display,
+        "currency": complete.currency.upper(),
+        "frequency": complete.frequency,
+        "payment_method": "paypal",
+        "cover_fees": complete.cover_fees,
+    }
 
 
 @router.post("/ensure-plan")

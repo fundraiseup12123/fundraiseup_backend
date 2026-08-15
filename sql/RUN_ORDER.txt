@@ -49,3 +49,6 @@
 --   035_campaign_platform_stripe_account_id.sql
 --   036_payment_processor.sql
 --   037_authorizenet_paypal.sql
+--   038_donation_payment_processor.sql
+--   039_checkout_attempts.sql
+--   040_paypal_checkouts.sql

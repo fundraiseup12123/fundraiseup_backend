@@ -514,3 +514,67 @@ create index if not exists email_logs_sent_at_idx on public.email_logs (sent_at 
 alter table public.email_reminders enable row level security;
 
 notify pgrst, 'reload schema';
+-- First-party, PII-free donation funnel telemetry.
+-- Captures both completed and abandoned checkout journeys without changing checkout flow.
+CREATE TABLE IF NOT EXISTS public.checkout_attempts (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  event_id text NOT NULL UNIQUE,
+  session_id text NOT NULL,
+  event_name text NOT NULL,
+  campaign_id uuid,
+  checkout_view text NOT NULL DEFAULT 'homepage'
+    CHECK (checkout_view IN ('homepage', 'popup', 'landing')),
+  funnel_step text,
+  payment_method text,
+  payment_processor text,
+  frequency text CHECK (frequency IS NULL OR frequency IN ('once', 'monthly')),
+  amount numeric,
+  currency text,
+  cover_fees boolean,
+  transaction_id text,
+  utm jsonb,
+  device jsonb,
+  metadata jsonb,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS checkout_attempts_session_created_idx
+  ON public.checkout_attempts (session_id, created_at);
+
+CREATE INDEX IF NOT EXISTS checkout_attempts_campaign_created_idx
+  ON public.checkout_attempts (campaign_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS checkout_attempts_event_created_idx
+  ON public.checkout_attempts (event_name, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS checkout_attempts_utm_campaign_idx
+  ON public.checkout_attempts ((utm->>'campaign'));
+
+ALTER TABLE public.checkout_attempts ENABLE ROW LEVEL SECURITY;
+
+-- The browser writes through the backend service key only. No direct donor access.
+REVOKE ALL ON TABLE public.checkout_attempts FROM anon, authenticated;
+
+COMMENT ON TABLE public.checkout_attempts IS
+  'PII-free first-party donation funnel events, including abandoned checkout journeys.';
+
+CREATE TABLE IF NOT EXISTS public.paypal_checkouts (
+  payment_ref text PRIMARY KEY,
+  order_id text,
+  subscription_id text,
+  payload jsonb NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS paypal_checkouts_order_id_idx
+  ON public.paypal_checkouts (order_id) WHERE order_id IS NOT NULL;
+
+CREATE UNIQUE INDEX IF NOT EXISTS paypal_checkouts_subscription_id_idx
+  ON public.paypal_checkouts (subscription_id) WHERE subscription_id IS NOT NULL;
+
+ALTER TABLE public.paypal_checkouts ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON TABLE public.paypal_checkouts FROM anon, authenticated;
+
+notify pgrst, 'reload schema';
+

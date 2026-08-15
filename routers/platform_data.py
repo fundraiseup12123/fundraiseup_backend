@@ -456,6 +456,13 @@ def platform_insights(
         ]
 
     rows = ad._insights_countable(rows)
+    checkout_funnel = ad._checkout_funnel_summary(
+        campaign_ids=[str(c["id"]) for c in campaigns if c.get("id")],
+        campaign_id=campaign_id,
+        date_from=resolved_from,
+        date_to=resolved_to,
+        utm_source=utm_source,
+    )
 
     recurring = [r for r in rows if r.get("frequency") == "monthly"]
     one_time = [r for r in rows if r.get("frequency") != "monthly"]
@@ -483,6 +490,8 @@ def platform_insights(
         reporting_currency,
     )
     homepage_rows = [r for r in rows if ad._donation_checkout_view(r) == "homepage"]
+    landing_rows = [r for r in rows if ad._donation_checkout_view(r) == "landing"]
+    landing_surface_rows = homepage_rows + landing_rows
     popup_rows = [r for r in rows if ad._donation_checkout_view(r) == "popup"]
 
     return {
@@ -504,17 +513,24 @@ def platform_insights(
         "campaign_breakdown": campaign_breakdown,
         "hour_breakdown": hour_breakdown,
         "country_breakdown_homepage": ad._breakdown(
-            homepage_rows, ad._donation_country_label, reporting_currency
+            landing_surface_rows, ad._donation_country_label, reporting_currency
         ),
         "country_breakdown_popup": ad._breakdown(
             popup_rows, ad._donation_country_label, reporting_currency
         ),
         "device_breakdown_homepage": ad._breakdown(
-            homepage_rows, ad._donation_device_label, reporting_currency
+            landing_surface_rows, ad._donation_device_label, reporting_currency
         ),
         "device_breakdown_popup": ad._breakdown(
             popup_rows, ad._donation_device_label, reporting_currency
         ),
+        "country_breakdown_landing": ad._breakdown(
+            landing_rows, ad._donation_country_label, reporting_currency
+        ),
+        "device_breakdown_landing": ad._breakdown(
+            landing_rows, ad._donation_device_label, reporting_currency
+        ),
+        "checkout_funnel": checkout_funnel,
         "filter_options": {
             "organizations": filter_opts["organizations"],
             "campaigns": filter_opts["campaigns"],

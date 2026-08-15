@@ -614,6 +614,26 @@ def capture_paypal_order(
     return body
 
 
+def get_paypal_order(
+    order_id: str,
+    *,
+    client_id: str | None = None,
+    client_secret: str | None = None,
+) -> dict[str, object]:
+    token = _paypal_access_token(client_id=client_id, client_secret=client_secret)
+    response = _http.get(
+        f"{paypal_api_base_for(client_id, client_secret)}/v2/checkout/orders/{order_id}",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        },
+    )
+    if response.status_code >= 400:
+        raise RuntimeError("Unable to verify PayPal order")
+    body = response.json()
+    return body if isinstance(body, dict) else {}
+
+
 _product_lock = threading.Lock()
 _plan_lock = threading.Lock()
 # client_id -> product_id
