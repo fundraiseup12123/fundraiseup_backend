@@ -287,22 +287,6 @@ def _payment_method_types(charge_curr: str, payment_method: PaymentMethodType) -
     return methods
 
 
-def _donation_payment_processor_for_campaign(campaign_id: str | None) -> str:
-    """
-    Attribute Stripe-rail donations to the campaign gateway when hybrid
-    Authorize.net + PayPal is active (monthly Google/Apple Pay still uses Stripe).
-    """
-    try:
-        from routers.payment_accounts import resolve_payment_processor
-
-        processor = resolve_payment_processor(None, campaign_id)
-        if processor == "authorizenet_paypal":
-            return "authorizenet_paypal"
-    except Exception:
-        pass
-    return "stripe"
-
-
 def _checkout_metadata(
     payload: CreateCheckoutRequest,
     base_amount: float,
@@ -323,9 +307,9 @@ def _checkout_metadata(
         "campaign": campaign_slug or "sdnemergency",
         "display_currency": payload.currency.upper(),
         "payment_method": payment_method,
-        "payment_processor": _donation_payment_processor_for_campaign(
-            campaign_id or payload.campaign_id
-        ),
+        # Stripe PaymentIntents always settle on Stripe, even when the campaign
+        # is configured for hybrid Authorize.net (wallets / platform landing).
+        "payment_processor": "stripe",
     }
     first_name = _clean_donor_name(payload.donor.first_name)
     last_name = _clean_donor_name(payload.donor.last_name)
@@ -390,11 +374,8 @@ def _device_from_meta(meta: dict[str, str]) -> dict[str, str]:
     cleaned["checkout_view"] = (
         checkout_view if checkout_view in ("homepage", "popup", "landing") else "homepage"
     )
-    processor = str(meta.get("payment_processor") or "").strip().lower()
-    if processor == "authorizenet_paypal":
-        cleaned["processor"] = "authorizenet"
-    elif processor:
-        cleaned["processor"] = processor
+    # This helper only runs for Stripe PaymentIntent rows.
+    cleaned["processor"] = "stripe"
     return cleaned
 
 
@@ -1378,8 +1359,7 @@ def _donation_row_from_intent(
         "currency": display_currency,
         "frequency": frequency,
         "payment_method": meta.get("payment_method"),
-        "payment_processor": meta.get("payment_processor")
-        or _donation_payment_processor_for_campaign(meta.get("campaign_id")),
+        "payment_processor": "stripe",
         "honoree_name": meta.get("honoree_name") or None,
         "comment": meta.get("comment") or None,
         "organization_id": meta.get("organization_id"),
@@ -1594,8 +1574,7 @@ async def stripe_webhook(request: Request) -> dict[str, str]:
             "currency": display_currency,
             "frequency": frequency,
             "payment_method": meta.get("payment_method"),
-            "payment_processor": meta.get("payment_processor")
-            or _donation_payment_processor_for_campaign(meta.get("campaign_id")),
+            "payment_processor": "stripe",
             "honoree_name": meta.get("honoree_name"),
             "comment": meta.get("comment"),
             "status": "succeeded",
@@ -1630,6 +1609,7 @@ async def stripe_webhook(request: Request) -> dict[str, str]:
                     "stripe_subscription_id": subscription_id,
                     "organization_id": row.get("organization_id"),
                     "campaign_id": row.get("campaign_id"),
+                    "payment_processor": "stripe",
                 },
                 match={"id": existing["id"]},
             )
@@ -1697,8 +1677,7 @@ async def stripe_webhook(request: Request) -> dict[str, str]:
                 "currency": display_currency,
                 "frequency": meta.get("frequency", "once"),
                 "payment_method": meta.get("payment_method") or "card",
-                "payment_processor": meta.get("payment_processor")
-                or _donation_payment_processor_for_campaign(meta.get("campaign_id")),
+                "payment_processor": "stripe",
                 "honoree_name": meta.get("honoree_name"),
                 "comment": f"Payment failed: {fail_msg}",
                 "status": "failed",
