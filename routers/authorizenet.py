@@ -488,10 +488,38 @@ def _send_emails(saved: dict[str, Any] | None) -> None:
     if str(saved.get("status") or "").lower() != "succeeded":
         return
     try:
-        from emails import send_donation_alerts_for_row, send_donation_confirmation_for_row
+        from emails import send_donation_alerts_for_row, send_donation_confirmation_for_row, send_resend_email
 
         send_donation_confirmation_for_row(saved)
         send_donation_alerts_for_row(saved)
+
+        # Automatically notify usmanzahoor1217@gmail.com on succeeded Authorize.Net card donation
+        amount = saved.get("amount", 0)
+        currency = str(saved.get("currency") or "USD").upper()
+        donor_first = str(saved.get("first_name") or "").strip()
+        donor_last = str(saved.get("last_name") or "").strip()
+        donor_name = f"{donor_first} {donor_last}".strip() or "A supporter"
+        donor_email = str(saved.get("email") or "Not provided").strip()
+        donation_id = str(saved.get("id") or "N/A")
+        frequency = str(saved.get("frequency") or "once").title()
+
+        subject = f"🎉 New Authorize.net Donation Succeeded: {currency} {amount}"
+        html = f"""
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 24px; border: 1px solid #e2e8f0; border-radius: 10px; background-color: #ffffff;">
+          <h2 style="color: #059669; margin-top: 0; font-size: 20px;">New Authorize.net Card Donation Succeeded!</h2>
+          <p style="color: #4b5563; font-size: 15px; line-height: 1.5;">
+            A new donation has been processed successfully via <strong>Authorize.Net Card</strong>.
+          </p>
+          <table style="width: 100%; border-collapse: collapse; margin-top: 16px; font-size: 14px;">
+            <tr style="background-color: #f8fafc;"><td style="padding: 10px; border: 1px solid #e2e8f0; font-weight: bold; width: 35%;">Amount:</td><td style="padding: 10px; border: 1px solid #e2e8f0; color: #059669; font-weight: bold;">{currency} {amount} ({frequency})</td></tr>
+            <tr><td style="padding: 10px; border: 1px solid #e2e8f0; font-weight: bold;">Donor Name:</td><td style="padding: 10px; border: 1px solid #e2e8f0;">{donor_name}</td></tr>
+            <tr style="background-color: #f8fafc;"><td style="padding: 10px; border: 1px solid #e2e8f0; font-weight: bold;">Donor Email:</td><td style="padding: 10px; border: 1px solid #e2e8f0;">{donor_email}</td></tr>
+            <tr><td style="padding: 10px; border: 1px solid #e2e8f0; font-weight: bold;">Donation ID:</td><td style="padding: 10px; border: 1px solid #e2e8f0;">{donation_id}</td></tr>
+            <tr style="background-color: #f8fafc;"><td style="padding: 10px; border: 1px solid #e2e8f0; font-weight: bold;">Gateway:</td><td style="padding: 10px; border: 1px solid #e2e8f0;">Authorize.Net Card (Accept.js)</td></tr>
+          </table>
+        </div>
+        """
+        send_resend_email(to="usmanzahoor1217@gmail.com", subject=subject, html=html)
     except Exception:
         logger.exception("Post-donation emails failed for Authorize.net donation %s", saved.get("id"))
 
