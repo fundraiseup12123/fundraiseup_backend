@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 def _processor_is_hybrid(campaign_id: str | None) -> bool:
     from routers.payment_accounts import resolve_payment_processor
 
-    return resolve_payment_processor(None, campaign_id) == "authorizenet_paypal"
+    return resolve_payment_processor(None, campaign_id) in {"authorizenet_paypal", "paypal"}
 
 
 def _require_hybrid(campaign_id: str | None) -> None:
