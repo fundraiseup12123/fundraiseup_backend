@@ -72,12 +72,16 @@ def register_campaign_paypal_apple_pay_domains(
     cid = str(account.get("client_id") or "")
     secret = str(account.get("client_secret") or "")
     merchant = str(account.get("paypal_merchant_id") or "")
-    result = register_paypal_apple_pay_domain(
-        host,
-        client_id=cid,
-        client_secret=secret,
-        merchant_id=merchant,
-    )
+    try:
+        result = register_paypal_apple_pay_domain(
+            host,
+            client_id=cid,
+            client_secret=secret,
+            merchant_id=merchant,
+        )
+    except RuntimeError as exc:
+        result = {"status": "skipped", "detail": str(exc), "domain": host}
+
     parent = _parent_apple_pay_host(host)
     if parent and parent != host:
         try:
