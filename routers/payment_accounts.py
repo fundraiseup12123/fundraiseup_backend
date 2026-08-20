@@ -34,12 +34,14 @@ PaymentView = Literal["homepage", "popup", "landing"]
 PAYMENT_VIEWS: tuple[PaymentView, ...] = ("homepage", "popup", "landing")
 
 
-def normalize_payment_view(checkout_view: str | None) -> PaymentView:
-    raw = (checkout_view or "").strip().lower()
-    if raw == "landing":
-        return "landing"
-    if raw == "popup":
-        return "popup"
+def normalize_payment_view(checkout_view: object) -> PaymentView:
+    if hasattr(checkout_view, "default"):
+        checkout_view = getattr(checkout_view, "default")
+    if not isinstance(checkout_view, str):
+        return "homepage"
+    raw = checkout_view.strip().lower()
+    if raw in {"homepage", "popup", "landing"}:
+        return raw  # type: ignore[return-value]
     return "homepage"
 
 EXPRESS_ACCOUNT_CAPABILITIES = {
