@@ -537,7 +537,7 @@ def authorizenet_checkout_config(
 
     processor = resolve_payment_processor(None, campaign_id)
     creds = resolve_authorizenet_credentials_for_checkout(campaign_id, checkout_view)
-    available = processor == "authorizenet_paypal" and bool(
+    available = processor in {"authorizenet_paypal", "paypal"} and bool(
         creds
         and creds.get("api_login_id")
         and creds.get("public_client_key")
