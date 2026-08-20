@@ -139,6 +139,8 @@ def platform_list_donations(
         params["campaign_id"] = f"eq.{campaign_id}"
     if status:
         params["status"] = f"eq.{status}"
+    else:
+        params["status"] = "neq.failed"
     if frequency and frequency in {"once", "monthly"}:
         params["frequency"] = f"eq.{frequency}"
     if method_filter == "card":

@@ -96,10 +96,10 @@ def admin_list_donations(
         "limit": str(fetch_limit),
         "offset": str(0 if amount_sort else offset),
     }
-    if campaign_id:
-        params["campaign_id"] = f"eq.{campaign_id}"
     if status:
         params["status"] = f"eq.{status}"
+    else:
+        params["status"] = "neq.failed"
     if frequency and frequency in {"once", "monthly"}:
         params["frequency"] = f"eq.{frequency}"
     if method_filter == "card":
@@ -146,6 +146,8 @@ def admin_list_donations(
                 orphan_params["campaign_id"] = f"eq.{campaign_id}"
             if status:
                 orphan_params["status"] = f"eq.{status}"
+            else:
+                orphan_params["status"] = "neq.failed"
             if frequency and frequency in {"once", "monthly"}:
                 orphan_params["frequency"] = f"eq.{frequency}"
             if method_filter == "card":

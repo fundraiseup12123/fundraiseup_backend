@@ -112,6 +112,7 @@ def get_campaign_donations(
             "donations",
             params={
                 "organization_id": f"eq.{org_id}",
+                "status": "neq.failed",
                 "select": select,
                 "order": "created_at.desc",
                 "limit": str(fetch_limit),
@@ -131,6 +132,7 @@ def get_campaign_donations(
                 params={
                     "organization_id": "is.null",
                     "campaign_id": f"in.({','.join(campaign_ids)})",
+                    "status": "neq.failed",
                     "select": select,
                     "order": "created_at.desc",
                     "limit": str(fetch_limit),

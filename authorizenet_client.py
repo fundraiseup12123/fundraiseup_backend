@@ -61,17 +61,23 @@ def _first_error(payload: dict[str, Any]) -> str:
         response_code = str(txn.get("responseCode") or "")
         errors = txn.get("errors")
         if isinstance(errors, list) and errors:
-            text = str(errors[0].get("errorText") or errors[0].get("errorCode") or "").strip()
+            err_code = str(errors[0].get("errorCode") or "").strip()
+            text = str(errors[0].get("errorText") or "").strip()
             if text:
-                return text
+                return f"{text} (Code {err_code})" if err_code else text
+            if err_code:
+                return f"Authorize.net Error Code {err_code}"
         if isinstance(errors, dict):
-            text = str(errors.get("errorText") or errors.get("errorCode") or "").strip()
+            err_code = str(errors.get("errorCode") or "").strip()
+            text = str(errors.get("errorText") or "").strip()
             if text:
-                return text
+                return f"{text} (Code {err_code})" if err_code else text
+            if err_code:
+                return f"Authorize.net Error Code {err_code}"
         if response_code == "2":
-            return "Card was declined"
+            return "Card was declined by issuing bank"
         if response_code == "3":
-            return "Transaction error"
+            return "Transaction error on card processing"
     messages = payload.get("messages") if isinstance(payload, dict) else None
     if isinstance(messages, dict):
         items = messages.get("message")
@@ -181,8 +187,7 @@ def create_transaction_opaque(
     }
     # createProfile on the initial charge lets us ARB from the customer profile next.
     if create_profile:
-        request_body["transactionRequest"] = transaction_request
-        request_body["profile"] = {"createProfile": True}
+        transaction_request["profile"] = {"createProfile": True}
 
     body = {"createTransactionRequest": request_body}
     data = _post(body, env=env)
