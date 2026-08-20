@@ -168,6 +168,11 @@ def create_transaction_opaque(
             }
         },
     }
+    # createProfile on the initial charge lets us ARB from the customer profile next.
+    # AnetApiSchema.xsd requires 'profile' to appear before 'order', 'customer', and 'billTo'.
+    if create_profile:
+        transaction_request["profile"] = {"createProfile": True}
+
     if order_invoice:
         transaction_request["order"] = {"invoiceNumber": order_invoice[:20]}
     if customer_email:
@@ -185,9 +190,6 @@ def create_transaction_opaque(
         },
         "transactionRequest": transaction_request,
     }
-    # createProfile on the initial charge lets us ARB from the customer profile next.
-    if create_profile:
-        transaction_request["profile"] = {"createProfile": True}
 
     body = {"createTransactionRequest": request_body}
     data = _post(body, env=env)
