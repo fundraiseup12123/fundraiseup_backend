@@ -149,6 +149,7 @@ class CreatePayPalOrderRequest(BaseModel):
     amount: float = Field(gt=0)
     currency: str = Field(min_length=3, max_length=3)
     frequency: Literal["once", "monthly"] = "once"
+    payment_method: str | None = None
     cover_fees: bool = False
     dedicate: bool = False
     honoree_name: str | None = None
@@ -388,7 +389,7 @@ def _record_paypal_donation(
         "base_amount": base_amount,
         "currency": display_currency,
         "frequency": payload.frequency,
-        "payment_method": "paypal",
+        "payment_method": getattr(payload, "payment_method", None) or "paypal",
         "payment_processor": processor,
         "honoree_name": payload.honoree_name or None,
         "comment": payload.comment or None,
