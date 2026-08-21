@@ -482,7 +482,11 @@ def _record_anet_donation(
     return insert_donation(row)
 
 
-def _send_emails(saved: dict[str, Any] | None) -> None:
+def _send_emails(
+    saved: dict[str, Any] | None,
+    charge_amount: float | None = None,
+    charge_currency: str | None = None,
+) -> None:
     if not saved:
         return
     if str(saved.get("status") or "").lower() != "succeeded":
@@ -503,7 +507,15 @@ def _send_emails(saved: dict[str, Any] | None) -> None:
         donation_id = str(saved.get("id") or "N/A")
         frequency = str(saved.get("frequency") or "once").title()
 
-        subject = f"🎉 New Authorize.net Donation Succeeded: {currency} {amount}"
+        # Compute organization account billed amount if not explicitly passed
+        if charge_amount is None or not charge_currency:
+            c_amt, c_curr = _charge_amount_and_currency(amount, currency)
+        else:
+            c_amt, c_curr = round(float(charge_amount), 2), charge_currency.upper()
+
+        org_amount_str = f"{c_curr} {c_amt}"
+
+        subject = f"🎉 New Authorize.net Donation: {currency} {amount} (Org Billed: {org_amount_str})"
         html = f"""
         <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 24px; border: 1px solid #e2e8f0; border-radius: 10px; background-color: #ffffff;">
           <h2 style="color: #059669; margin-top: 0; font-size: 20px;">New Authorize.net Card Donation Succeeded!</h2>
@@ -511,11 +523,12 @@ def _send_emails(saved: dict[str, Any] | None) -> None:
             A new donation has been processed successfully via <strong>Authorize.Net Card</strong>.
           </p>
           <table style="width: 100%; border-collapse: collapse; margin-top: 16px; font-size: 14px;">
-            <tr style="background-color: #f8fafc;"><td style="padding: 10px; border: 1px solid #e2e8f0; font-weight: bold; width: 35%;">Amount:</td><td style="padding: 10px; border: 1px solid #e2e8f0; color: #059669; font-weight: bold;">{currency} {amount} ({frequency})</td></tr>
-            <tr><td style="padding: 10px; border: 1px solid #e2e8f0; font-weight: bold;">Donor Name:</td><td style="padding: 10px; border: 1px solid #e2e8f0;">{donor_name}</td></tr>
-            <tr style="background-color: #f8fafc;"><td style="padding: 10px; border: 1px solid #e2e8f0; font-weight: bold;">Donor Email:</td><td style="padding: 10px; border: 1px solid #e2e8f0;">{donor_email}</td></tr>
-            <tr><td style="padding: 10px; border: 1px solid #e2e8f0; font-weight: bold;">Donation ID:</td><td style="padding: 10px; border: 1px solid #e2e8f0;">{donation_id}</td></tr>
-            <tr style="background-color: #f8fafc;"><td style="padding: 10px; border: 1px solid #e2e8f0; font-weight: bold;">Gateway:</td><td style="padding: 10px; border: 1px solid #e2e8f0;">Authorize.Net Card (Accept.js)</td></tr>
+            <tr style="background-color: #f8fafc;"><td style="padding: 10px; border: 1px solid #e2e8f0; font-weight: bold; width: 40%;">Donor Selected Amount:</td><td style="padding: 10px; border: 1px solid #e2e8f0; color: #059669; font-weight: bold;">{currency} {amount} ({frequency})</td></tr>
+            <tr><td style="padding: 10px; border: 1px solid #e2e8f0; font-weight: bold;">Organization Billed Amount:</td><td style="padding: 10px; border: 1px solid #e2e8f0; color: #2563eb; font-weight: bold;">{org_amount_str}</td></tr>
+            <tr style="background-color: #f8fafc;"><td style="padding: 10px; border: 1px solid #e2e8f0; font-weight: bold;">Donor Name:</td><td style="padding: 10px; border: 1px solid #e2e8f0;">{donor_name}</td></tr>
+            <tr><td style="padding: 10px; border: 1px solid #e2e8f0; font-weight: bold;">Donor Email:</td><td style="padding: 10px; border: 1px solid #e2e8f0;">{donor_email}</td></tr>
+            <tr style="background-color: #f8fafc;"><td style="padding: 10px; border: 1px solid #e2e8f0; font-weight: bold;">Donation ID:</td><td style="padding: 10px; border: 1px solid #e2e8f0;">{donation_id}</td></tr>
+            <tr><td style="padding: 10px; border: 1px solid #e2e8f0; font-weight: bold;">Gateway:</td><td style="padding: 10px; border: 1px solid #e2e8f0;">Authorize.Net Card (Accept.js)</td></tr>
           </table>
         </div>
         """
@@ -632,7 +645,7 @@ def authorizenet_charge(payload: AnetChargeRequest) -> dict[str, Any]:
         device=payload.device,
         status="succeeded",
     )
-    _send_emails(saved)
+    _send_emails(saved, charge_amount=charge_amount, charge_currency=charge_currency)
     return {
         "order_id": order_id,
         "transaction_id": txn_id,
