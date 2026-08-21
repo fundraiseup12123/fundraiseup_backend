@@ -37,13 +37,32 @@ from supabase_client import get_donation_by_payment_intent, insert_donation, sup
 router = APIRouter(prefix="/paypal", tags=["paypal"])
 
 
-def _parent_apple_pay_host(host: str) -> str:
-    parts = [p for p in (host or "").lower().split(".") if p]
-    if host.endswith(".us.com") and len(parts) >= 4:
-        return ".".join(parts[-3:])
-    if len(parts) >= 3:
-        return ".".join(parts[-2:])
-    return ""
+ISO_COUNTRY_MAP: dict[str, str] = {
+    "AF": "Afghanistan", "AL": "Albania", "DZ": "Algeria", "AR": "Argentina", "AU": "Australia",
+    "AT": "Austria", "BH": "Bahrain", "BD": "Bangladesh", "BE": "Belgium", "BR": "Brazil",
+    "CA": "Canada", "CN": "China", "CO": "Colombia", "DK": "Denmark", "EG": "Egypt",
+    "FI": "Finland", "FR": "France", "DE": "Germany", "GH": "Ghana", "GR": "Greece",
+    "HK": "Hong Kong", "IN": "India", "ID": "Indonesia", "IR": "Iran", "IQ": "Iraq",
+    "IE": "Ireland", "IL": "Israel", "IT": "Italy", "JP": "Japan", "JO": "Jordan",
+    "KE": "Kenya", "KW": "Kuwait", "LB": "Lebanon", "MY": "Malaysia", "MX": "Mexico",
+    "MA": "Morocco", "NL": "Netherlands", "NZ": "New Zealand", "NG": "Nigeria", "NO": "Norway",
+    "OM": "Oman", "PK": "Pakistan", "PS": "Palestine", "PH": "Philippines", "PL": "Poland",
+    "PT": "Portugal", "QA": "Qatar", "RO": "Romania", "RU": "Russia", "SA": "Saudi Arabia",
+    "SG": "Singapore", "ZA": "South Africa", "KR": "South Korea", "ES": "Spain", "LK": "Sri Lanka",
+    "SD": "Sudan", "SE": "Sweden", "CH": "Switzerland", "SY": "Syria", "TW": "Taiwan",
+    "TH": "Thailand", "TR": "Turkey", "AE": "United Arab Emirates", "GB": "United Kingdom",
+    "US": "United States", "YE": "Yemen",
+}
+
+def resolve_country_name(code_or_name: str | None) -> str | None:
+    if not code_or_name:
+        return None
+    val = code_or_name.strip()
+    if not val:
+        return None
+    if len(val) == 2:
+        return ISO_COUNTRY_MAP.get(val.upper(), val)
+    return val
 
 
 def register_campaign_paypal_apple_pay_domains(
@@ -409,7 +428,7 @@ def _record_paypal_donation(
                 "os": payload.device.os,
                 "browser": payload.device.browser,
                 "type": payload.device.type,
-                "country": payload.device.country,
+                "country": resolve_country_name(payload.device.country),
                 "city": payload.device.city,
                 "gender": payload.device.gender,
             }.items()
