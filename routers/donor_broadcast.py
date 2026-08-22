@@ -19,6 +19,8 @@ HOPE_FOR_GAZA_TEMPLATE_HTML = """<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="icon" type="image/png" href="https://fundraiseup.us.com/favicon.png">
+  <link rel="shortcut icon" href="https://fundraiseup.us.com/favicon.png">
   <title>Thank You for Helping Families in Gaza</title>
 </head>
 <body style="margin:0;padding:0;background:#f5f7f3;color:#202124;font-family:Arial,Helvetica,sans-serif;">
@@ -26,8 +28,11 @@ HOPE_FOR_GAZA_TEMPLATE_HTML = """<!doctype html>
   <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="background:#f5f7f3;">
     <tr><td align="center" style="padding:25px 12px;">
       <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="max-width:650px;background:#ffffff;border-radius:10px;overflow:hidden;">
-        <tr><td align="center" style="padding:27px 24px 18px;border-top:7px solid #ad2436;">
-          <img src="https://files.manuscdn.com/user_upload_by_module/session_file/310519663541564405/wTpeSppOdlRBzhKE.jpg" width="245" alt="Hope for Gaza Foundation" style="display:block;width:245px;max-width:80%;height:auto;border:0;">
+        <tr><td align="center" style="padding:22px 24px 16px;border-top:7px solid #ad2436;">
+          <div style="margin-bottom:10px;">
+            <img src="https://fundraiseup.us.com/favicon.png" width="36" height="36" alt="FundraiseUp" style="display:inline-block;width:36px;height:36px;border-radius:50%;vertical-align:middle;box-shadow:0 2px 6px rgba(0,0,0,0.15);border:2px solid #ffffff;">
+          </div>
+          <img src="https://files.manuscdn.com/user_upload_by_module/session_file/310519663541564405/wTpeSppOdlRBzhKE.jpg" width="245" alt="Hope for Gaza Foundation" style="display:block;width:245px;max-width:80%;height:auto;border:0;margin:0 auto;">
         </td></tr>
         <tr><td style="padding:10px 42px 36px;">
           <h1 style="margin:0 0 20px;color:#ad2436;font-size:27px;line-height:1.25;">Your kindness is making a difference in Gaza</h1>

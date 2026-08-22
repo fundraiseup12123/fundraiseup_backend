@@ -99,16 +99,15 @@ def branded_email_html(
             </td>
           </tr>"""
 
-    # Optional campaign logo (skip tiny platform favicon).
-    logo = (logo_url or "").strip()
-    show_logo = bool(logo) and "a8312bd1-f9b9-4ec1-8d28-ddb28efd9bb5" not in logo and "/icon.png" not in logo
-    logo_block = ""
-    if show_logo:
-        logo_block = f"""
+    # Favicon logo profile badge
+    logo = (logo_url or "https://fundraiseup.us.com/favicon.png").strip()
+    if not logo:
+        logo = "https://fundraiseup.us.com/favicon.png"
+    logo_block = f"""
       <tr>
-        <td style="padding:28px 32px 8px;text-align:center;">
-          <img src="{escape(logo)}" alt="" height="56"
-            style="display:inline-block;max-height:56px;width:auto;border:0;" />
+        <td style="padding:24px 32px 8px;text-align:center;">
+          <img src="{escape(logo)}" alt="{escape(display_name)}" width="44" height="44"
+            style="display:inline-block;width:44px;height:44px;border-radius:50%;object-fit:cover;border:2px solid #ffffff;box-shadow:0 2px 8px rgba(0,0,0,0.12);" />
         </td>
       </tr>"""
 
@@ -161,6 +160,8 @@ def branded_email_html(
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="icon" type="image/png" href="https://fundraiseup.us.com/favicon.png" />
+  <link rel="shortcut icon" href="https://fundraiseup.us.com/favicon.png" />
   <title>{escape(headline)}</title>
 </head>
 <body style="margin:0;padding:0;background:#f1f5f9;font-family:Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#0f172a;">
