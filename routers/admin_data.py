@@ -63,6 +63,7 @@ def admin_list_donations(
     date_from: str | None = Query(None),
     date_to: str | None = Query(None),
     sort: str = Query("date_desc", pattern="^(date_desc|asc|desc)$"),
+    q: str | None = Query(None),
 ) -> dict[str, Any]:
     require_org_access(org_id, user, min_role="member")
     org = rest_get_one(
@@ -172,6 +173,28 @@ def admin_list_donations(
                     if row_id and row_id not in seen:
                         rows.append(row)
                         seen.add(row_id)
+
+    if q and q.strip():
+        search_q = q.strip().lower()
+        clean_q = re.sub(r"[^a-z0-9]", "", search_q)
+        filtered_rows = []
+        for r in rows:
+            r_id = str(r.get("id") or "").lower()
+            r_intent = str(r.get("stripe_payment_intent_id") or "").lower()
+            r_name = f"{r.get('first_name') or ''} {r.get('last_name') or ''}".lower()
+            r_email = str(r.get("email") or "").lower()
+            clean_r_id = re.sub(r"[^a-z0-9]", "", r_id)
+            clean_r_intent = re.sub(r"[^a-z0-9]", "", r_intent)
+
+            if (
+                search_q in r_id
+                or search_q in r_intent
+                or (clean_q and (clean_q in clean_r_id or clean_q in clean_r_intent))
+                or search_q in r_name
+                or search_q in r_email
+            ):
+                filtered_rows.append(r)
+        rows = filtered_rows
 
     if amount_sort:
         # Stable: newest first within equal converted amounts.

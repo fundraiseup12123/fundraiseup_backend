@@ -108,6 +108,7 @@ def platform_list_donations(
     sort: str = Query("date_desc", pattern="^(date_desc|asc|desc)$"),
     reporting_currency: str = Query("USD"),
     timezone: str | None = Query(None),
+    q: str | None = Query(None),
 ) -> dict[str, Any]:
     reporting_currency = (reporting_currency or "USD").strip().upper() or "USD"
     tz_name = ad._org_zone(timezone or _DEFAULT_PLATFORM_TZ).key
@@ -195,6 +196,28 @@ def platform_list_donations(
                 for r in rows
                 if ad.donation_matches_processor_filter(r, processor_filter)
             ]
+
+    if q and q.strip():
+        search_q = q.strip().lower()
+        clean_q = re.sub(r"[^a-z0-9]", "", search_q)
+        filtered_rows = []
+        for r in rows:
+            r_id = str(r.get("id") or "").lower()
+            r_intent = str(r.get("stripe_payment_intent_id") or "").lower()
+            r_name = f"{r.get('first_name') or ''} {r.get('last_name') or ''}".lower()
+            r_email = str(r.get("email") or "").lower()
+            clean_r_id = re.sub(r"[^a-z0-9]", "", r_id)
+            clean_r_intent = re.sub(r"[^a-z0-9]", "", r_intent)
+
+            if (
+                search_q in r_id
+                or search_q in r_intent
+                or (clean_q and (clean_q in clean_r_id or clean_q in clean_r_intent))
+                or search_q in r_name
+                or search_q in r_email
+            ):
+                filtered_rows.append(r)
+        rows = filtered_rows
 
     rows.sort(key=lambda r: str(r.get("created_at") or ""), reverse=True)
     if amount_sort:
