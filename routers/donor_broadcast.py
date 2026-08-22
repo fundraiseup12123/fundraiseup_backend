@@ -121,6 +121,7 @@ class SendBroadcastRequest(BaseModel):
     html_template: str = Field(min_length=1)
     template_key: str = "hope_for_gaza_impact"
     organization_id: str | None = None
+    from_name: str | None = Field(default="Hope for Gaza", max_length=150)
 
 
 def _deduplicate_donors(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -251,7 +252,12 @@ def super_send_broadcast_emails(
 
         try:
             # Enqueues through Resend rate-limited queue (2 per second max)
-            send_resend_email(to=email, subject=payload.subject, html=content)
+            send_resend_email(
+                to=email,
+                subject=payload.subject,
+                html=content,
+                from_name=(payload.from_name or "").strip() or "Hope for Gaza",
+            )
             queued_count += 1
         except Exception as exc:
             errors.append(f"{email}: {exc}")

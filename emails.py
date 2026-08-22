@@ -369,10 +369,20 @@ def _deliver_resend_email(
     attachments: list[dict[str, Any]] | None = None,
     headers: dict[str, str] | None = None,
     reply_to: str | list[str] | None = None,
+    from_name: str | None = None,
 ) -> dict[str, Any]:
     """POST one email to Resend. Raises RateLimited on HTTP 429."""
+    default_from = resend_from_email()
+    from_header = default_from
+    if from_name and from_name.strip():
+        clean_name = from_name.strip()
+        raw_email = default_from
+        if "<" in default_from and ">" in default_from:
+            raw_email = default_from.split("<", 1)[1].split(">", 1)[0].strip()
+        from_header = f"{clean_name} <{raw_email}>"
+
     payload: dict[str, Any] = {
-        "from": resend_from_email(),
+        "from": from_header,
         "to": [to],
         "subject": subject,
         "html": html,
@@ -420,6 +430,7 @@ def send_resend_email(
     html: str,
     unsubscribe_url: str | None = None,
     reply_to: str | None = None,
+    from_name: str | None = None,
 ) -> dict[str, Any]:
     """Enqueue email send (rate-limited) and wait for delivery."""
     if not resend_configured():
@@ -442,6 +453,7 @@ def send_resend_email(
         html=html,
         headers=headers or None,
         reply_to=reply_to or contact,
+        from_name=from_name,
     )
 
 
