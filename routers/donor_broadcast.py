@@ -207,12 +207,25 @@ def super_list_broadcast_donors(
     }
 
 
+def _require_broadcast_access(user: AuthUser) -> None:
+    if user.role == "super_admin":
+        return
+    from routers.super_admin import _BROADCAST_ACCESS_OVERVIEW
+    em = user.email.strip().lower()
+    if not _BROADCAST_ACCESS_OVERVIEW.get(em, False):
+        raise HTTPException(
+            status_code=403,
+            detail="Donor Broadcast access is restricted. Super Admin must grant Broadcast Access to your profile in Team Access.",
+        )
+
+
 @router.get("/admin/orgs/{org_id}/donor-broadcast/donors")
 def admin_list_broadcast_donors(
     org_id: str,
     user: Annotated[AuthUser, Depends(require_auth)],
     campaign_id: str | None = Query(None),
 ) -> dict[str, Any]:
+    _require_broadcast_access(user)
     params: dict[str, str] = {
         "organization_id": f"eq.{org_id}",
         "select": "id,first_name,last_name,email,amount,currency,created_at,campaign_id,organization_id,status",

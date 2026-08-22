@@ -623,10 +623,12 @@ def get_me(user: Annotated[AuthUser, Depends(require_auth)]) -> dict[str, Any]:
 
 class ToggleTeamAccessRequest(BaseModel):
     email: EmailStr
-    has_access: bool
+    has_access: bool | None = None
+    broadcast_access: bool | None = None
 
 
 _TEAM_ACCESS_OVERVIEW: dict[str, bool] = {}
+_BROADCAST_ACCESS_OVERVIEW: dict[str, bool] = {}
 
 
 @router.get("/team-access")
@@ -655,6 +657,7 @@ def list_team_access_members(
     for staff in default_staff:
         em = staff["email"].strip().lower()
         has_acc = _TEAM_ACCESS_OVERVIEW.get(em, True)
+        broad_acc = _BROADCAST_ACCESS_OVERVIEW.get(em, staff["role"] == "super_admin")
         team_map[em] = {
             "id": f"staff_{em}",
             "email": staff["email"],
@@ -662,6 +665,7 @@ def list_team_access_members(
             "role": staff["role"],
             "organization_name": staff["org"],
             "has_access": has_acc,
+            "broadcast_access": broad_acc,
         }
 
     for p in profiles:
@@ -674,6 +678,7 @@ def list_team_access_members(
         name = f"{fname} {lname}".strip() or em.split("@")[0].capitalize()
         role = str(p.get("role") or "member")
         has_acc = _TEAM_ACCESS_OVERVIEW.get(em, True)
+        broad_acc = _BROADCAST_ACCESS_OVERVIEW.get(em, role == "super_admin")
 
         if em not in team_map:
             team_map[em] = {
@@ -683,6 +688,7 @@ def list_team_access_members(
                 "role": role,
                 "organization_name": "Hope for Gaza Foundation" if role != "super_admin" else "Platform Console",
                 "has_access": has_acc,
+                "broadcast_access": broad_acc,
             }
 
     for m in members:
@@ -696,6 +702,7 @@ def list_team_access_members(
         if not em or "@" not in em:
             continue
         has_acc = _TEAM_ACCESS_OVERVIEW.get(em, True)
+        broad_acc = _BROADCAST_ACCESS_OVERVIEW.get(em, False)
         oid = str(m.get("organization_id") or "")
         org_n = org_map.get(oid, "Organization Admin")
 
@@ -707,6 +714,7 @@ def list_team_access_members(
                 "role": str(m.get("role") or "member"),
                 "organization_name": org_n,
                 "has_access": has_acc,
+                "broadcast_access": broad_acc,
             }
         else:
             if org_n != "Platform Console":
@@ -718,6 +726,7 @@ def list_team_access_members(
         if not em or "@" not in em:
             continue
         has_acc = _TEAM_ACCESS_OVERVIEW.get(em, True)
+        broad_acc = _BROADCAST_ACCESS_OVERVIEW.get(em, False)
         fname = str(inv.get("first_name") or "").strip()
         lname = str(inv.get("last_name") or "").strip()
         name = f"{fname} {lname}".strip() or em.split("@")[0].capitalize()
@@ -732,6 +741,7 @@ def list_team_access_members(
                 "role": str(inv.get("role") or "member"),
                 "organization_name": org_n,
                 "has_access": has_acc,
+                "broadcast_access": broad_acc,
             }
 
     return list(team_map.values())
@@ -742,11 +752,31 @@ def toggle_team_member_access(
     payload: ToggleTeamAccessRequest,
     user: Annotated[AuthUser, Depends(require_super_admin)],
 ) -> dict[str, Any]:
-    """Super Admin toggles access permissions for team members/admin emails."""
+    """Super Admin toggles access and broadcast permissions for team members/admin emails."""
     em = payload.email.strip().lower()
-    _TEAM_ACCESS_OVERVIEW[em] = payload.has_access
+    if payload.has_access is not None:
+        _TEAM_ACCESS_OVERVIEW[em] = payload.has_access
+    if payload.broadcast_access is not None:
+        _BROADCAST_ACCESS_OVERVIEW[em] = payload.broadcast_access
     return {
         "email": em,
-        "has_access": payload.has_access,
-        "message": f"Updated access for {em} to {'Granted' if payload.has_access else 'Restricted'}.",
+        "has_access": _TEAM_ACCESS_OVERVIEW.get(em, True),
+        "broadcast_access": _BROADCAST_ACCESS_OVERVIEW.get(em, False),
+        "message": f"Updated permissions for {em}.",
+    }
+
+
+@router.get("/team-access/my-permissions")
+def get_my_permissions(
+    user: Annotated[AuthUser, Depends(require_auth)],
+) -> dict[str, Any]:
+    """Return active user permissions including restricted broadcast access status."""
+    em = user.email.strip().lower()
+    is_super = user.role == "super_admin"
+    broadcast_granted = is_super or _BROADCAST_ACCESS_OVERVIEW.get(em, False)
+    return {
+        "email": em,
+        "role": user.role,
+        "has_access": _TEAM_ACCESS_OVERVIEW.get(em, True),
+        "broadcast_access": broadcast_granted,
     }
