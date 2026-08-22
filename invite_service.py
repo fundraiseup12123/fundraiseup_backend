@@ -55,6 +55,27 @@ def get_user_email_by_id(user_id: str) -> str | None:
     return None
 
 
+def list_all_supabase_users() -> list[dict[str, Any]]:
+    """Fetch all registered users from Supabase Auth admin endpoint."""
+    url = supabase_url()
+    if not url or not _supabase_secret():
+        return []
+    try:
+        response = httpx.get(
+            f"{url}/auth/v1/admin/users",
+            headers=_admin_headers(),
+            params={"page": 1, "per_page": 1000},
+            timeout=15.0,
+        )
+        if response.status_code == 200:
+            payload = response.json()
+            users = payload.get("users") if isinstance(payload, dict) else (payload if isinstance(payload, list) else [])
+            return users if isinstance(users, list) else []
+    except Exception as exc:
+        logger.warning("Failed to list Supabase auth users: %s", exc)
+    return []
+
+
 def find_user_id_by_email(email: str) -> str | None:
     """Return Auth user id only when the email matches exactly (case-insensitive).
 

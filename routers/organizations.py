@@ -1435,17 +1435,48 @@ def list_members(org_id: str, user: Annotated[AuthUser, Depends(require_auth)]) 
         "organization_members",
         params={
             "organization_id": f"eq.{org_id}",
-            "select": "id,user_id,role,created_at,profiles(id,first_name,last_name,role)",
+            "select": "id,user_id,role,created_at,user_email,profiles(id,first_name,last_name,role,email)",
         },
-    )
-    from invite_service import get_user_email_by_id
+    ) or []
+    from invite_service import get_user_email_by_id, list_all_supabase_users
+
+    auth_users = list_all_supabase_users()
+    user_email_map = {str(u.get("id")): str(u.get("email") or "").strip().lower() for u in auth_users if u.get("id")}
 
     out: list[dict[str, Any]] = []
     for row in rows:
         item = dict(row)
-        email = get_user_email_by_id(str(row.get("user_id") or ""))
+        uid = str(row.get("user_id") or "")
+        prof = row.get("profiles") or {}
+        email = (
+            str(row.get("user_email") or "").strip()
+            or str(prof.get("email") or "").strip()
+            or user_email_map.get(uid, "")
+            or get_user_email_by_id(uid)
+            or ""
+        )
         item["email"] = email
         out.append(item)
+
+    invites = rest_get(
+        "organization_invites",
+        params={"organization_id": f"eq.{org_id}", "select": "id,email,role,first_name,last_name,created_at"},
+    ) or []
+    for inv in invites:
+        out.append({
+            "id": inv.get("id"),
+            "user_id": None,
+            "role": inv.get("role") or "member",
+            "created_at": inv.get("created_at"),
+            "email": inv.get("email"),
+            "status": "pending_invite",
+            "profiles": {
+                "first_name": inv.get("first_name"),
+                "last_name": inv.get("last_name"),
+                "role": inv.get("role") or "member",
+            },
+        })
+
     return out
 
 

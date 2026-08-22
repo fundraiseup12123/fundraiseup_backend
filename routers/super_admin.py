@@ -634,6 +634,11 @@ def list_team_access_members(
     user: Annotated[AuthUser, Depends(require_auth)],
 ) -> list[dict[str, Any]]:
     """List all team members, organization admins, and staff emails with access statuses."""
+    from invite_service import get_user_email_by_id, list_all_supabase_users
+
+    auth_users = list_all_supabase_users()
+    user_email_map = {str(u.get("id")): str(u.get("email") or "").strip().lower() for u in auth_users if u.get("id")}
+
     profiles = rest_get("profiles", params={"select": "id,role,first_name,last_name,email", "limit": "1000"}) or []
     members = rest_get("organization_members", params={"select": "id,user_id,organization_id,role,user_email", "limit": "1000"}) or []
     orgs = rest_get("organizations", params={"select": "id,name", "limit": "1000"}) or []
@@ -660,7 +665,8 @@ def list_team_access_members(
         }
 
     for p in profiles:
-        em = str(p.get("email") or "").strip().lower()
+        pid = str(p.get("id") or "")
+        em = str(p.get("email") or "").strip().lower() or user_email_map.get(pid, "")
         if not em or "@" not in em:
             continue
         fname = str(p.get("first_name") or "").strip()
@@ -683,10 +689,9 @@ def list_team_access_members(
         em = str(m.get("user_email") or "").strip().lower()
         uid = str(m.get("user_id") or "").strip()
         if not em and uid:
-            from invite_service import get_user_email_by_id
-            resolved = get_user_email_by_id(uid)
-            if resolved:
-                em = resolved.strip().lower()
+            em = user_email_map.get(uid) or get_user_email_by_id(uid) or ""
+            if em:
+                em = em.strip().lower()
 
         if not em or "@" not in em:
             continue
