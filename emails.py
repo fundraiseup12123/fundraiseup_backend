@@ -42,7 +42,7 @@ def resend_api_key() -> str:
 
 
 def resend_from_email() -> str:
-    return os.getenv("RESEND_FROM_EMAIL", "donations@s.fundraiseup.us.com").strip()
+    return os.getenv("RESEND_FROM_EMAIL", "donations@fundraiseup.us.com").strip()
 
 
 def resend_configured() -> bool:
