@@ -461,10 +461,7 @@ def platform_donation_detail(
             donation["organization_id"] = oid
             donation["organization_name"] = org_names.get(oid, "Unknown")
 
-    emails = rest_get(
-        "email_logs",
-        params={"donation_id": f"eq.{donation_id}", "select": "*", "order": "sent_at.desc"},
-    )
+    emails = ad._enrich_email_history_timeline(donation_id, donation.get("email"))
     return {"donation": donation, "campaign": campaign, "emails": emails}
 
 

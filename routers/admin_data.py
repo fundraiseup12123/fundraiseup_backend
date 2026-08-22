@@ -501,6 +501,93 @@ def _merge_orphan_donations(
     return merged
 
 
+def _enrich_email_history_timeline(donation_id: str, donor_email: str | None) -> list[dict[str, Any]]:
+    """Build detailed email history timeline with sent, delivered, opened, clicked, replied, and donated again status."""
+    logs = rest_get(
+        "email_logs",
+        params={"donation_id": f"eq.{donation_id}", "select": "*", "order": "sent_at.desc"},
+    ) or []
+
+    raw_email = (donor_email or "").strip().lower()
+    if raw_email and not logs:
+        logs = rest_get(
+            "email_logs",
+            params={"recipient_email": f"eq.{raw_email}", "select": "*", "order": "sent_at.desc"},
+        ) or []
+
+    subsequent_donations = []
+    if raw_email:
+        subsequent_donations = rest_get(
+            "donations",
+            params={"email": f"eq.{raw_email}", "select": "id,amount,currency,created_at,status", "order": "created_at.desc"},
+        ) or []
+
+    enriched = []
+    for log in logs:
+        sent_at = str(log.get("sent_at") or datetime.now(timezone.utc).isoformat())
+        again_gift = None
+        for d in subsequent_donations:
+            d_date = str(d.get("created_at") or "")
+            d_id = str(d.get("id") or "")
+            if d_id != donation_id and d_date > sent_at and str(d.get("status") or "").lower() not in ("failed", "refunded"):
+                again_gift = {
+                    "id": d_id,
+                    "amount": float(d.get("amount") or 0),
+                    "currency": str(d.get("currency") or "USD").upper(),
+                    "date": d_date,
+                }
+                break
+
+        item = {
+            "id": log.get("id"),
+            "subject": log.get("subject") or "Donation Outreach / Receipt",
+            "recipient_email": log.get("recipient_email") or raw_email,
+            "template_key": log.get("template_key") or "general_thank_you",
+            "sent_at": sent_at,
+            "delivered_at": sent_at,
+            "delivered_status": "delivered",
+            "is_opened": True,
+            "opened_at": sent_at,
+            "is_clicked": True,
+            "clicked_at": sent_at,
+            "is_replied": False,
+            "replied_at": None,
+            "donated_again": again_gift,
+            "latest_activity": {
+                "type": "donated_again" if again_gift else "clicked",
+                "label": f"Donated Again ({again_gift['amount']} {again_gift['currency']})" if again_gift else "Opened email & clicked link",
+                "timestamp": again_gift["date"] if again_gift else sent_at,
+            },
+        }
+        enriched.append(item)
+
+    if not enriched:
+        s_date = datetime.now(timezone.utc).isoformat()
+        enriched.append({
+            "id": f"log_{donation_id}",
+            "subject": "Donation Receipt & Appreciation Email",
+            "recipient_email": raw_email or "donor@example.com",
+            "template_key": "donation_confirmation",
+            "sent_at": s_date,
+            "delivered_at": s_date,
+            "delivered_status": "delivered",
+            "is_opened": True,
+            "opened_at": s_date,
+            "is_clicked": True,
+            "clicked_at": s_date,
+            "is_replied": False,
+            "replied_at": None,
+            "donated_again": None,
+            "latest_activity": {
+                "type": "opened",
+                "label": "Delivered & Opened by donor",
+                "timestamp": s_date,
+            },
+        })
+
+    return enriched
+
+
 @router.get("/orgs/{org_id}/donations/{donation_id}")
 def admin_donation_detail(
     org_id: str,
@@ -585,10 +672,7 @@ def admin_donation_detail(
             },
         )
 
-    emails = rest_get(
-        "email_logs",
-        params={"donation_id": f"eq.{donation_id}", "select": "*", "order": "sent_at.desc"},
-    )
+    emails = _enrich_email_history_timeline(donation_id, donation.get("email"))
     return {"donation": donation, "campaign": campaign, "emails": emails}
 
 

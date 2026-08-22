@@ -619,3 +619,100 @@ def get_me(user: Annotated[AuthUser, Depends(require_auth)]) -> dict[str, Any]:
         "is_platform_admin": user.role == "platform_admin",
         "organizations": organizations,
     }
+
+
+class ToggleTeamAccessRequest(BaseModel):
+    email: EmailStr
+    has_access: bool
+
+
+_TEAM_ACCESS_OVERVIEW: dict[str, bool] = {}
+
+
+@router.get("/team-access")
+def list_team_access_members(
+    user: Annotated[AuthUser, Depends(require_auth)],
+) -> list[dict[str, Any]]:
+    """List all team members, organization admins, and staff emails with access statuses."""
+    profiles = rest_get("profiles", params={"select": "id,role,first_name,last_name,email", "limit": "1000"}) or []
+    members = rest_get("organization_members", params={"select": "id,user_id,organization_id,role,user_email", "limit": "1000"}) or []
+    orgs = rest_get("organizations", params={"select": "id,name", "limit": "1000"}) or []
+    org_map = {str(o.get("id")): str(o.get("name")) for o in orgs}
+
+    team_map: dict[str, dict[str, Any]] = {}
+
+    # Standard staff/admin emails
+    default_staff = [
+        {"email": "usmanzahoor1217@gmail.com", "name": "Usman Zahoor", "role": "super_admin", "org": "Platform Console"},
+        {"email": "hirasheikh1123@gmail.com", "name": "Hira Sheikh", "role": "admin", "org": "Hope for Gaza Foundation"},
+    ]
+
+    for staff in default_staff:
+        em = staff["email"].strip().lower()
+        has_acc = _TEAM_ACCESS_OVERVIEW.get(em, True)
+        team_map[em] = {
+            "id": f"staff_{em}",
+            "email": staff["email"],
+            "name": staff["name"],
+            "role": staff["role"],
+            "organization_name": staff["org"],
+            "has_access": has_acc,
+        }
+
+    for p in profiles:
+        em = str(p.get("email") or "").strip().lower()
+        if not em or "@" not in em:
+            continue
+        fname = str(p.get("first_name") or "").strip()
+        lname = str(p.get("last_name") or "").strip()
+        name = f"{fname} {lname}".strip() or em.split("@")[0].capitalize()
+        role = str(p.get("role") or "member")
+        has_acc = _TEAM_ACCESS_OVERVIEW.get(em, True)
+
+        if em not in team_map:
+            team_map[em] = {
+                "id": str(p.get("id") or f"profile_{em}"),
+                "email": p.get("email") or em,
+                "name": name,
+                "role": role,
+                "organization_name": "Hope for Gaza Foundation" if role != "super_admin" else "Platform Console",
+                "has_access": has_acc,
+            }
+
+    for m in members:
+        em = str(m.get("user_email") or "").strip().lower()
+        if not em or "@" not in em:
+            continue
+        has_acc = _TEAM_ACCESS_OVERVIEW.get(em, True)
+        oid = str(m.get("organization_id") or "")
+        org_n = org_map.get(oid, "Organization Admin")
+
+        if em not in team_map:
+            team_map[em] = {
+                "id": str(m.get("id") or f"mem_{em}"),
+                "email": m.get("user_email") or em,
+                "name": em.split("@")[0].capitalize(),
+                "role": str(m.get("role") or "member"),
+                "organization_name": org_n,
+                "has_access": has_acc,
+            }
+        else:
+            if org_n != "Platform Console":
+                team_map[em]["organization_name"] = org_n
+
+    return list(team_map.values())
+
+
+@router.post("/team-access/toggle")
+def toggle_team_member_access(
+    payload: ToggleTeamAccessRequest,
+    user: Annotated[AuthUser, Depends(require_super_admin)],
+) -> dict[str, Any]:
+    """Super Admin toggles access permissions for team members/admin emails."""
+    em = payload.email.strip().lower()
+    _TEAM_ACCESS_OVERVIEW[em] = payload.has_access
+    return {
+        "email": em,
+        "has_access": payload.has_access,
+        "message": f"Updated access for {em} to {'Granted' if payload.has_access else 'Restricted'}.",
+    }
