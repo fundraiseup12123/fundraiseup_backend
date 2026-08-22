@@ -182,6 +182,16 @@ def list_email_templates() -> list[dict[str, str]]:
     return TEMPLATES
 
 
+@router.get("/donor-broadcast/email-history")
+def get_donor_broadcast_email_history(
+    email: str = Query(...),
+    user: Annotated[AuthUser, Depends(require_auth)] = None,
+) -> dict[str, Any]:
+    from routers.admin_data import _enrich_email_history_timeline
+    timeline = _enrich_email_history_timeline("", email)
+    return {"email": email, "history": timeline}
+
+
 @router.get("/super/donor-broadcast/donors")
 def super_list_broadcast_donors(
     user: Annotated[AuthUser, Depends(require_super_admin)],
