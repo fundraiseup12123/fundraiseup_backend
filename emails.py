@@ -42,7 +42,7 @@ def resend_api_key() -> str:
 
 
 def resend_from_email() -> str:
-    return os.getenv("RESEND_FROM_EMAIL", "FundraiseUp <donations@fundraiseup.com>").strip()
+    return os.getenv("RESEND_FROM_EMAIL", "donations@s.fundraiseup.us.com").strip()
 
 
 def resend_configured() -> bool:
@@ -373,13 +373,17 @@ def _deliver_resend_email(
 ) -> dict[str, Any]:
     """POST one email to Resend. Raises RateLimited on HTTP 429."""
     default_from = resend_from_email()
-    from_header = default_from
-    if from_name and from_name.strip():
-        clean_name = from_name.strip()
-        raw_email = default_from
-        if "<" in default_from and ">" in default_from:
-            raw_email = default_from.split("<", 1)[1].split(">", 1)[0].strip()
+    raw_email = default_from
+    if "<" in default_from and ">" in default_from:
+        raw_email = default_from.split("<", 1)[1].split(">", 1)[0].strip()
+
+    clean_name = (from_name or "").strip()
+    if clean_name:
         from_header = f"{clean_name} <{raw_email}>"
+    elif "<" in default_from and ">" in default_from:
+        from_header = default_from
+    else:
+        from_header = f"Hope for Gaza Foundation <{raw_email}>"
 
     payload: dict[str, Any] = {
         "from": from_header,
@@ -539,7 +543,8 @@ def send_donation_confirmation_for_row(row: dict[str, Any]) -> bool:
                 has_account=False,
             ),
         )
-        send_resend_email(to=email, subject=subject, html=html)
+        org_name = str(branding.get("organization_name") or extras.get("organization_name") or branding.get("title") or "Hope for Gaza Foundation").strip()
+        send_resend_email(to=email, subject=subject, html=html, from_name=org_name)
         log_email(
             recipient_email=email,
             subject=subject,
