@@ -639,8 +639,8 @@ def list_team_access_members(
     auth_users = list_all_supabase_users()
     user_email_map = {str(u.get("id")): str(u.get("email") or "").strip().lower() for u in auth_users if u.get("id")}
 
-    profiles = rest_get("profiles", params={"select": "id,role,first_name,last_name,email", "limit": "1000"}) or []
-    members = rest_get("organization_members", params={"select": "id,user_id,organization_id,role,user_email", "limit": "1000"}) or []
+    profiles = rest_get("profiles", params={"select": "id,role,first_name,last_name", "limit": "1000"}) or []
+    members = rest_get("organization_members", params={"select": "id,user_id,organization_id,role", "limit": "1000"}) or []
     orgs = rest_get("organizations", params={"select": "id,name", "limit": "1000"}) or []
     org_map = {str(o.get("id")): str(o.get("name")) for o in orgs}
 

@@ -1435,24 +1435,23 @@ def list_members(org_id: str, user: Annotated[AuthUser, Depends(require_auth)]) 
         "organization_members",
         params={
             "organization_id": f"eq.{org_id}",
-            "select": "id,user_id,role,created_at,user_email,profiles(id,first_name,last_name,role,email)",
+            "select": "id,user_id,role,created_at,profiles(id,first_name,last_name,role)",
         },
     ) or []
-    from invite_service import get_user_email_by_id, list_all_supabase_users
-
-    auth_users = list_all_supabase_users()
-    user_email_map = {str(u.get("id")): str(u.get("email") or "").strip().lower() for u in auth_users if u.get("id")}
+    try:
+        from invite_service import get_user_email_by_id, list_all_supabase_users
+        auth_users = list_all_supabase_users()
+        user_email_map = {str(u.get("id")): str(u.get("email") or "").strip().lower() for u in auth_users if u.get("id")}
+    except Exception:
+        user_email_map = {}
 
     out: list[dict[str, Any]] = []
     for row in rows:
         item = dict(row)
         uid = str(row.get("user_id") or "")
-        prof = row.get("profiles") or {}
         email = (
-            str(row.get("user_email") or "").strip()
-            or str(prof.get("email") or "").strip()
-            or user_email_map.get(uid, "")
-            or get_user_email_by_id(uid)
+            user_email_map.get(uid, "")
+            or (get_user_email_by_id(uid) if uid else "")
             or ""
         )
         item["email"] = email
