@@ -46,22 +46,68 @@ def rest_get(
 ) -> list[dict[str, Any]]:
     if not supabase_enabled():
         return []
-    try:
-        response = httpx.get(
-            f"{supabase_url()}/rest/v1/{table}",
-            headers=_headers(user_jwt=user_jwt),
-            params=params or {},
-            timeout=20.0,
-        )
-    except httpx.HTTPError as exc:
-        logger.warning("Supabase request failed for %s: %s", table, exc)
-        return []
-    if response.status_code in {400, 404}:
-        return []
-    if response.status_code >= 400:
-        return []
-    data = response.json()
-    return data if isinstance(data, list) else []
+
+    req_params = dict(params or {})
+    raw_limit_str = req_params.get("limit")
+
+    target_limit = 100000
+    if raw_limit_str:
+        try:
+            target_limit = int(raw_limit_str)
+        except ValueError:
+            target_limit = 100000
+
+    if target_limit <= 1000:
+        try:
+            response = httpx.get(
+                f"{supabase_url()}/rest/v1/{table}",
+                headers=_headers(user_jwt=user_jwt),
+                params=req_params,
+                timeout=20.0,
+            )
+            if response.status_code >= 400:
+                return []
+            data = response.json()
+            return data if isinstance(data, list) else []
+        except Exception as exc:
+            logger.warning("Supabase request failed for %s: %s", table, exc)
+            return []
+
+    all_rows: list[dict[str, Any]] = []
+    base_offset = 0
+    if "offset" in req_params:
+        try:
+            base_offset = int(req_params["offset"])
+        except ValueError:
+            base_offset = 0
+
+    chunk_size = 1000
+    current_offset = base_offset
+
+    while len(all_rows) < target_limit:
+        chunk_limit = min(chunk_size, target_limit - len(all_rows))
+        chunk_params = {**req_params, "limit": str(chunk_limit), "offset": str(current_offset)}
+        try:
+            response = httpx.get(
+                f"{supabase_url()}/rest/v1/{table}",
+                headers=_headers(user_jwt=user_jwt),
+                params=chunk_params,
+                timeout=20.0,
+            )
+            if response.status_code >= 400:
+                break
+            data = response.json()
+            if not isinstance(data, list) or not data:
+                break
+            all_rows.extend(data)
+            if len(data) < chunk_limit:
+                break
+            current_offset += len(data)
+        except Exception as exc:
+            logger.warning("Supabase paginated request failed for %s at offset %s: %s", table, current_offset, exc)
+            break
+
+    return all_rows
 
 
 def rest_get_one(
