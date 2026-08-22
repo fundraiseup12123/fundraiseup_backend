@@ -388,7 +388,7 @@ def _merge_orphan_donations(
         "campaign_id": f"in.({','.join(campaign_ids)})",
         "select": select,
         "order": "created_at.desc",
-        "limit": "1000",
+        "limit": "100000",
     }
     if campaign_id:
         orphan_params["campaign_id"] = f"eq.{campaign_id}"
@@ -430,14 +430,23 @@ def admin_donation_detail(
     user: Annotated[AuthUser, Depends(require_auth)],
 ) -> dict[str, Any]:
     require_org_access(org_id, user, min_role="member")
+    clean_id = donation_id.strip()
     donation = rest_get_one(
         "donations",
-        params={"id": f"eq.{donation_id}", "organization_id": f"eq.{org_id}", "select": "*"},
+        params={"id": f"eq.{clean_id}", "organization_id": f"eq.{org_id}", "select": "*"},
     )
     if not donation:
         donation = rest_get_one(
             "donations",
-            params={"id": f"eq.{donation_id}", "select": "*"},
+            params={"stripe_payment_intent_id": f"eq.{clean_id}", "organization_id": f"eq.{org_id}", "select": "*"},
+        )
+    if not donation:
+        donation = rest_get_one(
+            "donations",
+            params={"id": f"eq.{clean_id}", "select": "*"},
+        ) or rest_get_one(
+            "donations",
+            params={"stripe_payment_intent_id": f"eq.{clean_id}", "select": "*"},
         )
         if donation and donation.get("campaign_id"):
             campaign_row = rest_get_one(
@@ -446,6 +455,20 @@ def admin_donation_detail(
             )
             if not campaign_row or str(campaign_row.get("organization_id")) != org_id:
                 donation = None
+
+    if not donation and len(clean_id) >= 4:
+        all_rows = rest_get(
+            "donations",
+            params={"organization_id": f"eq.{org_id}", "select": "*", "order": "created_at.desc", "limit": "5000"},
+        ) or []
+        target = clean_id.replace("-", "").replace("_", "").upper()
+        for r in all_rows:
+            r_id = str(r.get("id") or "").replace("-", "").upper()
+            r_spi = str(r.get("stripe_payment_intent_id") or "").replace("-", "").replace("_", "").upper()
+            if target and (target in r_id or (r_spi and target in r_spi)):
+                donation = r
+                break
+
     if not donation:
         raise HTTPException(status_code=404, detail="Donation not found")
 
@@ -507,7 +530,7 @@ def _admin_org_donation_rows(
     frequency: str | None = None,
     date_from: str | None = None,
     date_to: str | None = None,
-    limit: int = 1000,
+    limit: int = 100000,
 ) -> list[dict[str, Any]]:
     """Shared org donation query used by insights (same inclusion rules as donations list)."""
     params: dict[str, str] = {

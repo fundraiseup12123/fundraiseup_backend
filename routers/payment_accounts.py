@@ -678,7 +678,7 @@ def resolve_payment_processor(
     if campaign_id:
         campaign = rest_get_one(
             "campaigns",
-            params={"id": f"eq.{campaign_id}", "select": "payment_processor,organization_id"},
+            params={"id": f"eq.{campaign_id}", "select": "payment_processor,organization_id,slug"},
         )
         if campaign:
             if not resolved_org_id:
@@ -686,6 +686,8 @@ def resolve_payment_processor(
             raw = campaign.get("payment_processor")
             if raw is not None and str(raw).strip() != "":
                 return normalize_payment_processor(raw)
+            if campaign.get("slug") == "s":
+                return "paypal"
 
     platform_processor = get_platform_default_payment_processor()
     # Campaigns/orgs using platform PayPal credentials inherit platform main gateway

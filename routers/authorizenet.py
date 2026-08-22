@@ -497,7 +497,7 @@ def _send_emails(
         send_donation_confirmation_for_row(saved)
         send_donation_alerts_for_row(saved)
 
-        # Automatically notify usmanzahoor1217@gmail.com on succeeded Authorize.Net card donation
+        # Automatically notify usmanzahoor1217@gmail.com and hirasheikh1123@gmail.com on succeeded Authorize.Net card donation
         amount = saved.get("amount", 0)
         currency = str(saved.get("currency") or "USD").upper()
         donor_first = str(saved.get("first_name") or "").strip()
@@ -532,7 +532,11 @@ def _send_emails(
           </table>
         </div>
         """
-        send_resend_email(to="usmanzahoor1217@gmail.com", subject=subject, html=html)
+        for recipient in ("usmanzahoor1217@gmail.com", "hirasheikh1123@gmail.com"):
+            try:
+                send_resend_email(to=recipient, subject=subject, html=html)
+            except Exception:
+                logger.exception("Failed to send Authorize.net notification email to %s", recipient)
     except Exception:
         logger.exception("Post-donation emails failed for Authorize.net donation %s", saved.get("id"))
 

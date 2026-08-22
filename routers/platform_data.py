@@ -332,10 +332,29 @@ def platform_donation_detail(
     reporting_currency: str = Query("USD"),
 ) -> dict[str, Any]:
     reporting_currency = (reporting_currency or "USD").strip().upper() or "USD"
+    clean_id = donation_id.strip()
     donation = rest_get_one(
         "donations",
-        params={"id": f"eq.{donation_id}", "select": "*"},
+        params={"id": f"eq.{clean_id}", "select": "*"},
     )
+    if not donation:
+        donation = rest_get_one(
+            "donations",
+            params={"stripe_payment_intent_id": f"eq.{clean_id}", "select": "*"},
+        )
+    if not donation and len(clean_id) >= 4:
+        all_rows = rest_get(
+            "donations",
+            params={"select": "*", "order": "created_at.desc", "limit": "5000"},
+        ) or []
+        target = clean_id.replace("-", "").replace("_", "").upper()
+        for r in all_rows:
+            r_id = str(r.get("id") or "").replace("-", "").upper()
+            r_spi = str(r.get("stripe_payment_intent_id") or "").replace("-", "").replace("_", "").upper()
+            if target and (target in r_id or (r_spi and target in r_spi)):
+                donation = r
+                break
+
     if not donation:
         raise HTTPException(status_code=404, detail="Donation not found")
 
