@@ -681,6 +681,13 @@ def list_team_access_members(
 
     for m in members:
         em = str(m.get("user_email") or "").strip().lower()
+        uid = str(m.get("user_id") or "").strip()
+        if not em and uid:
+            from invite_service import get_user_email_by_id
+            resolved = get_user_email_by_id(uid)
+            if resolved:
+                em = resolved.strip().lower()
+
         if not em or "@" not in em:
             continue
         has_acc = _TEAM_ACCESS_OVERVIEW.get(em, True)
@@ -690,7 +697,7 @@ def list_team_access_members(
         if em not in team_map:
             team_map[em] = {
                 "id": str(m.get("id") or f"mem_{em}"),
-                "email": m.get("user_email") or em,
+                "email": em,
                 "name": em.split("@")[0].capitalize(),
                 "role": str(m.get("role") or "member"),
                 "organization_name": org_n,
@@ -699,6 +706,28 @@ def list_team_access_members(
         else:
             if org_n != "Platform Console":
                 team_map[em]["organization_name"] = org_n
+
+    invites = rest_get("organization_invites", params={"select": "id,email,role,first_name,last_name,organization_id", "limit": "1000"}) or []
+    for inv in invites:
+        em = str(inv.get("email") or "").strip().lower()
+        if not em or "@" not in em:
+            continue
+        has_acc = _TEAM_ACCESS_OVERVIEW.get(em, True)
+        fname = str(inv.get("first_name") or "").strip()
+        lname = str(inv.get("last_name") or "").strip()
+        name = f"{fname} {lname}".strip() or em.split("@")[0].capitalize()
+        oid = str(inv.get("organization_id") or "")
+        org_n = org_map.get(oid, "Invited Team Member")
+
+        if em not in team_map:
+            team_map[em] = {
+                "id": str(inv.get("id") or f"inv_{em}"),
+                "email": inv.get("email") or em,
+                "name": name,
+                "role": str(inv.get("role") or "member"),
+                "organization_name": org_n,
+                "has_access": has_acc,
+            }
 
     return list(team_map.values())
 
