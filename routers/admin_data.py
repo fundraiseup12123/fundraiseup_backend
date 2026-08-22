@@ -194,6 +194,60 @@ def admin_list_donations(
                 or search_q in r_email
             ):
                 filtered_rows.append(r)
+
+        if not filtered_rows and len(clean_q) >= 4:
+            direct_matches: list[dict[str, Any]] = []
+            target_q = q.strip()
+
+            by_id = rest_get(
+                "donations",
+                params={"id": f"eq.{target_q}", "select": select_cols},
+            )
+            if by_id:
+                direct_matches.extend(by_id)
+
+            by_intent = rest_get(
+                "donations",
+                params={"stripe_payment_intent_id": f"eq.{target_q}", "select": select_cols},
+            )
+            if by_intent:
+                direct_matches.extend(by_intent)
+
+            if not direct_matches:
+                by_intent_like = rest_get(
+                    "donations",
+                    params={"stripe_payment_intent_id": f"ilike.*{target_q}*", "select": select_cols, "limit": "50"},
+                )
+                if by_intent_like:
+                    direct_matches.extend(by_intent_like)
+
+            if not direct_matches and "@" in target_q:
+                by_email = rest_get(
+                    "donations",
+                    params={"email": f"ilike.*{target_q}*", "select": select_cols, "limit": "50"},
+                )
+                if by_email:
+                    direct_matches.extend(by_email)
+
+            if not direct_matches and len(clean_q) >= 8:
+                recent_all = rest_get(
+                    "donations",
+                    params={"select": select_cols, "order": "created_at.desc", "limit": "5000"},
+                ) or []
+                for r in recent_all:
+                    r_id = str(r.get("id") or "").lower().replace("-", "")
+                    r_spi = str(r.get("stripe_payment_intent_id") or "").lower().replace("-", "").replace("_", "")
+                    if clean_q in r_id or clean_q in r_spi:
+                        direct_matches.append(r)
+
+            if direct_matches:
+                seen_ids = {str(r.get("id")) for r in rows}
+                for dm in direct_matches:
+                    dm_id = str(dm.get("id") or "")
+                    if dm_id and dm_id not in seen_ids:
+                        filtered_rows.append(dm)
+                        seen_ids.add(dm_id)
+
         rows = filtered_rows
 
     if amount_sort:
