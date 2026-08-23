@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 
 from auth import AuthUser, require_auth, require_super_admin
 from db import rest_get, rest_get_one
-from emails import resend_configured, send_resend_email
+from emails import log_email, resend_configured, send_resend_email
 
 logger = logging.getLogger(__name__)
 
@@ -285,6 +285,11 @@ def super_send_broadcast_emails(
                 subject=payload.subject,
                 html=content,
                 from_name=(payload.from_name or "").strip() or "Hope for Gaza",
+            )
+            log_email(
+                recipient_email=email,
+                subject=payload.subject,
+                template_key=payload.template_id or "donor_broadcast",
             )
             queued_count += 1
         except Exception as exc:
