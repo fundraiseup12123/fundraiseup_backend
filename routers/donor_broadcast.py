@@ -289,7 +289,7 @@ def super_send_broadcast_emails(
             log_email(
                 recipient_email=email,
                 subject=payload.subject,
-                template_key=payload.template_id or "donor_broadcast",
+                template_key=getattr(payload, "template_key", None) or "donor_broadcast",
             )
             queued_count += 1
         except Exception as exc:
