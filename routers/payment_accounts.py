@@ -686,7 +686,8 @@ def resolve_payment_processor(
             raw = campaign.get("payment_processor")
             if raw is not None and str(raw).strip() != "":
                 return normalize_payment_processor(raw)
-            if campaign.get("slug") == "s":
+            slug = str(campaign.get("slug") or "").strip().lower().replace("_", "-")
+            if slug in {"s", "s-fundraiseup", "s.fundraiseup"}:
                 return "paypal"
 
     platform_processor = get_platform_default_payment_processor()
