@@ -191,6 +191,7 @@ class CompletePayPalRedirectRequest(BaseModel):
     amount: float = Field(gt=0)
     currency: str = Field(min_length=3, max_length=3)
     frequency: Literal["once", "monthly"] = "once"
+    payment_method: str | None = None
     cover_fees: bool = False
     dedicate: bool = False
     honoree_name: str | None = None
@@ -206,6 +207,7 @@ class CompletePayPalRedirectRequest(BaseModel):
 
 class CompletePayPalByRefRequest(BaseModel):
     payment_ref: str = Field(min_length=8, max_length=64)
+    payment_method: str | None = None
     paypal_txn_id: str | None = None
     subscription_id: str | None = None
 
@@ -227,6 +229,7 @@ class ActivatePayPalSubscriptionRequest(BaseModel):
     subscription_id: str = Field(min_length=5, max_length=64)
     amount: float = Field(gt=0)
     currency: str = Field(min_length=3, max_length=3)
+    payment_method: str | None = None
     cover_fees: bool = False
     dedicate: bool = False
     honoree_name: str | None = None
@@ -253,6 +256,7 @@ class CapturePayPalOrderRequest(BaseModel):
     amount: float = Field(gt=0)
     currency: str = Field(min_length=3, max_length=3)
     frequency: Literal["once", "monthly"] = "once"
+    payment_method: str | None = None
     cover_fees: bool = False
     dedicate: bool = False
     honoree_name: str | None = None
@@ -288,7 +292,7 @@ def _metadata_payload(payload: CreatePayPalOrderRequest | CapturePayPalOrderRequ
         "base_amount": str(base_amount),
         "cover_fees": str(payload.cover_fees).lower(),
         "display_currency": payload.currency.upper(),
-        "payment_method": "paypal",
+        "payment_method": getattr(payload, "payment_method", None) or "paypal",
     }
     if payload.campaign_id:
         meta["campaign_id"] = payload.campaign_id
@@ -323,19 +327,17 @@ def _resolve_paypal_organization_id(campaign_id: str | None) -> str:
         )
         if campaign and campaign.get("organization_id"):
             return str(campaign["organization_id"])
-        if campaign_id == ROOT_CAMPAIGN_ID:
-            return ROOT_ORG_ID
     return ROOT_ORG_ID
 
 
-def _save_paypal_checkout(
-    *,
+def _store_paypal_checkout(
     payment_ref: str,
-    payload: PreparePayPalRedirectRequest,
+    payload: CreatePayPalOrderRequest,
+    *,
     order_id: str | None = None,
     subscription_id: str | None = None,
 ) -> None:
-    rest_insert(
+    rest_upsert(
         "paypal_checkouts",
         {
             "payment_ref": payment_ref,
@@ -399,6 +401,10 @@ def _record_paypal_donation(
     if email.lower() in {"", "pending@wallet.local", "donor@example.com"}:
         email = ""
 
+    method = (getattr(payload, "payment_method", None) or "").strip().lower()
+    if not method:
+        method = "paypal"
+
     row = {
         "stripe_payment_intent_id": order_id,
         "first_name": first_name or "Anonymous",
@@ -408,7 +414,7 @@ def _record_paypal_donation(
         "base_amount": base_amount,
         "currency": display_currency,
         "frequency": payload.frequency,
-        "payment_method": getattr(payload, "payment_method", None) or "paypal",
+        "payment_method": method,
         "payment_processor": processor,
         "honoree_name": payload.honoree_name or None,
         "comment": payload.comment or None,
