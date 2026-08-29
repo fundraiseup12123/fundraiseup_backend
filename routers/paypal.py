@@ -1134,8 +1134,8 @@ def paypal_create_order(payload: CreatePayPalOrderRequest) -> CreatePayPalOrderR
     if not keys_ready and not paypal_configured():
         raise HTTPException(status_code=503, detail="PayPal API is not configured on the server")
 
-    if payload.frequency != "once":
-        raise HTTPException(status_code=400, detail="PayPal is only available for one-time donations")
+    if payload.frequency not in ("once", "monthly"):
+        raise HTTPException(status_code=400, detail="Unsupported donation frequency")
 
     display_currency = payload.currency.lower()
     base_amount, total_display = _resolve_total(payload.amount, display_currency, payload.cover_fees)
