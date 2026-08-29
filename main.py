@@ -147,21 +147,75 @@ class DonationFeedResponse(BaseModel):
     has_more: bool
 
 
-def _country_code_from_device(device: object) -> str | None:
-    if not isinstance(device, dict):
-        return None
-    raw = (
-        device.get("country")
-        or device.get("Country")
-        or device.get("country_code")
-        or device.get("countryCode")
-    )
-    if raw is None:
-        return None
-    code = str(raw).strip().upper()
-    if len(code) == 2 and code.isalpha():
-        return code
-    return None
+CURRENCY_TO_COUNTRY_MAP: dict[str, str] = {
+    "USD": "US",
+    "GBP": "GB",
+    "CAD": "CA",
+    "AUD": "AU",
+    "EUR": "DE",
+    "PKR": "PK",
+    "TRY": "TR",
+    "AED": "AE",
+    "SAR": "SA",
+    "QAR": "QA",
+    "KWD": "KW",
+    "OMR": "OM",
+    "BHD": "BH",
+    "JOD": "JO",
+    "EGP": "EG",
+    "MYR": "MY",
+    "SGD": "SG",
+    "NZD": "NZ",
+    "CHF": "CH",
+    "SEK": "SE",
+    "NOK": "NO",
+    "DKK": "DK",
+    "ILS": "PS",
+    "BAM": "BA",
+    "BRL": "BR",
+    "MXN": "MX",
+    "INR": "IN",
+    "BDT": "BD",
+    "IDR": "ID",
+    "ZAR": "ZA",
+    "NGN": "NG",
+    "KES": "KE",
+    "GHS": "GH",
+    "PHP": "PH",
+    "JPY": "JP",
+    "KRW": "KR",
+    "PLN": "PL",
+    "MAD": "MA",
+    "DZD": "DZ",
+    "TND": "TN",
+    "SDG": "SD",
+    "LBP": "LB",
+    "IQD": "IQ",
+    "AZN": "AZ",
+}
+
+
+def _country_code_from_device(device: object, currency: str | None = None) -> str:
+    if isinstance(device, dict):
+        raw = (
+            device.get("country")
+            or device.get("Country")
+            or device.get("country_code")
+            or device.get("countryCode")
+        )
+        if raw is not None:
+            code = str(raw).strip().upper()
+            if code == "UK":
+                return "GB"
+            if code == "USA":
+                return "US"
+            if len(code) == 2 and code.isalpha():
+                return code
+    if currency:
+        cur = str(currency).strip().upper()
+        if cur in CURRENCY_TO_COUNTRY_MAP:
+            return CURRENCY_TO_COUNTRY_MAP[cur]
+    return "US"
 
 
 def _feed_item_from_row(row: dict) -> DonationFeedItem:
@@ -181,7 +235,7 @@ def _feed_item_from_row(row: dict) -> DonationFeedItem:
         frequency=row["frequency"] if row["frequency"] in {"once", "monthly"} else "once",
         honoree_name=row.get("honoree_name"),
         created_at=row["created_at"],
-        country_code=_country_code_from_device(row.get("device")),
+        country_code=_country_code_from_device(row.get("device"), row.get("currency")),
         crypto_amount=crypto_amount_f,
         crypto_currency=crypto_code,
     )
