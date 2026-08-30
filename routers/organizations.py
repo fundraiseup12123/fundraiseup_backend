@@ -156,6 +156,7 @@ def _default_campaign_content(name: str) -> dict[str, Any]:
             "gtm_container_id": root.get("gtm_container_id") or None,
             "ga4_property_id": root.get("ga4_property_id") or None,
             "meta_pixel_id": root.get("meta_pixel_id") or None,
+            "tiktok_pixel_id": root.get("tiktok_pixel_id") or None,
             "title_html": None,
             "title_font_size": root.get("title_font_size"),
             "body_font_size": root.get("body_font_size"),
@@ -170,6 +171,7 @@ def _default_campaign_content(name: str) -> dict[str, Any]:
         "gtm_container_id": None,
         "ga4_property_id": None,
         "meta_pixel_id": None,
+        "tiktok_pixel_id": None,
         "title_html": None,
         "title_font_size": None,
         "body_font_size": None,
@@ -331,6 +333,7 @@ class CampaignContentPayload(BaseModel):
     gtm_container_id: str | None = None
     ga4_property_id: str | None = None
     meta_pixel_id: str | None = None
+    tiktok_pixel_id: str | None = None
     title_html: str | None = None
     title_font_size: int | None = None
     body_font_size: int | None = None
@@ -366,6 +369,8 @@ class CampaignContentPayload(BaseModel):
         prop = "".join(ch for ch in prop if ch.isdigit()) or None
         meta_ids = list(dict.fromkeys(re.findall(r"\d+", self.meta_pixel_id or "")))
         meta = ",".join(pixel_id for pixel_id in meta_ids if len(pixel_id) >= 5) or None
+        tt_ids = list(dict.fromkeys(re.findall(r"[A-Za-z0-9_-]+", self.tiktok_pixel_id or "")))
+        tt = ",".join(pixel_id for pixel_id in tt_ids if len(pixel_id) >= 6) or None
         if ga4 and not ga4.startswith("G-"):
             ga4 = None
         if gtm and not gtm.startswith("GTM-"):
@@ -374,6 +379,7 @@ class CampaignContentPayload(BaseModel):
         self.gtm_container_id = gtm
         self.ga4_property_id = prop
         self.meta_pixel_id = meta
+        self.tiktok_pixel_id = tt
         return self
 
 
@@ -974,6 +980,7 @@ def update_campaign(
             "gtm_container_id",
             "ga4_property_id",
             "meta_pixel_id",
+            "tiktok_pixel_id",
             "title_html",
             "title_font_size",
             "body_font_size",
@@ -1010,6 +1017,15 @@ def update_campaign(
                     raise HTTPException(
                         status_code=503,
                         detail="Content saved but Meta Pixel ID failed: run backend/sql/021_campaign_meta_pixel_id.sql on Supabase.",
+                    )
+            # TikTok Pixel column may be missing until migration 044 is applied
+            if not updated and "tiktok_pixel_id" in content_data:
+                without_tt = {k: v for k, v in content_data.items() if k != "tiktok_pixel_id"}
+                updated = rest_patch("campaign_content", without_tt, match={"campaign_id": campaign_id})
+                if updated:
+                    raise HTTPException(
+                        status_code=503,
+                        detail="Content saved but TikTok Pixel ID failed: run backend/sql/044_campaign_tiktok_pixel_id.sql on Supabase.",
                     )
             if not updated and any(k in content_data for k in mobile_landing_keys):
                 without_mobile = {k: v for k, v in content_data.items() if k not in mobile_landing_keys}
@@ -1077,6 +1093,14 @@ def update_campaign(
                     raise HTTPException(
                         status_code=503,
                         detail="Content saved but Meta Pixel ID failed: run backend/sql/021_campaign_meta_pixel_id.sql on Supabase.",
+                    )
+            if not inserted and "tiktok_pixel_id" in content_data:
+                without_tt = {k: v for k, v in content_data.items() if k != "tiktok_pixel_id"}
+                inserted = rest_insert("campaign_content", {"campaign_id": campaign_id, **without_tt})
+                if inserted:
+                    raise HTTPException(
+                        status_code=503,
+                        detail="Content saved but TikTok Pixel ID failed: run backend/sql/044_campaign_tiktok_pixel_id.sql on Supabase.",
                     )
             if not inserted and any(k in content_data for k in mobile_landing_keys):
                 without_mobile = {k: v for k, v in content_data.items() if k not in mobile_landing_keys}
