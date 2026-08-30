@@ -590,6 +590,11 @@ def normalize_payment_account_sources(raw: object) -> dict[str, Any]:
             normalized["stripe_new_daily_limit"] = val if val > 0 else None
         except (ValueError, TypeError):
             normalized["stripe_new_daily_limit"] = None
+
+    for k, v in data.items():
+        if k not in normalized:
+            normalized[k] = v
+
     return normalized
 
 

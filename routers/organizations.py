@@ -392,7 +392,7 @@ class UpdateCampaignRequest(BaseModel):
     platform_stripe_account_id: str | None = None
     paypal_account_id: str | None = None
     nowpayments_account_id: str | None = None
-    payment_account_sources: dict[str, str] | None = None
+    payment_account_sources: dict[str, Any] | None = None
     payment_processor: str | None = None
     # None omitted; explicit null clears the minimum (no limit).
     min_donation_amount: float | None = None
