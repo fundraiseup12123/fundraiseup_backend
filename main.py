@@ -117,6 +117,21 @@ class UpdateCheckoutRequest(BaseModel):
     cover_fees: bool
 
 
+class ConfirmWalletRequest(BaseModel):
+    payment_method_id: str
+    payment_intent_id: str | None = None
+    subscription_id: str | None = None
+    client_secret: str | None = None
+    stripe_account: str | None = None
+
+
+class ConfirmWalletResponse(BaseModel):
+    status: str
+    id: str | None = None
+    client_secret: str | None = None
+    requires_action: bool = False
+
+
 class RegisterDomainRequest(BaseModel):
     domain: str = Field(min_length=3, max_length=253)
     # Required for Connect direct charges — Apple Pay / Google Pay domains must be
@@ -1159,6 +1174,103 @@ def update_checkout(payment_intent_id: str, payload: UpdateCheckoutRequest) -> C
         raise
     except stripe.error.StripeError as exc:
         raise HTTPException(status_code=400, detail=str(exc.user_message or exc)) from exc
+
+
+@app.post("/checkout/confirm-wallet", response_model=ConfirmWalletResponse)
+def confirm_wallet(payload: ConfirmWalletRequest) -> ConfirmWalletResponse:
+    stripe_kwargs: dict = {}
+    if payload.stripe_account:
+        stripe_kwargs["stripe_account"] = payload.stripe_account
+
+    resolved_pm_id = payload.payment_method_id
+
+    # If stripe_account is provided and pm is platform-owned, clone it to connected account
+    if payload.stripe_account and payload.payment_method_id.startswith("pm_"):
+        try:
+            customer_id = None
+            if payload.subscription_id:
+                sub = stripe.Subscription.retrieve(payload.subscription_id, **stripe_kwargs)
+                customer_id = sub.customer if isinstance(sub.customer, str) else getattr(sub.customer, "id", None)
+            elif payload.payment_intent_id:
+                pi = stripe.PaymentIntent.retrieve(payload.payment_intent_id, **stripe_kwargs)
+                customer_id = pi.customer if isinstance(pi.customer, str) else getattr(pi.customer, "id", None)
+
+            clone_params: dict = {
+                "payment_method": payload.payment_method_id,
+                "stripe_account": payload.stripe_account,
+            }
+            if customer_id:
+                clone_params["customer"] = customer_id
+            cloned = stripe.PaymentMethod.create(**clone_params)
+            resolved_pm_id = cloned.id
+        except Exception:
+            resolved_pm_id = payload.payment_method_id
+
+    # If subscription:
+    if payload.subscription_id:
+        try:
+            sub = stripe.Subscription.retrieve(
+                payload.subscription_id,
+                expand=["latest_invoice.payment_intent"],
+                **stripe_kwargs,
+            )
+            customer_id = sub.customer if isinstance(sub.customer, str) else getattr(sub.customer, "id", None)
+            if customer_id:
+                try:
+                    stripe.PaymentMethod.attach(resolved_pm_id, customer=customer_id, **stripe_kwargs)
+                except Exception:
+                    pass
+                try:
+                    stripe.Customer.modify(customer_id, invoice_settings={"default_payment_method": resolved_pm_id}, **stripe_kwargs)
+                except Exception:
+                    pass
+
+            stripe.Subscription.modify(
+                payload.subscription_id,
+                default_payment_method=resolved_pm_id,
+                **stripe_kwargs,
+            )
+
+            inv = sub.latest_invoice
+            inv_id = inv if isinstance(inv, str) else getattr(inv, "id", None)
+            if inv_id:
+                try:
+                    paid_inv = stripe.Invoice.pay(inv_id, payment_method=resolved_pm_id, **stripe_kwargs)
+                    pi = getattr(paid_inv, "payment_intent", None)
+                    pi_id = pi if isinstance(pi, str) else getattr(pi, "id", None)
+                    return ConfirmWalletResponse(status="succeeded", id=pi_id or payload.subscription_id)
+                except Exception:
+                    pass
+            return ConfirmWalletResponse(status="succeeded", id=payload.subscription_id)
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+    # If payment_intent:
+    if payload.payment_intent_id:
+        try:
+            pi = stripe.PaymentIntent.confirm(
+                payload.payment_intent_id,
+                payment_method=resolved_pm_id,
+                **stripe_kwargs,
+            )
+            if pi.status == "requires_action":
+                return ConfirmWalletResponse(
+                    status="requires_action",
+                    id=pi.id,
+                    client_secret=pi.client_secret,
+                    requires_action=True,
+                )
+            if pi.status in {"succeeded", "processing"}:
+                return ConfirmWalletResponse(status="succeeded", id=pi.id)
+            raise HTTPException(status_code=400, detail=f"Payment status: {pi.status}")
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+    return ConfirmWalletResponse(status="succeeded", id=payload.payment_intent_id or payload.subscription_id)
 
 
 def _metadata_from_payment_intent(
