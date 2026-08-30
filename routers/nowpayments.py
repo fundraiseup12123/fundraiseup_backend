@@ -457,6 +457,20 @@ def nowpayments_checkout_config(
     campaign_id: str | None = Query(None),
     checkout_view: Literal["homepage", "popup", "landing"] = Query("homepage"),
 ) -> dict[str, object]:
+    if campaign_id:
+        camp = rest_get_one("campaigns", params={"id": f"eq.{campaign_id}", "select": "slug,payment_account_sources"})
+        if not camp:
+            camp = rest_get_one("campaigns", params={"slug": f"eq.{campaign_id}", "select": "slug,payment_account_sources"})
+        if camp:
+            slug = str(camp.get("slug") or "").lower()
+            sources = camp.get("payment_account_sources") or {}
+            if slug == "hope-for-gaza-binance" or "binance" in slug or sources.get("crypto_processor") == "binance":
+                return {
+                    "available": False,
+                    "merchant_connected": False,
+                    "api_configured": False,
+                }
+
     account = resolve_nowpayments_account_for_checkout(campaign_id, checkout_view)
     return {
         "available": bool(account),
