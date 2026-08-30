@@ -63,6 +63,11 @@ def get_campaign_by_slug_or_host(
         if domain and domain.get("verified_at"):
             campaign = rest_get_one("campaigns", params={"id": f"eq.{domain['campaign_id']}", "status": "eq.live", "select": "*"})
 
+        if not campaign and "." in host_clean:
+            sub = host_clean.split(".")[0].strip()
+            if sub and sub not in {"www", "admin", "api", "app", "fundraiseup"}:
+                campaign = rest_get_one("campaigns", params={"slug": f"eq.{sub}", "status": "eq.live", "select": "*"})
+
     if not campaign and slug:
         campaign = rest_get_one("campaigns", params={"slug": f"eq.{slug}", "status": "eq.live", "select": "*"})
 

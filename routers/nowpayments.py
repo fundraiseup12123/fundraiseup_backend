@@ -458,6 +458,13 @@ def nowpayments_checkout_config(
     checkout_view: Literal["homepage", "popup", "landing"] = Query("homepage"),
 ) -> dict[str, object]:
     if campaign_id:
+        cid_lower = str(campaign_id).lower()
+        if "binance" in cid_lower or cid_lower == "hope-for-gaza-binance":
+            return {
+                "available": False,
+                "merchant_connected": False,
+                "api_configured": False,
+            }
         camp = rest_get_one("campaigns", params={"id": f"eq.{campaign_id}", "select": "slug,payment_account_sources"})
         if not camp:
             camp = rest_get_one("campaigns", params={"slug": f"eq.{campaign_id}", "select": "slug,payment_account_sources"})
