@@ -1211,26 +1211,29 @@ def confirm_wallet(payload: ConfirmWalletRequest) -> ConfirmWalletResponse:
     # 2. Clone platform payment method to connected account if needed
     if payload.stripe_account and payload.payment_method_id.startswith("pm_"):
         try:
-            clone_params: dict = {
-                "payment_method": payload.payment_method_id,
-                "stripe_account": payload.stripe_account,
-            }
-            if customer_id:
-                clone_params["customer"] = customer_id
-            cloned = stripe.PaymentMethod.create(**clone_params)
+            cloned = stripe.PaymentMethod.create(
+                payment_method=payload.payment_method_id,
+                stripe_account=payload.stripe_account,
+            )
             resolved_pm_id = cloned.id
         except Exception as clone_err:
             logging.getLogger(__name__).warning("PaymentMethod clone attempt: %s", clone_err)
             resolved_pm_id = payload.payment_method_id
 
+        if customer_id and resolved_pm_id.startswith("pm_"):
+            try:
+                stripe.PaymentMethod.attach(
+                    resolved_pm_id,
+                    customer=customer_id,
+                    stripe_account=payload.stripe_account,
+                )
+            except Exception as attach_err:
+                logging.getLogger(__name__).warning("PaymentMethod attach attempt: %s", attach_err)
+
     # 3. If this is a subscription, configure subscription default payment method
     if resolved_sub_id:
         try:
             if customer_id:
-                try:
-                    stripe.PaymentMethod.attach(resolved_pm_id, customer=customer_id, **stripe_kwargs)
-                except Exception:
-                    pass
                 try:
                     stripe.Customer.modify(
                         customer_id,
