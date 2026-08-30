@@ -165,7 +165,32 @@ def get_binance_checkout_config(
     campaign_id: str | None = Query(None),
     checkout_view: str | None = Query(None),
 ) -> dict[str, Any]:
-    """Returns Binance pay availability, supported coins, networks, and deposit addresses."""
+    """Returns Binance pay availability, strictly enabled only for hope-for-gaza-binance."""
+    if not campaign_id:
+        return {"available": False, "provider": "binance_pay", "coins": []}
+
+    camp = rest_get_one(
+        "campaigns",
+        params={"id": f"eq.{campaign_id}", "select": "id,slug,payment_account_sources"},
+    )
+    if not camp:
+        camp = rest_get_one(
+            "campaigns",
+            params={"slug": f"eq.{campaign_id}", "select": "id,slug,payment_account_sources"},
+        )
+
+    sources = (camp or {}).get("payment_account_sources") or {}
+    slug = str((camp or {}).get("slug") or "").lower()
+    is_binance_campaign = (
+        sources.get("crypto_processor") == "binance"
+        or bool(sources.get("binance_pay"))
+        or slug == "hope-for-gaza-binance"
+        or "binance" in slug
+    )
+
+    if not is_binance_campaign:
+        return {"available": False, "provider": "binance_pay", "coins": []}
+
     coins = [
         {
             "coin": "USDT",
