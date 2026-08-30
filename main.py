@@ -1182,19 +1182,35 @@ def confirm_wallet(payload: ConfirmWalletRequest) -> ConfirmWalletResponse:
     if payload.stripe_account:
         stripe_kwargs["stripe_account"] = payload.stripe_account
 
-    resolved_pm_id = payload.payment_method_id
+    # 1. Resolve PaymentIntent ID and Subscription ID from request or client_secret
+    resolved_pi_id = payload.payment_intent_id
+    if not resolved_pi_id and payload.client_secret and payload.client_secret.startswith("pi_"):
+        resolved_pi_id = payload.client_secret.split("_secret_")[0]
 
-    # If stripe_account is provided and pm is platform-owned, clone it to connected account
+    resolved_sub_id = payload.subscription_id
+    resolved_pm_id = payload.payment_method_id
+    customer_id = None
+
+    # Retrieve existing PI to get customer and subscription metadata
+    if resolved_pi_id:
+        try:
+            pi_data = stripe.PaymentIntent.retrieve(resolved_pi_id, **stripe_kwargs)
+            customer_id = pi_data.customer if isinstance(pi_data.customer, str) else getattr(pi_data.customer, "id", None)
+            if not resolved_sub_id:
+                resolved_sub_id = (pi_data.metadata or {}).get("subscription_id")
+        except Exception:
+            pass
+
+    if not customer_id and resolved_sub_id:
+        try:
+            sub_data = stripe.Subscription.retrieve(resolved_sub_id, **stripe_kwargs)
+            customer_id = sub_data.customer if isinstance(sub_data.customer, str) else getattr(sub_data.customer, "id", None)
+        except Exception:
+            pass
+
+    # 2. Clone platform payment method to connected account if needed
     if payload.stripe_account and payload.payment_method_id.startswith("pm_"):
         try:
-            customer_id = None
-            if payload.subscription_id:
-                sub = stripe.Subscription.retrieve(payload.subscription_id, **stripe_kwargs)
-                customer_id = sub.customer if isinstance(sub.customer, str) else getattr(sub.customer, "id", None)
-            elif payload.payment_intent_id:
-                pi = stripe.PaymentIntent.retrieve(payload.payment_intent_id, **stripe_kwargs)
-                customer_id = pi.customer if isinstance(pi.customer, str) else getattr(pi.customer, "id", None)
-
             clone_params: dict = {
                 "payment_method": payload.payment_method_id,
                 "stripe_account": payload.stripe_account,
@@ -1203,105 +1219,96 @@ def confirm_wallet(payload: ConfirmWalletRequest) -> ConfirmWalletResponse:
                 clone_params["customer"] = customer_id
             cloned = stripe.PaymentMethod.create(**clone_params)
             resolved_pm_id = cloned.id
-        except Exception:
+        except Exception as clone_err:
+            logging.getLogger(__name__).warning("PaymentMethod clone attempt: %s", clone_err)
             resolved_pm_id = payload.payment_method_id
 
-    # If subscription:
-    if payload.subscription_id:
+    # 3. If this is a subscription, configure subscription default payment method
+    if resolved_sub_id:
         try:
-            sub = stripe.Subscription.retrieve(
-                payload.subscription_id,
-                expand=["latest_invoice.payment_intent"],
-                **stripe_kwargs,
-            )
-            customer_id = sub.customer if isinstance(sub.customer, str) else getattr(sub.customer, "id", None)
             if customer_id:
                 try:
                     stripe.PaymentMethod.attach(resolved_pm_id, customer=customer_id, **stripe_kwargs)
                 except Exception:
                     pass
                 try:
-                    stripe.Customer.modify(customer_id, invoice_settings={"default_payment_method": resolved_pm_id}, **stripe_kwargs)
+                    stripe.Customer.modify(
+                        customer_id,
+                        invoice_settings={"default_payment_method": resolved_pm_id},
+                        **stripe_kwargs,
+                    )
                 except Exception:
                     pass
 
             stripe.Subscription.modify(
-                payload.subscription_id,
+                resolved_sub_id,
                 default_payment_method=resolved_pm_id,
                 **stripe_kwargs,
             )
+        except Exception as sub_mod_err:
+            logging.getLogger(__name__).warning("Subscription modify exception: %s", sub_mod_err)
 
-            inv = sub.latest_invoice
-            inv_id = inv if isinstance(inv, str) else getattr(inv, "id", None)
-            resolved_id = payload.subscription_id
-            if inv_id:
-                try:
-                    paid_inv = stripe.Invoice.pay(inv_id, payment_method=resolved_pm_id, **stripe_kwargs)
-                    pi = getattr(paid_inv, "payment_intent", None)
-                    pi_id = pi if isinstance(pi, str) else getattr(pi, "id", None)
-                    if pi_id:
-                        resolved_id = pi_id
-                except Exception:
-                    pass
-
-            # Automatically record donation in database
-            try:
-                pi_obj, resolved_acct = retrieve_payment_intent(
-                    resolved_id,
-                    stripe_account=payload.stripe_account,
-                    expand=["payment_method", "latest_charge"],
-                )
-                if pi_obj:
-                    row = _ensure_donation_org(
-                        _donation_row_from_intent(pi_obj, stripe_account=resolved_acct)
-                    )
-                    row["status"] = "succeeded"
-                    saved = insert_donation(row)
-                    if saved:
-                        _send_donation_emails_safe(saved)
-            except Exception as auto_rec_err:
-                logging.getLogger(__name__).warning("Wallet auto-record exception: %s", auto_rec_err)
-
-            return ConfirmWalletResponse(status="succeeded", id=resolved_id)
-        except HTTPException:
-            raise
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=str(e))
-
-    # If payment_intent:
-    if payload.payment_intent_id:
+    # 4. Confirm the PaymentIntent to actually charge the payment
+    confirmed_pi = None
+    if resolved_pi_id:
         try:
-            pi = stripe.PaymentIntent.confirm(
-                payload.payment_intent_id,
+            confirmed_pi = stripe.PaymentIntent.confirm(
+                resolved_pi_id,
                 payment_method=resolved_pm_id,
                 **stripe_kwargs,
             )
-            if pi.status == "requires_action":
+            if confirmed_pi.status == "requires_action":
                 return ConfirmWalletResponse(
                     status="requires_action",
-                    id=pi.id,
-                    client_secret=pi.client_secret,
+                    id=confirmed_pi.id,
+                    client_secret=confirmed_pi.client_secret,
                     requires_action=True,
                 )
-            if pi.status in {"succeeded", "processing"}:
-                try:
-                    row = _ensure_donation_org(
-                        _donation_row_from_intent(pi, stripe_account=payload.stripe_account)
-                    )
-                    row["status"] = "succeeded"
-                    saved = insert_donation(row)
-                    if saved:
-                        _send_donation_emails_safe(saved)
-                except Exception as auto_rec_err:
-                    logging.getLogger(__name__).warning("Wallet auto-record exception: %s", auto_rec_err)
-                return ConfirmWalletResponse(status="succeeded", id=pi.id)
-            raise HTTPException(status_code=400, detail=f"Payment status: {pi.status}")
-        except HTTPException:
-            raise
+        except stripe.error.StripeError as confirm_err:
+            if "already succeeded" in str(confirm_err).lower():
+                pass
+            else:
+                logging.getLogger(__name__).error("PaymentIntent confirm error: %s", confirm_err)
+                raise HTTPException(status_code=400, detail=str(confirm_err.user_message or confirm_err))
         except Exception as e:
             raise HTTPException(status_code=400, detail=str(e))
 
-    return ConfirmWalletResponse(status="succeeded", id=payload.payment_intent_id or payload.subscription_id)
+    # 5. If subscription invoice needs to be paid (if PI confirm didn't already pay it)
+    if resolved_sub_id and (not confirmed_pi or confirmed_pi.status not in {"succeeded", "processing"}):
+        try:
+            sub = stripe.Subscription.retrieve(
+                resolved_sub_id,
+                expand=["latest_invoice.payment_intent"],
+                **stripe_kwargs,
+            )
+            inv = sub.latest_invoice
+            inv_id = inv if isinstance(inv, str) else getattr(inv, "id", None)
+            if inv_id:
+                stripe.Invoice.pay(inv_id, payment_method=resolved_pm_id, **stripe_kwargs)
+        except Exception as pay_err:
+            logging.getLogger(__name__).warning("Invoice pay exception: %s", pay_err)
+
+    # 6. Record donation in database
+    target_id = resolved_pi_id or resolved_sub_id
+    if target_id:
+        try:
+            pi_obj, resolved_acct = retrieve_payment_intent(
+                target_id,
+                stripe_account=payload.stripe_account,
+                expand=["payment_method", "latest_charge"],
+            )
+            if pi_obj:
+                row = _ensure_donation_org(
+                    _donation_row_from_intent(pi_obj, stripe_account=resolved_acct)
+                )
+                row["status"] = "succeeded"
+                saved = insert_donation(row)
+                if saved:
+                    _send_donation_emails_safe(saved)
+        except Exception as auto_rec_err:
+            logging.getLogger(__name__).warning("Wallet auto-record exception: %s", auto_rec_err)
+
+    return ConfirmWalletResponse(status="succeeded", id=resolved_pi_id or resolved_sub_id)
 
 
 def _metadata_from_payment_intent(
