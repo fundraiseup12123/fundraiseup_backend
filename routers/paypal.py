@@ -10,7 +10,7 @@ from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 
-from db import rest_get_one, rest_insert
+from db import rest_get_one, rest_insert, rest_upsert
 from frontend_url import resolve_frontend_url
 from currency import (
     calculate_total_with_fees,
@@ -717,7 +717,7 @@ def paypal_prepare_redirect(payload: PreparePayPalRedirectRequest) -> dict[str, 
                 approve_url = created.get("approve_url")
                 if not approve_url:
                     raise RuntimeError("PayPal did not return an approval link")
-                _save_paypal_checkout(
+                _store_paypal_checkout(
                     payment_ref=payment_ref,
                     payload=payload,
                     subscription_id=str(created["subscription_id"]),
@@ -754,7 +754,7 @@ def paypal_prepare_redirect(payload: PreparePayPalRedirectRequest) -> dict[str, 
         if not approve_url:
             raise HTTPException(status_code=502, detail="PayPal did not return an approval link")
 
-        _save_paypal_checkout(
+        _store_paypal_checkout(
             payment_ref=payment_ref,
             payload=payload,
             order_id=order_id,

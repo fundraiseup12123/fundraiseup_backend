@@ -131,6 +131,16 @@ def rest_insert(
     return result
 
 
+def rest_upsert(
+    table: str,
+    row: dict[str, Any] | list[dict[str, Any]],
+    *,
+    on_conflict: str,
+    user_jwt: str | None = None,
+) -> dict[str, Any] | list[dict[str, Any]] | None:
+    return rest_insert(table, row, user_jwt=user_jwt, on_conflict=on_conflict)
+
+
 def rest_insert_result(
     table: str,
     row: dict[str, Any] | list[dict[str, Any]],
