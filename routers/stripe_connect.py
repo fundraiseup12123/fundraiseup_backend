@@ -357,8 +357,126 @@ def stripe_account_accessible(account_id: str | None) -> bool:
         return False
 
 
-def resolve_stripe_account_for_checkout(org_id: str, campaign_id: str) -> tuple[str | None, dict[str, Any] | None]:
-    from routers.payment_accounts import resolve_platform_stripe_for_campaign, uses_platform_provider
+def get_today_stripe_account_volume(
+    stripe_account_id: str | None,
+    campaign_id: str | None = None,
+) -> float:
+    """Calculate total USD volume processed by this Stripe account today (UTC)."""
+    if not stripe_account_id:
+        return 0.0
+    from datetime import datetime, timezone
+
+    now_utc = datetime.now(timezone.utc)
+    start_of_day = now_utc.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+
+    params: dict[str, str] = {
+        "status": "in.(succeeded,processing)",
+        "created_at": f"gte.{start_of_day}",
+        "select": "amount,base_amount,currency,stripe_account_id",
+        "limit": "5000",
+    }
+    if campaign_id:
+        params["campaign_id"] = f"eq.{campaign_id}"
+
+    rows = rest_get("donations", params=params)
+    total = 0.0
+    target_str = str(stripe_account_id).strip().lower()
+    for r in rows:
+        acct = str(r.get("stripe_account_id") or "").strip().lower()
+        if acct == target_str:
+            amt = float(r.get("base_amount") or r.get("amount") or 0.0)
+            total += amt
+    return total
+
+
+def resolve_stripe_account_for_checkout(
+    org_id: str,
+    campaign_id: str,
+    donation_amount: float = 0.0,
+    currency: str = "USD",
+) -> tuple[str | None, dict[str, Any] | None]:
+    from routers.payment_accounts import (
+        resolve_platform_stripe_account,
+        resolve_platform_stripe_for_campaign,
+        resolve_root_stripe_account,
+        uses_platform_provider,
+    )
+
+    campaign = (
+        rest_get_one(
+            "campaigns",
+            params={"id": f"eq.{campaign_id}", "select": "*"},
+        )
+        if campaign_id
+        else None
+    )
+
+    # Check for Dual Stripe Account Waterfall mode
+    sources = (campaign or {}).get("payment_account_sources") or {}
+    routing_mode = sources.get("stripe_routing_mode") or "single"
+    new_acct_ref = sources.get("stripe_new_account_id") or (campaign or {}).get("stripe_account_id")
+    old_acct_ref = sources.get("stripe_old_account_id") or (campaign or {}).get("platform_stripe_account_id")
+    raw_limit = sources.get("stripe_new_daily_limit")
+    try:
+        daily_limit = float(raw_limit) if raw_limit is not None else 0.0
+    except (ValueError, TypeError):
+        daily_limit = 0.0
+
+    if routing_mode == "dual_limit" and new_acct_ref and daily_limit > 0:
+        # Resolve new Stripe account string
+        resolved_new: str | None = None
+        new_str = str(new_acct_ref).strip()
+        if len(new_str) == 36 and "-" in new_str:
+            acct_row = rest_get_one(
+                "stripe_accounts",
+                params={"id": f"eq.{new_str}", "select": "stripe_account_id"},
+            )
+            if acct_row and acct_row.get("stripe_account_id"):
+                resolved_new = str(acct_row["stripe_account_id"]).strip()
+        elif new_str.startswith("acct_"):
+            resolved_new = new_str
+
+        # Calculate today's volume on new account
+        today_volume = get_today_stripe_account_volume(resolved_new or new_str, campaign_id=campaign_id)
+
+        if resolved_new and today_volume < daily_limit:
+            # Under limit -> use New Account
+            return resolved_new, {
+                "stripe_account": resolved_new,
+                "stripe_account_type": "new",
+                "daily_volume": today_volume,
+                "daily_limit": daily_limit,
+            }
+        else:
+            # Daily limit reached or new account not ready -> fallback to Old Account
+            resolved_old: str | None = None
+            if old_acct_ref:
+                old_str = str(old_acct_ref).strip()
+                if len(old_str) == 36 and "-" in old_str:
+                    resolved_old = resolve_platform_stripe_account(old_str)
+                    if not resolved_old:
+                        acct_row = rest_get_one(
+                            "stripe_accounts",
+                            params={"id": f"eq.{old_str}", "select": "stripe_account_id"},
+                        )
+                        if acct_row and acct_row.get("stripe_account_id"):
+                            resolved_old = str(acct_row["stripe_account_id"]).strip()
+                elif old_str.startswith("acct_"):
+                    resolved_old = old_str
+
+            if not resolved_old:
+                resolved_old = (
+                    resolve_platform_stripe_for_campaign(campaign_id)
+                    or resolve_root_stripe_account("homepage")
+                )
+
+            return resolved_old, {
+                "stripe_account": resolved_old,
+                "stripe_account_type": "old",
+                "daily_volume": today_volume,
+                "daily_limit": daily_limit,
+                "reason": "daily_limit_exceeded" if resolved_new else "fallback",
+            }
 
     if uses_platform_provider(org_id, "stripe", campaign_id):
         account_id = resolve_platform_stripe_for_campaign(campaign_id)
@@ -372,3 +490,4 @@ def resolve_stripe_account_for_checkout(org_id: str, campaign_id: str) -> tuple[
     if not stripe_account_accessible(account_id):
         return None, None
     return account_id, {"stripe_account": account_id}
+

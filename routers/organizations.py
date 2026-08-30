@@ -800,6 +800,52 @@ def duplicate_campaign(
     return get_campaign(org_id, new_id, user)
 
 
+@router.get("/{org_id}/campaigns/{campaign_id}/stripe-waterfall-status")
+def get_campaign_stripe_waterfall_status(
+    org_id: str,
+    campaign_id: str,
+    user: Annotated[AuthUser, Depends(require_auth)],
+) -> dict[str, Any]:
+    require_org_access(org_id, user, min_role="member")
+    from datetime import datetime, timedelta, timezone
+    from routers.stripe_connect import get_today_stripe_account_volume
+
+    campaign = rest_get_one(
+        "campaigns",
+        params={"id": f"eq.{campaign_id}", "organization_id": f"eq.{org_id}", "select": "*"},
+    )
+    if not campaign:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+
+    sources = campaign.get("payment_account_sources") or {}
+    routing_mode = sources.get("stripe_routing_mode") or "single"
+    new_acct = sources.get("stripe_new_account_id") or campaign.get("stripe_account_id")
+    old_acct = sources.get("stripe_old_account_id") or campaign.get("platform_stripe_account_id")
+    raw_limit = sources.get("stripe_new_daily_limit")
+    try:
+        daily_limit = float(raw_limit) if raw_limit is not None else 0.0
+    except (ValueError, TypeError):
+        daily_limit = 0.0
+
+    today_vol = get_today_stripe_account_volume(str(new_acct) if new_acct else None, campaign_id=campaign_id)
+    limit_reached = bool(daily_limit > 0 and today_vol >= daily_limit)
+
+    now_utc = datetime.now(timezone.utc)
+    next_midnight = (now_utc + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+
+    return {
+        "routing_mode": routing_mode,
+        "stripe_new_account_id": new_acct,
+        "stripe_old_account_id": old_acct,
+        "stripe_new_daily_limit": daily_limit,
+        "today_volume": today_vol,
+        "remaining_allowance": max(0.0, daily_limit - today_vol) if daily_limit > 0 else 0.0,
+        "active_target": "old" if limit_reached else "new",
+        "limit_exceeded": limit_reached,
+        "resets_at": next_midnight.isoformat(),
+    }
+
+
 @router.patch("/{org_id}/campaigns/{campaign_id}")
 def update_campaign(
     org_id: str,

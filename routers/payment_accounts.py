@@ -550,12 +550,16 @@ def resolve_root_paypal_account(checkout_view: str | None) -> dict[str, Any] | N
     return None
 
 
-def normalize_payment_account_sources(raw: object) -> dict[str, str]:
-    defaults = {
+def normalize_payment_account_sources(raw: object) -> dict[str, Any]:
+    defaults: dict[str, Any] = {
         "stripe": "organization",
         "paypal": "organization",
         "nowpayments": "organization",
         "authorizenet": "organization",
+        "stripe_routing_mode": "single",
+        "stripe_new_account_id": None,
+        "stripe_old_account_id": None,
+        "stripe_new_daily_limit": None,
     }
     data = raw
     if isinstance(data, str):
@@ -566,10 +570,26 @@ def normalize_payment_account_sources(raw: object) -> dict[str, str]:
     if not isinstance(data, dict):
         return defaults
     normalized = dict(defaults)
-    for key in defaults:
+    for key in ("stripe", "paypal", "nowpayments", "authorizenet"):
         value = str(data.get(key) or "").strip().lower()
         if value in {"platform", "organization"}:
             normalized[key] = value
+
+    routing_mode = str(data.get("stripe_routing_mode") or "").strip().lower()
+    normalized["stripe_routing_mode"] = "dual_limit" if routing_mode == "dual_limit" else "single"
+
+    if data.get("stripe_new_account_id"):
+        normalized["stripe_new_account_id"] = str(data["stripe_new_account_id"]).strip() or None
+    if data.get("stripe_old_account_id"):
+        normalized["stripe_old_account_id"] = str(data["stripe_old_account_id"]).strip() or None
+
+    raw_limit = data.get("stripe_new_daily_limit")
+    if raw_limit is not None and str(raw_limit).strip() != "":
+        try:
+            val = float(raw_limit)
+            normalized["stripe_new_daily_limit"] = val if val > 0 else None
+        except (ValueError, TypeError):
+            normalized["stripe_new_daily_limit"] = None
     return normalized
 
 
