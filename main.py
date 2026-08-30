@@ -1454,6 +1454,7 @@ from routers.ai_content import router as ai_content_router
 from routers.testing_paypal import router as testing_paypal_router
 from routers.conversion_events import router as conversion_events_router
 from routers.donor_broadcast import router as donor_broadcast_router
+from routers.binance_pay import router as binance_pay_router
 
 app.include_router(super_admin_router)
 app.include_router(platform_data_router)
@@ -1468,6 +1469,7 @@ app.include_router(paypal_router)
 app.include_router(paypal_connect_router)
 app.include_router(authorizenet_router)
 app.include_router(nowpayments_router)
+app.include_router(binance_pay_router)
 app.include_router(emails_router)
 app.include_router(uploads_router)
 app.include_router(donor_portal_router)
