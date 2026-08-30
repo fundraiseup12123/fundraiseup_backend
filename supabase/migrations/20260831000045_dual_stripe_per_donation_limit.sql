@@ -4,4 +4,4 @@
 ALTER TABLE public.campaigns
   ADD COLUMN IF NOT EXISTS stripe_new_per_donation_limit numeric;
 
-COMMENT ON COLUMN public.campaigns.stripe_new_per_donation_limit IS 'Max per-donation volume (USD) for new account before routing to old account';
+COMMENT ON COLUMN public.campaigns.stripe_new_per_donation_limit IS 'Max per-donation volume (GBP £) for new account before routing to old account';
