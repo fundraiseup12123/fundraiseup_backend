@@ -1469,21 +1469,32 @@ def resolve_root_nowpayments_account(checkout_view: str | None) -> dict[str, Any
     entry = accounts.get(view, {})
     api_key = entry.get("nowpayments_api_key")
     ipn_secret = entry.get("nowpayments_ipn_secret")
-    if not api_key or not ipn_secret:
-        if view == "landing":
-            return resolve_root_nowpayments_account("popup") or resolve_root_nowpayments_account("homepage")
-        return None
     status = entry.get("nowpayments_connection_status")
-    if status and status not in ("active", "pending", "connected", None):
-        if view == "landing":
-            return resolve_root_nowpayments_account("popup") or resolve_root_nowpayments_account("homepage")
-        return None
-    return {
-        "api_key": api_key,
-        "ipn_secret": ipn_secret,
-        "api_key_hint": entry.get("nowpayments_api_key_hint"),
-        "connection_status": status or "active",
-    }
+    if api_key and ipn_secret:
+        if not status or status in ("active", "pending", "connected"):
+            return {
+                "api_key": api_key,
+                "ipn_secret": ipn_secret,
+                "api_key_hint": entry.get("nowpayments_api_key_hint"),
+                "connection_status": status or "active",
+            }
+    # Fallback to other views if not configured specifically on the requested view
+    for fallback_view in ("popup", "homepage", "landing"):
+        if fallback_view == view:
+            continue
+        alt_entry = accounts.get(fallback_view, {})
+        alt_key = alt_entry.get("nowpayments_api_key")
+        alt_ipn = alt_entry.get("nowpayments_ipn_secret")
+        alt_status = alt_entry.get("nowpayments_connection_status")
+        if alt_key and alt_ipn:
+            if not alt_status or alt_status in ("active", "pending", "connected"):
+                return {
+                    "api_key": alt_key,
+                    "ipn_secret": alt_ipn,
+                    "api_key_hint": alt_entry.get("nowpayments_api_key_hint"),
+                    "connection_status": alt_status or "active",
+                }
+    return None
 
 
 class NowPaymentsAttachPayload(BaseModel):

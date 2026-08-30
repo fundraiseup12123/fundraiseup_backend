@@ -225,11 +225,16 @@ def resolve_nowpayments_account_for_checkout(
             "campaigns",
             params={"id": f"eq.{campaign_id}", "select": "id,organization_id,nowpayments_account_id"},
         )
+        if not campaign:
+            campaign = rest_get_one(
+                "campaigns",
+                params={"slug": f"eq.{campaign_id}", "select": "id,organization_id,nowpayments_account_id"},
+            )
         if campaign:
             org_id = campaign["organization_id"]
             from routers.payment_accounts import uses_platform_provider
 
-            if uses_platform_provider(str(org_id), "nowpayments", str(campaign_id)):
+            if uses_platform_provider(str(org_id), "nowpayments", str(campaign.get("id") or campaign_id)):
                 return pick(resolve_root_nowpayments_account(checkout_view))
 
             if campaign.get("nowpayments_account_id"):
