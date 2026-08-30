@@ -1233,15 +1233,36 @@ def confirm_wallet(payload: ConfirmWalletRequest) -> ConfirmWalletResponse:
 
             inv = sub.latest_invoice
             inv_id = inv if isinstance(inv, str) else getattr(inv, "id", None)
+            resolved_id = payload.subscription_id
             if inv_id:
                 try:
                     paid_inv = stripe.Invoice.pay(inv_id, payment_method=resolved_pm_id, **stripe_kwargs)
                     pi = getattr(paid_inv, "payment_intent", None)
                     pi_id = pi if isinstance(pi, str) else getattr(pi, "id", None)
-                    return ConfirmWalletResponse(status="succeeded", id=pi_id or payload.subscription_id)
+                    if pi_id:
+                        resolved_id = pi_id
                 except Exception:
                     pass
-            return ConfirmWalletResponse(status="succeeded", id=payload.subscription_id)
+
+            # Automatically record donation in database
+            try:
+                pi_obj, resolved_acct = retrieve_payment_intent(
+                    resolved_id,
+                    stripe_account=payload.stripe_account,
+                    expand=["payment_method", "latest_charge"],
+                )
+                if pi_obj:
+                    row = _ensure_donation_org(
+                        _donation_row_from_intent(pi_obj, stripe_account=resolved_acct)
+                    )
+                    row["status"] = "succeeded"
+                    saved = insert_donation(row)
+                    if saved:
+                        _send_donation_emails_safe(saved)
+            except Exception as auto_rec_err:
+                logging.getLogger(__name__).warning("Wallet auto-record exception: %s", auto_rec_err)
+
+            return ConfirmWalletResponse(status="succeeded", id=resolved_id)
         except HTTPException:
             raise
         except Exception as e:
@@ -1263,6 +1284,16 @@ def confirm_wallet(payload: ConfirmWalletRequest) -> ConfirmWalletResponse:
                     requires_action=True,
                 )
             if pi.status in {"succeeded", "processing"}:
+                try:
+                    row = _ensure_donation_org(
+                        _donation_row_from_intent(pi, stripe_account=payload.stripe_account)
+                    )
+                    row["status"] = "succeeded"
+                    saved = insert_donation(row)
+                    if saved:
+                        _send_donation_emails_safe(saved)
+                except Exception as auto_rec_err:
+                    logging.getLogger(__name__).warning("Wallet auto-record exception: %s", auto_rec_err)
                 return ConfirmWalletResponse(status="succeeded", id=pi.id)
             raise HTTPException(status_code=400, detail=f"Payment status: {pi.status}")
         except HTTPException:
