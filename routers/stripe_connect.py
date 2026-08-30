@@ -417,12 +417,17 @@ def resolve_stripe_account_for_checkout(
     new_acct_ref = sources.get("stripe_new_account_id") or (campaign or {}).get("stripe_account_id")
     old_acct_ref = sources.get("stripe_old_account_id") or (campaign or {}).get("platform_stripe_account_id")
     raw_limit = sources.get("stripe_new_daily_limit")
+    raw_per_donation = sources.get("stripe_new_per_donation_limit")
     try:
         daily_limit = float(raw_limit) if raw_limit is not None else 0.0
     except (ValueError, TypeError):
         daily_limit = 0.0
+    try:
+        per_donation_limit = float(raw_per_donation) if raw_per_donation is not None else 0.0
+    except (ValueError, TypeError):
+        per_donation_limit = 0.0
 
-    if routing_mode == "dual_limit" and new_acct_ref and daily_limit > 0:
+    if routing_mode == "dual_limit" and new_acct_ref and (daily_limit > 0 or per_donation_limit > 0):
         # Resolve new Stripe account string
         resolved_new: str | None = None
         new_str = str(new_acct_ref).strip()
@@ -439,16 +444,22 @@ def resolve_stripe_account_for_checkout(
         # Calculate today's volume on new account
         today_volume = get_today_stripe_account_volume(resolved_new or new_str, campaign_id=campaign_id)
 
-        if resolved_new and today_volume < daily_limit:
-            # Under limit -> use New Account
+        # Check per-donation limit and daily limit
+        per_donation_exceeded = bool(per_donation_limit > 0 and donation_amount > per_donation_limit)
+        daily_exceeded = bool(daily_limit > 0 and today_volume >= daily_limit)
+
+        if resolved_new and not per_donation_exceeded and not daily_exceeded:
+            # Under limits -> use New Account
             return resolved_new, {
                 "stripe_account": resolved_new,
                 "stripe_account_type": "new",
                 "daily_volume": today_volume,
                 "daily_limit": daily_limit,
+                "per_donation_limit": per_donation_limit,
+                "donation_amount": donation_amount,
             }
         else:
-            # Daily limit reached or new account not ready -> fallback to Old Account
+            # Per-donation limit exceeded, daily limit reached, or new account not ready -> fallback to Old Account
             resolved_old: str | None = None
             if old_acct_ref:
                 old_str = str(old_acct_ref).strip()
@@ -470,12 +481,15 @@ def resolve_stripe_account_for_checkout(
                     or resolve_root_stripe_account("homepage")
                 )
 
+            reason = "per_donation_limit_exceeded" if per_donation_exceeded else ("daily_limit_exceeded" if daily_exceeded else "fallback")
             return resolved_old, {
                 "stripe_account": resolved_old,
                 "stripe_account_type": "old",
                 "daily_volume": today_volume,
                 "daily_limit": daily_limit,
-                "reason": "daily_limit_exceeded" if resolved_new else "fallback",
+                "per_donation_limit": per_donation_limit,
+                "donation_amount": donation_amount,
+                "reason": reason,
             }
 
     if uses_platform_provider(org_id, "stripe", campaign_id):

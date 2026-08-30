@@ -56,3 +56,4 @@
 --   042_backfill_paypal_payment_methods.sql
 --   043_dual_stripe_waterfall.sql
 --   044_campaign_tiktok_pixel_id.sql
+--   045_dual_stripe_per_donation_limit.sql

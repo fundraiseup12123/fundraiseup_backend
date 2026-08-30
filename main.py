@@ -919,7 +919,10 @@ def create_checkout(payload: CreateCheckoutRequest) -> CheckoutResponse:
             campaign_slug = campaign["slug"]
             if not use_platform_payment_accounts:
                 stripe_account, _ = resolve_stripe_account_for_checkout(
-                    organization_id, payload.campaign_id
+                    organization_id,
+                    payload.campaign_id,
+                    donation_amount=payload.amount,
+                    currency=payload.currency,
                 )
         elif payload.campaign_id != ROOT_CAMPAIGN_ID:
             raise HTTPException(status_code=400, detail="Campaign is not available for checkout")

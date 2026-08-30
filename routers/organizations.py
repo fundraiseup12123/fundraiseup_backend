@@ -822,10 +822,15 @@ def get_campaign_stripe_waterfall_status(
     new_acct = sources.get("stripe_new_account_id") or campaign.get("stripe_account_id")
     old_acct = sources.get("stripe_old_account_id") or campaign.get("platform_stripe_account_id")
     raw_limit = sources.get("stripe_new_daily_limit")
+    raw_per_donation = sources.get("stripe_new_per_donation_limit")
     try:
         daily_limit = float(raw_limit) if raw_limit is not None else 0.0
     except (ValueError, TypeError):
         daily_limit = 0.0
+    try:
+        per_donation_limit = float(raw_per_donation) if raw_per_donation is not None else 0.0
+    except (ValueError, TypeError):
+        per_donation_limit = 0.0
 
     today_vol = get_today_stripe_account_volume(str(new_acct) if new_acct else None, campaign_id=campaign_id)
     limit_reached = bool(daily_limit > 0 and today_vol >= daily_limit)
@@ -838,6 +843,7 @@ def get_campaign_stripe_waterfall_status(
         "stripe_new_account_id": new_acct,
         "stripe_old_account_id": old_acct,
         "stripe_new_daily_limit": daily_limit,
+        "stripe_new_per_donation_limit": per_donation_limit,
         "today_volume": today_vol,
         "remaining_allowance": max(0.0, daily_limit - today_vol) if daily_limit > 0 else 0.0,
         "active_target": "old" if limit_reached else "new",

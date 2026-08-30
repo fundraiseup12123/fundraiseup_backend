@@ -560,6 +560,7 @@ def normalize_payment_account_sources(raw: object) -> dict[str, Any]:
         "stripe_new_account_id": None,
         "stripe_old_account_id": None,
         "stripe_new_daily_limit": None,
+        "stripe_new_per_donation_limit": None,
     }
     data = raw
     if isinstance(data, str):
@@ -590,6 +591,14 @@ def normalize_payment_account_sources(raw: object) -> dict[str, Any]:
             normalized["stripe_new_daily_limit"] = val if val > 0 else None
         except (ValueError, TypeError):
             normalized["stripe_new_daily_limit"] = None
+
+    raw_per_donation = data.get("stripe_new_per_donation_limit")
+    if raw_per_donation is not None and str(raw_per_donation).strip() != "":
+        try:
+            val = float(raw_per_donation)
+            normalized["stripe_new_per_donation_limit"] = val if val > 0 else None
+        except (ValueError, TypeError):
+            normalized["stripe_new_per_donation_limit"] = None
 
     for k, v in data.items():
         if k not in normalized:
