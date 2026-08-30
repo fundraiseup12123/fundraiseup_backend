@@ -135,13 +135,7 @@ def _default_campaign_content(name: str) -> dict[str, Any]:
             "primary_color": root.get("primary_color") or "#3872DC",
             "logo_url": root.get("logo_url"),
             "logo_width": root.get("logo_width") or 80,
-            "logo_height": root.get("logo_height") or 80,
-            "hero_url": root.get("hero_url"),
-            "hero_width": root.get("hero_width") or 1248,
-            "hero_height": root.get("hero_height") or 702,
-            "hero_alt": root.get("hero_alt"),
-            "favicon_url": root.get("favicon_url"),
-            "show_donor_country": bool(root.get("show_donor_country") or False),
+            "show_donor_country": bool(root.get("show_donor_country")),
             "recent_donations_sort": (
                 root.get("recent_donations_sort")
                 if root.get("recent_donations_sort") in {"recent", "descending"}
@@ -156,7 +150,7 @@ def _default_campaign_content(name: str) -> dict[str, Any]:
             "gtm_container_id": root.get("gtm_container_id") or None,
             "ga4_property_id": root.get("ga4_property_id") or None,
             "meta_pixel_id": root.get("meta_pixel_id") or None,
-            "tiktok_pixel_id": root.get("tiktok_pixel_id") or None,
+            "tiktok_pixel_id": root.get("tiktok_pixel_id") or DEFAULT_TIKTOK_PIXEL_IDS,
             "title_html": None,
             "title_font_size": root.get("title_font_size"),
             "body_font_size": root.get("body_font_size"),
@@ -171,7 +165,7 @@ def _default_campaign_content(name: str) -> dict[str, Any]:
         "gtm_container_id": None,
         "ga4_property_id": None,
         "meta_pixel_id": None,
-        "tiktok_pixel_id": None,
+        "tiktok_pixel_id": DEFAULT_TIKTOK_PIXEL_IDS,
         "title_html": None,
         "title_font_size": None,
         "body_font_size": None,
