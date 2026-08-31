@@ -534,16 +534,10 @@ def paypal_client_token(
     campaign_id: str | None = Query(None),
     checkout_view: Literal["homepage", "popup", "landing"] = Query("homepage"),
 ) -> dict[str, object]:
-    """Client token for Advanced Card Fields when payment_processor=paypal (keys account)."""
+    """Client token for Advanced Card Fields when payment_processor=paypal or PayPal overflow is active."""
     from paypal_client import create_paypal_client_token
-    from routers.payment_accounts import resolve_payment_processor
     from routers.paypal_connect import _account_has_keys, resolve_paypal_account_for_checkout
 
-    if resolve_payment_processor(None, campaign_id) not in {"paypal", "authorizenet_paypal"}:
-        raise HTTPException(
-            status_code=400,
-            detail="PayPal processor is not enabled for this campaign",
-        )
     account = resolve_paypal_account_for_checkout(campaign_id, checkout_view)
     if not _account_has_keys(account):
         raise HTTPException(
