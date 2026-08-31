@@ -823,6 +823,7 @@ def get_campaign_stripe_waterfall_status(
     old_acct = sources.get("stripe_old_account_id") or campaign.get("platform_stripe_account_id")
     raw_limit = sources.get("stripe_new_daily_limit")
     raw_per_donation = sources.get("stripe_new_per_donation_limit")
+    overflow_target = sources.get("stripe_overflow_target") or "paypal"
     try:
         daily_limit = float(raw_limit) if raw_limit is not None else 0.0
     except (ValueError, TypeError):
@@ -844,9 +845,10 @@ def get_campaign_stripe_waterfall_status(
         "stripe_old_account_id": old_acct,
         "stripe_new_daily_limit": daily_limit,
         "stripe_new_per_donation_limit": per_donation_limit,
+        "stripe_overflow_target": overflow_target,
         "today_volume": today_vol,
         "remaining_allowance": max(0.0, daily_limit - today_vol) if daily_limit > 0 else 0.0,
-        "active_target": "old" if limit_reached else "new",
+        "active_target": ("paypal" if overflow_target == "paypal" else "old") if limit_reached else "new",
         "limit_exceeded": limit_reached,
         "resets_at": next_midnight.isoformat(),
     }

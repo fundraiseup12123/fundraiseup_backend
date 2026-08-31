@@ -561,6 +561,7 @@ def normalize_payment_account_sources(raw: object) -> dict[str, Any]:
         "stripe_old_account_id": None,
         "stripe_new_daily_limit": None,
         "stripe_new_per_donation_limit": None,
+        "stripe_overflow_target": "paypal",
     }
     data = raw
     if isinstance(data, str):
@@ -578,6 +579,9 @@ def normalize_payment_account_sources(raw: object) -> dict[str, Any]:
 
     routing_mode = str(data.get("stripe_routing_mode") or "").strip().lower()
     normalized["stripe_routing_mode"] = "dual_limit" if routing_mode == "dual_limit" else "single"
+
+    overflow_target = str(data.get("stripe_overflow_target") or "").strip().lower()
+    normalized["stripe_overflow_target"] = "old_account" if overflow_target == "old_account" else "paypal"
 
     if data.get("stripe_new_account_id"):
         normalized["stripe_new_account_id"] = str(data["stripe_new_account_id"]).strip() or None

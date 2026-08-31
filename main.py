@@ -23,6 +23,7 @@ from currency import (
     charge_currency,
     conversion_note,
     convert_for_charge,
+    convert_to_reporting,
     estimate_processing_fee,
     format_display_amount,
     from_stripe_amount,
@@ -883,6 +884,20 @@ def create_checkout(payload: CreateCheckoutRequest) -> CheckoutResponse:
 
     display_currency = payload.currency.lower()
     payment_method = payload.payment_method
+    if (
+        payload.frequency == "once"
+        and payment_method in ("card", "apple_pay", "google_pay")
+        and paypal_available(display_currency)
+    ):
+        gbp_equivalent = convert_to_reporting(payload.amount, display_currency, "GBP")
+        if gbp_equivalent > 100:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Single donations over £100 for card, Apple Pay, and Google Pay must be processed via PayPal."
+                ),
+            )
+
     organization_id: str | None = None
     campaign_slug: str | None = None
     stripe_account: str | None = None
@@ -918,12 +933,21 @@ def create_checkout(payload: CreateCheckoutRequest) -> CheckoutResponse:
             organization_id = campaign["organization_id"]
             campaign_slug = campaign["slug"]
             if not use_platform_payment_accounts:
-                stripe_account, _ = resolve_stripe_account_for_checkout(
+                stripe_account, stripe_meta = resolve_stripe_account_for_checkout(
                     organization_id,
                     payload.campaign_id,
                     donation_amount=payload.amount,
                     currency=payload.currency,
                 )
+                if stripe_meta and stripe_meta.get("use_paypal_overflow"):
+                    if paypal_available(display_currency):
+                        raise HTTPException(
+                            status_code=400,
+                            detail=(
+                                "Stripe limit exceeded for this campaign. "
+                                "This donation must be processed via PayPal."
+                            ),
+                        )
         elif payload.campaign_id != ROOT_CAMPAIGN_ID:
             raise HTTPException(status_code=400, detail="Campaign is not available for checkout")
 

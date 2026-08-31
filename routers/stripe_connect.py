@@ -418,6 +418,7 @@ def resolve_stripe_account_for_checkout(
     old_acct_ref = sources.get("stripe_old_account_id") or (campaign or {}).get("platform_stripe_account_id")
     raw_limit = sources.get("stripe_new_daily_limit")
     raw_per_donation = sources.get("stripe_new_per_donation_limit")
+    overflow_target = str(sources.get("stripe_overflow_target") or "").strip().lower()
     try:
         daily_limit = float(raw_limit) if raw_limit is not None else 0.0
     except (ValueError, TypeError):
@@ -459,6 +460,19 @@ def resolve_stripe_account_for_checkout(
                 "donation_amount": donation_amount,
             }
         else:
+            reason = "per_donation_limit_exceeded" if per_donation_exceeded else ("daily_limit_exceeded" if daily_exceeded else "fallback")
+            if overflow_target == "paypal":
+                return None, {
+                    "stripe_account": None,
+                    "stripe_account_type": "paypal_overflow",
+                    "use_paypal_overflow": True,
+                    "daily_volume": today_volume,
+                    "daily_limit": daily_limit,
+                    "per_donation_limit": per_donation_limit,
+                    "donation_amount": donation_amount,
+                    "reason": reason,
+                }
+
             # Per-donation limit exceeded, daily limit reached, or new account not ready -> fallback to Old Account
             resolved_old: str | None = None
             if old_acct_ref:
