@@ -884,19 +884,6 @@ def create_checkout(payload: CreateCheckoutRequest) -> CheckoutResponse:
 
     display_currency = payload.currency.lower()
     payment_method = payload.payment_method
-    if (
-        payload.frequency == "once"
-        and payment_method in ("card", "apple_pay", "google_pay")
-        and paypal_available(display_currency)
-    ):
-        gbp_equivalent = convert_to_reporting(payload.amount, display_currency, "GBP")
-        if gbp_equivalent > 100:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "Single donations over £100 for card, Apple Pay, and Google Pay must be processed via PayPal."
-                ),
-            )
 
     organization_id: str | None = None
     campaign_slug: str | None = None
