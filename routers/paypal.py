@@ -521,12 +521,7 @@ def paypal_checkout_config(
         "currency": paypal_checkout_currency(),
         "api_configured": paypal_configured() or keys_ready,
         "payment_processor": processor,
-        # Public client id for JS SDK when processor uses PayPal keys (paypal or hybrid GPay).
-        "client_id": (
-            str(account.get("client_id") or "")
-            if keys_ready and processor in {"paypal", "authorizenet_paypal"}
-            else ""
-        ),
+        "client_id": str(account.get("client_id") or "") if keys_ready else "",
         "paypal_env": env_value,
         "keys_source": str(account.get("keys_source") or "") if keys_ready else "",
         "subscriptions_ready": subscriptions_ready,
