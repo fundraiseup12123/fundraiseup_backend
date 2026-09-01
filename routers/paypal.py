@@ -526,6 +526,7 @@ def paypal_checkout_config(
         "keys_source": str(account.get("keys_source") or "") if keys_ready else "",
         "subscriptions_ready": subscriptions_ready,
         "subscriptions_detail": subscriptions_detail,
+        "apple_pay_domain_registered": bool(account.get("apple_pay_domain_registered") or account.get("apple_pay_registered", False)) if keys_ready and account else False,
     }
 
 
