@@ -545,8 +545,8 @@ def resolve_root_paypal_account(checkout_view: str | None) -> dict[str, Any] | N
             "connection_status": status or "active",
             "is_default": True,
         }
-    if view == "landing":
-        return resolve_root_paypal_account("popup") or resolve_root_paypal_account("homepage")
+    if view in {"landing", "popup"}:
+        return resolve_root_paypal_account("homepage")
     return None
 
 
@@ -682,7 +682,7 @@ def resolve_payment_account_sources(
 ) -> dict[str, str]:
     defaults = {
         "stripe": "organization",
-        "paypal": "organization",
+        "paypal": "platform",
         "nowpayments": "organization",
         "authorizenet": "organization",
     }
