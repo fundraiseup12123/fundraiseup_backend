@@ -428,22 +428,26 @@ def resolve_stripe_account_for_checkout(
     except (ValueError, TypeError):
         per_donation_limit = 0.0
 
-    if routing_mode == "dual_limit" and new_acct_ref and (daily_limit > 0 or per_donation_limit > 0):
+    if routing_mode == "dual_limit" and (daily_limit > 0 or per_donation_limit > 0):
         # Resolve new Stripe account string
         resolved_new: str | None = None
-        new_str = str(new_acct_ref).strip()
-        if len(new_str) == 36 and "-" in new_str:
-            acct_row = rest_get_one(
-                "stripe_accounts",
-                params={"id": f"eq.{new_str}", "select": "stripe_account_id"},
-            )
-            if acct_row and acct_row.get("stripe_account_id"):
-                resolved_new = str(acct_row["stripe_account_id"]).strip()
-        elif new_str.startswith("acct_"):
-            resolved_new = new_str
+        if new_acct_ref:
+            new_str = str(new_acct_ref).strip()
+            if len(new_str) == 36 and "-" in new_str:
+                acct_row = rest_get_one(
+                    "stripe_accounts",
+                    params={"id": f"eq.{new_str}", "select": "stripe_account_id"},
+                )
+                if acct_row and acct_row.get("stripe_account_id"):
+                    resolved_new = str(acct_row["stripe_account_id"]).strip()
+            elif new_str.startswith("acct_"):
+                resolved_new = new_str
+
+        if not resolved_new:
+            resolved_new = resolve_platform_stripe_for_campaign(campaign_id)
 
         # Calculate today's volume on new account
-        today_volume = get_today_stripe_account_volume(resolved_new or new_str, campaign_id=campaign_id)
+        today_volume = get_today_stripe_account_volume(resolved_new, campaign_id=campaign_id) if resolved_new else 0.0
 
         # Check per-donation limit and daily limit
         per_donation_exceeded = bool(per_donation_limit > 0 and donation_amount > per_donation_limit)
