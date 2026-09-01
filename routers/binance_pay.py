@@ -285,11 +285,16 @@ def prepare_binance_payment(payload: BinancePreparePayload) -> dict[str, Any]:
     coin = payload.coin.upper()
     network = payload.network.upper()
 
+    from currency import convert_to_reporting
+
     deposit_address = get_binance_deposit_address(coin, network)
     coin_price = get_crypto_price(coin)
     
-    # Calculate amount in chosen crypto
-    crypto_amount = payload.amount / coin_price if coin_price > 0 else payload.amount
+    # Convert donor amount (PKR, EUR, GBP, SAR, etc.) to USD for crypto conversion
+    usd_amount = convert_to_reporting(payload.amount, (payload.currency or "USD").upper(), "USD")
+
+    # Calculate amount in chosen crypto from USD equivalent
+    crypto_amount = usd_amount / coin_price if coin_price > 0 else usd_amount
     if coin in {"BTC", "ETH"}:
         crypto_amount_str = f"{crypto_amount:.6f}"
     elif coin == "SOL":
@@ -319,28 +324,21 @@ def prepare_binance_payment(payload: BinancePreparePayload) -> dict[str, Any]:
         "status": "pending",
         "payment_method": "binance_pay",
         "payment_processor": "binance",
-        "donor_first_name": donor_data.get("first_name"),
-        "donor_last_name": donor_data.get("last_name"),
-        "donor_email": donor_data.get("email"),
-        "donor_phone": donor_data.get("phone"),
-        "donor_address": donor_data.get("address"),
-        "donor_city": donor_data.get("city"),
-        "donor_state": donor_data.get("state"),
-        "donor_postal_code": donor_data.get("postal_code"),
-        "donor_country": donor_data.get("country"),
-        "is_anonymous": donor_data.get("anonymous", False),
+        "first_name": donor_data.get("first_name") or "Anonymous",
+        "last_name": donor_data.get("last_name") or "",
+        "email": donor_data.get("email"),
         "comment": payload.comment,
-        "cover_fees": payload.cover_fees,
-        "metadata": {
+        "fee_covered": payload.cover_fees,
+        "crypto_amount": crypto_amount,
+        "crypto_currency": coin,
+        "device": {
             "payment_ref": payment_ref,
-            "coin": coin,
             "network": network,
             "deposit_address": deposit_address,
             "crypto_amount": crypto_amount_str,
             "exchange_rate": coin_price,
             "dedicate": payload.dedicate,
-            "honoree_name": payload.honoree_name,
-            "utm": payload.utm or {},
+            "checkout_view": "homepage",
         },
     }
 
