@@ -553,7 +553,7 @@ def resolve_root_paypal_account(checkout_view: str | None) -> dict[str, Any] | N
 def normalize_payment_account_sources(raw: object) -> dict[str, Any]:
     defaults: dict[str, Any] = {
         "stripe": "organization",
-        "paypal": "organization",
+        "paypal": "platform",
         "nowpayments": "organization",
         "authorizenet": "organization",
         "stripe_routing_mode": "single",
