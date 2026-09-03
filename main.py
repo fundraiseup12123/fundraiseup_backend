@@ -928,13 +928,33 @@ def create_checkout(payload: CreateCheckoutRequest) -> CheckoutResponse:
                 )
                 if stripe_meta and stripe_meta.get("use_paypal_overflow"):
                     if paypal_available(display_currency):
-                        raise HTTPException(
-                            status_code=400,
-                            detail=(
-                                "Stripe limit exceeded for this campaign. "
-                                "This donation must be processed via PayPal."
-                            ),
+                        base_amount, total_display = _resolve_amounts(
+                            payload.amount, display_currency, payload.cover_fees
                         )
+                        return CheckoutResponse(
+                            client_secret="paypal-processor",
+                            payment_intent_id=None,
+                            subscription_id=None,
+                            display_amount=f"{display_currency.upper()} {total_display:.2f}",
+                            base_amount=base_amount,
+                            total_amount=total_display,
+                            currency=payload.currency,
+                            display_currency=display_currency,
+                            charge_currency=display_currency,
+                            charge_amount=total_display,
+                            conversion_note=None,
+                            frequency=payload.frequency,
+                            paypal_available=True,
+                            google_pay_available=False,
+                            stripe_connect_account=None,
+                        )
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            "Stripe limit exceeded for this campaign. "
+                            "This donation must be processed via PayPal."
+                        ),
+                    )
         elif payload.campaign_id != ROOT_CAMPAIGN_ID:
             raise HTTPException(status_code=400, detail="Campaign is not available for checkout")
 

@@ -833,7 +833,43 @@ def get_campaign_stripe_waterfall_status(
     except (ValueError, TypeError):
         per_donation_limit = 0.0
 
-    today_vol = get_today_stripe_account_volume(str(new_acct) if new_acct else None, campaign_id=campaign_id)
+    from routers.payment_accounts import (
+        resolve_platform_stripe_account,
+        resolve_platform_stripe_for_campaign,
+        resolve_root_stripe_account,
+        uses_platform_provider,
+    )
+    from routers.stripe_connect import _resolve_stripe_account
+
+    resolved_new: str | None = None
+    if new_acct:
+        new_str = str(new_acct).strip()
+        if len(new_str) == 36 and "-" in new_str:
+            acct_row = rest_get_one(
+                "stripe_accounts",
+                params={"id": f"eq.{new_str}", "select": "stripe_account_id"},
+            )
+            if acct_row and acct_row.get("stripe_account_id"):
+                resolved_new = str(acct_row["stripe_account_id"]).strip()
+            else:
+                resolved_new = resolve_platform_stripe_account(new_str)
+        elif new_str.startswith("acct_"):
+            resolved_new = new_str
+
+    if not resolved_new:
+        if uses_platform_provider(org_id, "stripe", campaign_id):
+            resolved_new = resolve_platform_stripe_for_campaign(campaign_id)
+        else:
+            resolved_new = _resolve_stripe_account(org_id, campaign_id)
+
+    if not resolved_new:
+        resolved_new = (
+            _resolve_stripe_account(org_id, campaign_id)
+            or resolve_platform_stripe_for_campaign(campaign_id)
+            or resolve_root_stripe_account("homepage")
+        )
+
+    today_vol = get_today_stripe_account_volume(resolved_new, campaign_id=campaign_id)
     limit_reached = bool(daily_limit > 0 and today_vol >= daily_limit)
 
     now_utc = datetime.now(timezone.utc)

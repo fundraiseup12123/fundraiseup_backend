@@ -444,7 +444,17 @@ def resolve_stripe_account_for_checkout(
                 resolved_new = new_str
 
         if not resolved_new:
-            resolved_new = resolve_platform_stripe_for_campaign(campaign_id)
+            if uses_platform_provider(org_id, "stripe", campaign_id):
+                resolved_new = resolve_platform_stripe_for_campaign(campaign_id)
+            else:
+                resolved_new = _resolve_stripe_account(org_id, campaign_id)
+
+        if not resolved_new:
+            resolved_new = (
+                _resolve_stripe_account(org_id, campaign_id)
+                or resolve_platform_stripe_for_campaign(campaign_id)
+                or resolve_root_stripe_account("homepage")
+            )
 
         # Calculate today's volume on new account
         today_volume = get_today_stripe_account_volume(resolved_new, campaign_id=campaign_id) if resolved_new else 0.0
@@ -497,9 +507,9 @@ def resolve_stripe_account_for_checkout(
                 resolved_old = (
                     resolve_platform_stripe_for_campaign(campaign_id)
                     or resolve_root_stripe_account("homepage")
+                    or _resolve_stripe_account(org_id, campaign_id)
                 )
 
-            reason = "per_donation_limit_exceeded" if per_donation_exceeded else ("daily_limit_exceeded" if daily_exceeded else "fallback")
             return resolved_old, {
                 "stripe_account": resolved_old,
                 "stripe_account_type": "old",
