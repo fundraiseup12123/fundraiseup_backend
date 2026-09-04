@@ -390,6 +390,46 @@ def check_binance_status(payment_ref: str = Query(...)) -> dict[str, Any]:
             "currency": target.get("currency"),
         }
 
+    # Auto-verification logic via Binance Deposit History
+    coin = target.get("crypto_currency") or "USDT"
+    # The DB might store crypto_amount as a float or string
+    expected_amount = target.get("crypto_amount")
+    
+    if expected_amount:
+        try:
+            expected_amt = float(expected_amount)
+            # Query recent deposit history for this coin
+            r = _query_binance_api("/sapi/v1/capital/deposit/hisrec", {"coin": coin.upper()})
+            if r.status_code == 200:
+                deposits = r.json()
+                # deposits is a list of recent deposit dicts
+                for dep in deposits:
+                    # status 1 = Success
+                    if dep.get("status") == 1:
+                        dep_amount = float(dep.get("amount", 0))
+                        # Match amount within a tiny margin to account for floating point differences
+                        if abs(dep_amount - expected_amt) < 0.000001:
+                            # Update donation status to succeeded
+                            rest_patch(
+                                "donations",
+                                target.get("id"),
+                                {
+                                    "status": "succeeded",
+                                    "metadata": {
+                                        **(target.get("metadata") or {}),
+                                        "tx_hash": dep.get("txId")
+                                    }
+                                }
+                            )
+                            return {
+                                "status": "succeeded",
+                                "donation_id": target.get("id"),
+                                "amount": target.get("amount"),
+                                "currency": target.get("currency"),
+                            }
+        except Exception as e:
+            print("Auto-verify Binance error:", e)
+
     return {
         "status": "pending",
         "payment_ref": payment_ref,
