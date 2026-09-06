@@ -349,9 +349,9 @@ def prepare_binance_payment(payload: BinancePreparePayload) -> dict[str, Any]:
 
     # Direct Binance withdrawal links (web, app scheme, intent, universal link)
     binance_web_url = f"https://www.binance.com/en/my/wallet/account/main/withdrawal/crypto/{coin}?address={deposit_address}&amount={crypto_amount_str}&network={network}"
-    binance_app_url = f"binance://app.binance.com/my/wallet/account/main/withdrawal/crypto/{coin}?address={deposit_address}&amount={crypto_amount_str}&network={network}"
-    binance_intent_url = f"intent://app.binance.com/my/wallet/account/main/withdrawal/crypto/{coin}?address={deposit_address}&amount={crypto_amount_str}&network={network}#Intent;scheme=binance;package=com.binance.dev;end"
-    binance_universal_url = f"https://app.binance.com/en/my/wallet/account/main/withdrawal/crypto/{coin}?address={deposit_address}&amount={crypto_amount_str}&network={network}"
+    binance_app_url = "binance://"
+    binance_intent_url = f"intent://#Intent;package=com.binance.dev;action=android.intent.action.MAIN;category=android.intent.category.LAUNCHER;S.browser_fallback_url={binance_web_url};end"
+    binance_universal_url = binance_web_url
 
     return {
         "payment_ref": payment_ref,
