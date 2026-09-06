@@ -347,9 +347,10 @@ def prepare_binance_payment(payload: BinancePreparePayload) -> dict[str, Any]:
     except Exception as e:
         print("Failed to insert pending binance donation:", e)
 
-    # Direct Binance withdrawal links (web, app scheme, universal link)
+    # Direct Binance withdrawal links (web, app scheme, intent, universal link)
     binance_web_url = f"https://www.binance.com/en/my/wallet/account/main/withdrawal/crypto/{coin}?address={deposit_address}&amount={crypto_amount_str}&network={network}"
-    binance_app_url = f"bnc://app.binance.com/my/wallet/account/main/withdrawal/crypto/{coin}?address={deposit_address}&amount={crypto_amount_str}&network={network}"
+    binance_app_url = f"binance://app.binance.com/my/wallet/account/main/withdrawal/crypto/{coin}?address={deposit_address}&amount={crypto_amount_str}&network={network}"
+    binance_intent_url = f"intent://app.binance.com/my/wallet/account/main/withdrawal/crypto/{coin}?address={deposit_address}&amount={crypto_amount_str}&network={network}#Intent;scheme=binance;package=com.binance.dev;end"
     binance_universal_url = f"https://app.binance.com/en/my/wallet/account/main/withdrawal/crypto/{coin}?address={deposit_address}&amount={crypto_amount_str}&network={network}"
 
     return {
@@ -365,6 +366,7 @@ def prepare_binance_payment(payload: BinancePreparePayload) -> dict[str, Any]:
         "exchange_rate": coin_price,
         "qr_data": deposit_address,
         "binance_app_url": binance_app_url,
+        "binance_intent_url": binance_intent_url,
         "binance_web_url": binance_web_url,
         "binance_universal_url": binance_universal_url,
     }
