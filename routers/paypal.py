@@ -65,6 +65,39 @@ def resolve_country_name(code_or_name: str | None) -> str | None:
     return val
 
 
+COUNTRY_NAME_TO_ISO: dict[str, str] = {
+    v.strip().upper(): k.strip().upper() for k, v in ISO_COUNTRY_MAP.items()
+}
+COUNTRY_NAME_TO_ISO.update({
+    "UK": "GB",
+    "USA": "US",
+    "UNITED STATES OF AMERICA": "US",
+    "ENGLAND": "GB",
+    "SCOTLAND": "GB",
+    "WALES": "GB",
+    "NORTHERN IRELAND": "GB",
+})
+
+
+def _extract_country_from_paypal_order(ord_data: dict[str, Any] | None) -> str | None:
+    if not ord_data or not isinstance(ord_data, dict):
+        return None
+    ps = ord_data.get("payment_source") or {}
+    for source_key in ("apple_pay", "google_pay", "card", "paypal"):
+        src = ps.get(source_key) or {}
+        card = src.get("card") or {}
+        billing = card.get("billing_address") or src.get("address") or {}
+        cc = billing.get("country_code")
+        if cc and len(str(cc).strip()) == 2:
+            return str(cc).strip().upper()
+    payer = ord_data.get("payer") or {}
+    addr = payer.get("address") or {}
+    cc = addr.get("country_code")
+    if cc and len(str(cc).strip()) == 2:
+        return str(cc).strip().upper()
+    return None
+
+
 def register_campaign_paypal_apple_pay_domains(
     hostname: str,
     *,
@@ -363,6 +396,7 @@ def _record_paypal_donation(
     base_amount: float,
     total_display: float,
     status: str = "succeeded",
+    capture_data: dict[str, Any] | None = None,
 ) -> dict[str, object] | None:
     display_currency = payload.currency.upper()
     cover_fees = payload.cover_fees
@@ -434,12 +468,28 @@ def _record_paypal_donation(
                 "os": payload.device.os,
                 "browser": payload.device.browser,
                 "type": payload.device.type,
-                "country": resolve_country_name(payload.device.country),
                 "city": payload.device.city,
                 "gender": payload.device.gender,
             }.items()
             if v
         }
+
+    country_code = None
+    if capture_data:
+        country_code = _extract_country_from_paypal_order(capture_data)
+    if not country_code and payload.device and payload.device.country:
+        raw_c = str(payload.device.country).strip().upper()
+        if len(raw_c) == 2 and raw_c.isalpha():
+            country_code = "GB" if raw_c == "UK" else raw_c
+        elif raw_c in COUNTRY_NAME_TO_ISO:
+            country_code = COUNTRY_NAME_TO_ISO[raw_c]
+    if not country_code:
+        from routers.admin_data import CURRENCY_TO_COUNTRY_FALLBACK
+        country_code = CURRENCY_TO_COUNTRY_FALLBACK.get(display_currency)
+
+    if country_code:
+        device["country"] = country_code
+
     checkout_view = getattr(payload, "checkout_view", None)
     device["checkout_view"] = checkout_view if checkout_view in ("homepage", "popup", "landing") else "homepage"
     row["device"] = device
@@ -894,6 +944,7 @@ def paypal_complete_redirect(payload: CompletePayPalRedirectRequest) -> CaptureP
         payload=payload,
         base_amount=base_amount,
         total_display=total_display,
+        capture_data=capture if "capture" in locals() and isinstance(capture, dict) else None,
     )
     if saved:
         try:
@@ -1219,6 +1270,7 @@ def paypal_capture_order(payload: CapturePayPalOrderRequest) -> CapturePayPalOrd
         payload=payload,
         base_amount=base_amount,
         total_display=total_display,
+        capture_data=capture if isinstance(capture, dict) else None,
     )
     if saved:
         try:

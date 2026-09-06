@@ -208,6 +208,34 @@ CURRENCY_TO_COUNTRY_MAP: dict[str, str] = {
     "LBP": "LB",
     "IQD": "IQ",
     "AZN": "AZ",
+    "LKR": "LK",
+    "HRK": "HR",
+    "BGN": "BG",
+    "RSD": "RS",
+    "RON": "RO",
+    "HUF": "HU",
+    "CZK": "CZ",
+    "ISK": "IS",
+    "UAH": "UA",
+}
+
+COUNTRY_NAME_TO_ISO_CODE: dict[str, str] = {
+    "AFGHANISTAN": "AF", "ALBANIA": "AL", "ALGERIA": "DZ", "ARGENTINA": "AR", "AUSTRALIA": "AU",
+    "AUSTRIA": "AT", "BAHRAIN": "BH", "BANGLADESH": "BD", "BELGIUM": "BE", "BRAZIL": "BR",
+    "BULGARIA": "BG", "CANADA": "CA", "CHINA": "CN", "COLOMBIA": "CO", "CROATIA": "HR",
+    "DENMARK": "DK", "EGYPT": "EG", "FINLAND": "FI", "FRANCE": "FR", "GERMANY": "DE",
+    "GHANA": "GH", "GREECE": "GR", "HONG KONG": "HK", "HUNGARY": "HU", "INDIA": "IN",
+    "INDONESIA": "ID", "IRAN": "IR", "IRAQ": "IQ", "IRELAND": "IE", "ISRAEL": "IL",
+    "ITALY": "IT", "JAPAN": "JP", "JORDAN": "JO", "KENYA": "KE", "KUWAIT": "KW",
+    "LEBANON": "LB", "MALAYSIA": "MY", "MEXICO": "MX", "MOROCCO": "MA", "NETHERLANDS": "NL",
+    "NEW ZEALAND": "NZ", "NIGERIA": "NG", "NORWAY": "NO", "OMAN": "OM", "PAKISTAN": "PK",
+    "PALESTINE": "PS", "PHILIPPINES": "PH", "POLAND": "PL", "PORTUGAL": "PT", "QATAR": "QA",
+    "ROMANIA": "RO", "RUSSIA": "RU", "SAUDI ARABIA": "SA", "SINGAPORE": "SG", "SOUTH AFRICA": "ZA",
+    "SOUTH KOREA": "KR", "SPAIN": "ES", "SRI LANKA": "LK", "SUDAN": "SD", "SWEDEN": "SE",
+    "SWITZERLAND": "CH", "SYRIA": "SY", "TAIWAN": "TW", "THAILAND": "TH", "TURKEY": "TR",
+    "UNITED ARAB EMIRATES": "AE", "UNITED KINGDOM": "GB", "UNITED STATES": "US",
+    "UNITED STATES OF AMERICA": "US", "USA": "US", "UK": "GB", "ENGLAND": "GB",
+    "SCOTLAND": "GB", "WALES": "GB", "YEMEN": "YE", "REUNION": "RE", "RÉUNION": "RE"
 }
 
 
@@ -221,10 +249,8 @@ def _country_code_from_device(device: object, currency: str | None = None) -> st
         )
         if raw is not None:
             code = str(raw).strip().upper()
-            if code == "UK":
-                return "GB"
-            if code == "USA":
-                return "US"
+            if code in COUNTRY_NAME_TO_ISO_CODE:
+                return COUNTRY_NAME_TO_ISO_CODE[code]
             if len(code) == 2 and code.isalpha():
                 return code
     if currency:
