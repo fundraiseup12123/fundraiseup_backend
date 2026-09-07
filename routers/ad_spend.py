@@ -199,6 +199,13 @@ class UpdateBudgetRequest(BaseModel):
     effective_date: str | None = None  # YYYY-MM-DD, defaults to today in timezone
 
 
+class CustomBudgetPeriodRequest(BaseModel):
+    daily_budget: float = Field(ge=0)
+    currency: str = Field(default="USD", max_length=10)
+    start_date: str  # YYYY-MM-DD
+    end_date: str | None = None  # YYYY-MM-DD or None for open-ended
+
+
 # ---------------------------------------------------------------------------
 # Core Campaign & Budget Operations
 # ---------------------------------------------------------------------------
@@ -394,7 +401,7 @@ def update_ad_campaign(
 
     if _supabase_ad_tables_exist():
         try:
-            rest_patch("ad_campaigns", match={"id": campaign_id}, values=patch_fields)
+            rest_patch("ad_campaigns", patch_fields, match={"id": campaign_id})
             row = rest_get_one("ad_campaigns", params={"id": f"eq.{campaign_id}"})
             if row:
                 return {"campaign": row}
@@ -447,6 +454,22 @@ def update_campaign_budget(
     # Find budget currently active on effective_date
     existing_active = _find_effective_budget_on_date(budgets, campaign_id, eff_date_str)
 
+    # Determine end date for the new budget entry:
+    # If there are subsequent budgets starting after eff_date_str, close this entry before the next one starts
+    later_budgets = [
+        b for b in budgets
+        if str(b.get("ad_campaign_id")) == str(campaign_id)
+        and str(b.get("start_date") or "")[:10] > eff_date_str
+    ]
+    new_end_date = None
+    if existing_active and existing_active.get("end_date"):
+        new_end_date = str(existing_active.get("end_date") or "")[:10]
+    elif later_budgets:
+        later_budgets.sort(key=lambda r: str(r.get("start_date") or ""))
+        next_start = str(later_budgets[0].get("start_date") or "")[:10]
+        next_dt = datetime.strptime(next_start, "%Y-%m-%d").date() - timedelta(days=1)
+        new_end_date = next_dt.strftime("%Y-%m-%d")
+
     if _supabase_ad_tables_exist():
         try:
             if existing_active:
@@ -455,16 +478,16 @@ def update_campaign_budget(
                     # Same date: update in-place
                     rest_patch(
                         "ad_campaign_budgets",
+                        {"daily_budget": new_daily_budget, "currency": currency},
                         match={"id": str(existing_active["id"])},
-                        values={"daily_budget": new_daily_budget, "currency": currency},
                     )
                     return {"message": "Budget updated for effective date", "start_date": eff_date_str}
                 else:
                     # Close previous budget as of yesterday
                     rest_patch(
                         "ad_campaign_budgets",
+                        {"end_date": yesterday_str},
                         match={"id": str(existing_active["id"])},
-                        values={"end_date": yesterday_str},
                     )
 
             # Insert new effective budget
@@ -475,7 +498,7 @@ def update_campaign_budget(
                 "daily_budget": new_daily_budget,
                 "currency": currency,
                 "start_date": eff_date_str,
-                "end_date": None,
+                "end_date": new_end_date,
                 "created_at": now_iso,
             }
             rest_insert("ad_campaign_budgets", new_budget_row)
@@ -508,7 +531,7 @@ def update_campaign_budget(
         "daily_budget": new_daily_budget,
         "currency": currency,
         "start_date": eff_date_str,
-        "end_date": None,
+        "end_date": new_end_date,
         "created_at": now_iso,
     }
     camp_budgets.append(new_budget_record)
@@ -518,6 +541,95 @@ def update_campaign_budget(
         "message": f"Daily budget set to {new_daily_budget} {currency} effective {eff_date_str}",
         "budget": new_budget_record,
     }
+
+
+@router.post("/ad-campaigns/{campaign_id}/budgets")
+def create_custom_budget_period(
+    campaign_id: str,
+    payload: CustomBudgetPeriodRequest,
+    user: Annotated[AuthUser, Depends(require_super_admin)],
+) -> dict[str, Any]:
+    """Explicitly create a budget entry for any past or custom date period."""
+    start_date = payload.start_date.strip()[:10]
+    end_date = payload.end_date.strip()[:10] if payload.end_date else None
+    now_iso = datetime.now().astimezone().isoformat()
+    new_id = str(uuid.uuid4())
+
+    new_budget = {
+        "id": new_id,
+        "ad_campaign_id": campaign_id,
+        "daily_budget": round(float(payload.daily_budget), 2),
+        "currency": payload.currency.strip().upper(),
+        "start_date": start_date,
+        "end_date": end_date,
+        "created_at": now_iso,
+    }
+
+    if _supabase_ad_tables_exist():
+        try:
+            rest_insert("ad_campaign_budgets", new_budget)
+            return {"budget": new_budget}
+        except Exception as exc:
+            logger.warning("Supabase insert failed: %s", exc)
+
+    store = _load_local_store()
+    store.setdefault("budgets", []).append(new_budget)
+    _save_local_store(store)
+    return {"budget": new_budget}
+
+
+@router.put("/ad-campaigns/{campaign_id}/budgets/{budget_id}")
+def update_specific_budget_period(
+    campaign_id: str,
+    budget_id: str,
+    payload: CustomBudgetPeriodRequest,
+    user: Annotated[AuthUser, Depends(require_super_admin)],
+) -> dict[str, Any]:
+    """Edit any historical or current budget period directly."""
+    patch_fields = {
+        "daily_budget": round(float(payload.daily_budget), 2),
+        "currency": payload.currency.strip().upper(),
+        "start_date": payload.start_date.strip()[:10],
+        "end_date": payload.end_date.strip()[:10] if payload.end_date else None,
+    }
+
+    if _supabase_ad_tables_exist():
+        try:
+            rest_patch("ad_campaign_budgets", patch_fields, match={"id": budget_id})
+            row = rest_get_one("ad_campaign_budgets", params={"id": f"eq.{budget_id}"})
+            if row:
+                return {"budget": row}
+        except Exception as exc:
+            logger.warning("Supabase budget patch failed: %s", exc)
+
+    store = _load_local_store()
+    for b in store.get("budgets", []):
+        if str(b.get("id")) == str(budget_id):
+            b.update(patch_fields)
+            _save_local_store(store)
+            return {"budget": b}
+
+    raise HTTPException(status_code=404, detail="Budget record not found")
+
+
+@router.delete("/ad-campaigns/{campaign_id}/budgets/{budget_id}")
+def delete_specific_budget_period(
+    campaign_id: str,
+    budget_id: str,
+    user: Annotated[AuthUser, Depends(require_super_admin)],
+) -> dict[str, Any]:
+    """Delete an individual historical budget period."""
+    if _supabase_ad_tables_exist():
+        try:
+            rest_delete("ad_campaign_budgets", match={"id": budget_id})
+            return {"deleted": True, "id": budget_id}
+        except Exception as exc:
+            logger.warning("Supabase budget delete failed: %s", exc)
+
+    store = _load_local_store()
+    store["budgets"] = [b for b in store.get("budgets", []) if str(b.get("id")) != str(budget_id)]
+    _save_local_store(store)
+    return {"deleted": True, "id": budget_id}
 
 
 @router.get("/ad-campaigns/{campaign_id}/budget-history")
@@ -848,8 +960,9 @@ def export_ad_spend_csv(
     channel: str = Query("all"),
     attribution_mode: str = Query("attributed"),
     campaign_id: str | None = Query(None),
-) -> Response:
-    """Download performance report as CSV."""
+    format: str | None = Query(None),
+) -> Any:
+    """Download performance report as CSV (returns JSON with csv text for adminFetch, or raw file)."""
     report = get_ad_spend_performance(
         user=user,
         date_preset=_param_str(date_preset, "7d") or "7d",
@@ -924,8 +1037,14 @@ def export_ad_spend_csv(
     today_str = datetime.now().strftime("%Y%m%d")
     filename = f"ad_spend_roi_{today_str}.csv"
 
-    return Response(
-        content=csv_data,
-        media_type="text/csv",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
-    )
+    if _param_str(format, "") == "raw":
+        return Response(
+            content=csv_data,
+            media_type="text/csv",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
+    return {
+        "csv": csv_data,
+        "filename": filename,
+    }
