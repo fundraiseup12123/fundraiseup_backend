@@ -360,6 +360,7 @@ def prepare_binance_payment(payload: BinancePreparePayload) -> dict[str, Any]:
         "fee_covered": payload.cover_fees,
         "crypto_amount": crypto_amount,
         "crypto_currency": coin,
+        "utm": payload.utm,
         "device": dev_payload,
     }
 
