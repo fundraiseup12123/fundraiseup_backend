@@ -173,7 +173,7 @@ def _save_local_store(data: dict[str, list[dict[str, Any]]]) -> None:
 
 class CreateAdCampaignRequest(BaseModel):
     name: str = Field(min_length=2, max_length=150)
-    channel: Literal["google", "meta", "tiktok", "other"]
+    channel: Literal["google", "meta", "tiktok", "pinterest", "other"]
     daily_budget: float = Field(ge=0)
     currency: str = Field(default="USD", max_length=10)
     utm_campaign: str | None = Field(default=None, max_length=255)
@@ -186,7 +186,7 @@ class CreateAdCampaignRequest(BaseModel):
 
 class UpdateAdCampaignRequest(BaseModel):
     name: str | None = Field(default=None, min_length=2, max_length=150)
-    channel: Literal["google", "meta", "tiktok", "other"] | None = None
+    channel: Literal["google", "meta", "tiktok", "pinterest", "other"] | None = None
     utm_campaign: str | None = None
     utm_source: str | None = None
     campaign_id: str | None = None
@@ -216,6 +216,12 @@ def _get_campaigns_data() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     if _supabase_ad_tables_exist():
         c_rows = rest_get("ad_campaigns", params={"order": "created_at.desc"})
         b_rows = rest_get("ad_campaign_budgets", params={"order": "start_date.asc"})
+        for c in c_rows:
+            notes = str(c.get("notes") or "")
+            if c.get("channel") == "other" and "[channel:pinterest]" in notes:
+                c["channel"] = "pinterest"
+                cleaned = notes.replace("[channel:pinterest]", "").strip()
+                c["notes"] = cleaned or None
         return c_rows, b_rows
 
     store = _load_local_store()
@@ -346,16 +352,24 @@ def create_ad_campaign(
 
     if _supabase_ad_tables_exist():
         try:
-            rest_insert("ad_campaigns", new_campaign)
-            rest_insert("ad_campaign_budgets", new_budget)
-            return {
-                "campaign": {
-                    **new_campaign,
-                    "current_daily_budget": new_budget["daily_budget"],
-                    "current_currency": new_budget["currency"],
-                },
-                "budget": new_budget,
-            }
+            res_camp = rest_insert("ad_campaigns", new_campaign)
+            if not res_camp and new_campaign.get("channel") == "pinterest":
+                # Fallback if DB check constraint doesn't yet include 'pinterest'
+                fallback_camp = dict(new_campaign)
+                fallback_camp["channel"] = "other"
+                fallback_camp["notes"] = f"[channel:pinterest] {new_campaign.get('notes') or ''}".strip()
+                res_camp = rest_insert("ad_campaigns", fallback_camp)
+
+            if res_camp:
+                rest_insert("ad_campaign_budgets", new_budget)
+                return {
+                    "campaign": {
+                        **new_campaign,
+                        "current_daily_budget": new_budget["daily_budget"],
+                        "current_currency": new_budget["currency"],
+                    },
+                    "budget": new_budget,
+                }
         except Exception as exc:
             logger.warning("Supabase insert failed for ad campaign, using local store: %s", exc)
 
@@ -402,9 +416,22 @@ def update_ad_campaign(
 
     if _supabase_ad_tables_exist():
         try:
-            rest_patch("ad_campaigns", patch_fields, match={"id": campaign_id})
+            res = rest_patch("ad_campaigns", patch_fields, match={"id": campaign_id})
+            if not res and patch_fields.get("channel") == "pinterest":
+                fallback_patch = dict(patch_fields)
+                fallback_patch["channel"] = "other"
+                existing = rest_get_one("ad_campaigns", params={"id": f"eq.{campaign_id}"}) or {}
+                ex_notes = str(existing.get("notes") or "")
+                if "[channel:pinterest]" not in ex_notes:
+                    fallback_patch["notes"] = f"[channel:pinterest] {ex_notes}".strip()
+                rest_patch("ad_campaigns", fallback_patch, match={"id": campaign_id})
+
             row = rest_get_one("ad_campaigns", params={"id": f"eq.{campaign_id}"})
             if row:
+                notes = str(row.get("notes") or "")
+                if row.get("channel") == "other" and "[channel:pinterest]" in notes:
+                    row["channel"] = "pinterest"
+                    row["notes"] = notes.replace("[channel:pinterest]", "").strip() or None
                 return {"campaign": row}
         except Exception as exc:
             logger.warning("Supabase update failed for ad campaign %s: %s", campaign_id, exc)

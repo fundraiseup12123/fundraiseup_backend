@@ -4,7 +4,7 @@
 create table if not exists public.ad_campaigns (
   id uuid primary key default gen_random_uuid(),
   name text not null,
-  channel text not null check (channel in ('google', 'meta', 'tiktok', 'other')),
+  channel text not null check (channel in ('google', 'meta', 'tiktok', 'pinterest', 'other')),
   utm_campaign text,
   utm_source text,
   campaign_id uuid references public.campaigns(id) on delete set null,
