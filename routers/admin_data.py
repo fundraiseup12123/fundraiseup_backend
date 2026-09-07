@@ -1387,10 +1387,18 @@ def _donation_device_label(row: dict[str, Any]) -> str:
     label = str(raw).strip().lower()
     if label in ("mobile", "phone"):
         return "Mobile"
-    if label in ("tablet",):
+    if label in ("tablet", "ipad"):
         return "Tablet"
     if label in ("desktop", "computer", "pc"):
         return "Desktop"
+
+    # Fallback to OS if type was omitted
+    os_name = str(device.get("os") or device.get("OS") or "").strip().lower()
+    if os_name in ("ios", "android"):
+        return "Mobile"
+    if os_name in ("windows", "macos", "mac os x", "linux", "chrome os"):
+        return "Desktop"
+
     return "Unknown"
 
 

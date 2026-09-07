@@ -170,6 +170,7 @@ class BinancePreparePayload(BaseModel):
     honoree_name: str | None = None
     comment: str | None = None
     utm: dict[str, Any] | None = None
+    device: dict[str, Any] | None = None
 
 
 class BinanceConfirmPayload(BaseModel):
@@ -330,6 +331,17 @@ def prepare_binance_payment(payload: BinancePreparePayload) -> dict[str, Any]:
         if camp:
             org_id = camp.get("organization_id")
 
+    dev_payload = dict(payload.device or {})
+    dev_payload.update({
+        "payment_ref": payment_ref,
+        "network": network,
+        "deposit_address": deposit_address,
+        "crypto_amount": crypto_amount_str,
+        "exchange_rate": coin_price,
+        "dedicate": payload.dedicate,
+        "checkout_view": payload.checkout_view or "homepage",
+    })
+
     donation_row = {
         "id": donation_id,
         "organization_id": org_id or "2b395297-6428-49f3-b125-0cca9bbd1256",
@@ -348,15 +360,7 @@ def prepare_binance_payment(payload: BinancePreparePayload) -> dict[str, Any]:
         "fee_covered": payload.cover_fees,
         "crypto_amount": crypto_amount,
         "crypto_currency": coin,
-        "device": {
-            "payment_ref": payment_ref,
-            "network": network,
-            "deposit_address": deposit_address,
-            "crypto_amount": crypto_amount_str,
-            "exchange_rate": coin_price,
-            "dedicate": payload.dedicate,
-            "checkout_view": payload.checkout_view or "homepage",
-        },
+        "device": dev_payload,
     }
 
     try:
