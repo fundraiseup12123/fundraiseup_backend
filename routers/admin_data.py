@@ -692,9 +692,17 @@ def admin_donation_detail(
 
 
 def _insights_countable(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Match donations list: include everything except explicitly failed/refunded rows."""
+    """Match donations list: include everything except explicitly failed/refunded rows and pending Binance payments."""
     excluded = {"failed", "canceled", "cancelled", "refunded", "disputed"}
-    return [r for r in rows if str(r.get("status") or "").lower() not in excluded]
+    return [
+        r for r in rows
+        if str(r.get("status") or "").lower() not in excluded
+        and not (
+            (r.get("payment_method") == "binance_pay" or r.get("payment_processor") == "binance")
+            and r.get("status") != "succeeded"
+        )
+    ]
+
 
 
 def _admin_org_donation_rows(

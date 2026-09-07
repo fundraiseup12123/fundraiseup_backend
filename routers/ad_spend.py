@@ -35,6 +35,7 @@ DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 LOCAL_STORE_PATH = DATA_DIR / "ad_spend_store.json"
 
 _DB_CHECK_CACHE: dict[str, Any] = {"checked_at": 0.0, "exists": False}
+_DEFAULT_PLATFORM_TZ = "America/Los_Angeles"
 
 
 # ---------------------------------------------------------------------------
@@ -727,7 +728,7 @@ def get_ad_spend_performance(
     preset_val = _param_str(date_preset, "7d") or "7d"
     from_val = _param_str(date_from, "") or None
     to_val = _param_str(date_to, "") or None
-    tz_input = _param_str(timezone, "UTC") or "UTC"
+    tz_input = _param_str(timezone, _DEFAULT_PLATFORM_TZ) or _DEFAULT_PLATFORM_TZ
     rep_curr = _param_str(reporting_currency, "USD").upper() or "USD"
     chan_filter = _param_str(channel, "all") or "all"
     attr_mode = _param_str(attribution_mode, "attributed") or "attributed"
@@ -829,12 +830,28 @@ def get_ad_spend_performance(
     total_platform_gross = 0.0
     total_platform_donors = 0
 
+    all_platform_gross_sum = 0.0
+    all_platform_donors_set = set()
+    all_attributed_donors_set = set()
+    all_attributed_gross_sum = 0.0
+
     for day_str in calendar_days:
         day_donations = donations_by_day.get(day_str, [])
         day_spend = 0.0
-        day_gross = 0.0
-        day_donors_set = set()
+        day_attributed_donors_set = set()
         day_campaign_details: list[dict[str, Any]] = []
+
+        # All platform donations for this day
+        day_all_donor_ids = set()
+        day_all_gross = 0.0
+        for don in day_donations:
+            don_id = str(don.get("id"))
+            day_all_donor_ids.add(don_id)
+            all_platform_donors_set.add(don_id)
+            amt = float(don.get("amount") or 0.0)
+            curr = str(don.get("currency") or rep_curr).upper()
+            day_all_gross += convert_to_reporting(amt, curr, rep_curr)
+        all_platform_gross_sum += day_all_gross
 
         for camp in filtered_campaigns:
             camp_id = str(camp["id"])
@@ -851,47 +868,66 @@ def get_ad_spend_performance(
             camp_gross = 0.0
             camp_donors = 0
             for don in day_donations:
-                if attr_mode == "attributed":
-                    if _match_donation_to_campaign(don, camp):
-                        amt = float(don.get("amount") or 0.0)
-                        curr = str(don.get("currency") or rep_curr).upper()
-                        converted_amt = convert_to_reporting(amt, curr, rep_curr)
-                        camp_gross += converted_amt
-                        camp_donors += 1
-                        day_donors_set.add(str(don.get("id")))
+                if _match_donation_to_campaign(don, camp):
+                    amt = float(don.get("amount") or 0.0)
+                    curr = str(don.get("currency") or rep_curr).upper()
+                    converted_amt = convert_to_reporting(amt, curr, rep_curr)
+                    camp_gross += converted_amt
+                    camp_donors += 1
+                    day_attributed_donors_set.add(str(don.get("id")))
+                    all_attributed_donors_set.add(str(don.get("id")))
 
-            if attr_mode == "attributed":
-                camp_net = round(camp_gross - budget_in_rep, 2)
-                camp_roas = round(camp_gross / budget_in_rep, 2) if budget_in_rep > 0 else (round(camp_gross, 2) if camp_gross > 0 else 0.0)
-                camp_cpa = round(budget_in_rep / camp_donors, 2) if camp_donors > 0 else 0.0
+            camp_net = round(camp_gross - budget_in_rep, 2)
+            camp_roas = round(camp_gross / budget_in_rep, 2) if budget_in_rep > 0 else (round(camp_gross, 2) if camp_gross > 0 else 0.0)
+            camp_cpa = round(budget_in_rep / camp_donors, 2) if camp_donors > 0 else 0.0
 
-                campaign_totals[camp_id]["gross"] += camp_gross
-                campaign_totals[camp_id]["donors"] += camp_donors
+            campaign_totals[camp_id]["gross"] += camp_gross
+            campaign_totals[camp_id]["donors"] += camp_donors
 
-                day_campaign_details.append({
-                    "campaign_id": camp_id,
-                    "campaign_name": camp.get("name"),
-                    "channel": camp.get("channel"),
-                    "daily_budget": budget_in_rep,
-                    "gross": round(camp_gross, 2),
-                    "net": camp_net,
-                    "donors": camp_donors,
-                    "roas": camp_roas,
-                    "cpa": camp_cpa,
-                })
+            day_campaign_details.append({
+                "campaign_id": camp_id,
+                "campaign_name": camp.get("name"),
+                "channel": camp.get("channel"),
+                "daily_budget": budget_in_rep,
+                "gross": round(camp_gross, 2),
+                "net": camp_net,
+                "donors": camp_donors,
+                "roas": camp_roas,
+                "cpa": camp_cpa,
+                "is_organic": False,
+            })
+
+        day_attributed_gross = sum(d["gross"] for d in day_campaign_details)
+        day_attributed_donors_count = len(day_attributed_donors_set)
+        all_attributed_gross_sum += day_attributed_gross
+
+        day_organic_donor_ids = day_all_donor_ids - day_attributed_donors_set
+        day_organic_donors_count = len(day_organic_donor_ids)
+        day_organic_gross = max(0.0, round(day_all_gross - day_attributed_gross, 2))
+
+        # Always add organic / direct line if there are organic donations on this day
+        if day_organic_donors_count > 0 or day_organic_gross > 0:
+            day_campaign_details.append({
+                "campaign_id": "organic",
+                "campaign_name": "Organic / Direct Traffic (No Ad UTM)",
+                "channel": "organic",
+                "daily_budget": 0.0,
+                "gross": day_organic_gross,
+                "net": day_organic_gross,
+                "donors": day_organic_donors_count,
+                "roas": 0.0,
+                "cpa": 0.0,
+                "is_organic": True,
+            })
 
         if attr_mode == "blended":
-            # In blended mode, all platform donations for this day are counted against total ad spend
-            for don in day_donations:
-                amt = float(don.get("amount") or 0.0)
-                curr = str(don.get("currency") or rep_curr).upper()
-                day_gross += convert_to_reporting(amt, curr, rep_curr)
-                day_donors_set.add(str(don.get("id")))
+            day_gross = round(day_all_gross, 2)
+            day_donors_count = len(day_all_donor_ids)
         else:
-            day_gross = sum(d["gross"] for d in day_campaign_details)
+            day_gross = round(day_attributed_gross, 2)
+            day_donors_count = day_attributed_donors_count
 
         day_net = round(day_gross - day_spend, 2)
-        day_donors_count = len(day_donors_set)
         day_roas = round(day_gross / day_spend, 2) if day_spend > 0 else (round(day_gross, 2) if day_gross > 0 else 0.0)
         day_cpa = round(day_spend / day_donors_count, 2) if day_donors_count > 0 else 0.0
 
@@ -909,6 +945,12 @@ def get_ad_spend_performance(
             "cpa": day_cpa,
             "campaigns_active": len([c for c in filtered_campaigns if str(c.get("status")) == "active"]),
             "details": day_campaign_details,
+            "platform_total_donors": len(day_all_donor_ids),
+            "platform_total_gross": round(day_all_gross, 2),
+            "attributed_donors": day_attributed_donors_count,
+            "attributed_gross": round(day_attributed_gross, 2),
+            "organic_donors": day_organic_donors_count,
+            "organic_gross": day_organic_gross,
         })
 
     # Finalize campaign totals
@@ -926,6 +968,11 @@ def get_ad_spend_performance(
     overall_roas = round(total_platform_gross / total_platform_spend, 2) if total_platform_spend > 0 else 0.0
     overall_cpa = round(total_platform_spend / total_platform_donors, 2) if total_platform_donors > 0 else 0.0
 
+    all_platform_donors_count = len(all_platform_donors_set)
+    all_attributed_donors_count = len(all_attributed_donors_set)
+    all_organic_donors_count = max(0, all_platform_donors_count - all_attributed_donors_count)
+    all_organic_gross = max(0.0, round(all_platform_gross_sum - all_attributed_gross_sum, 2))
+
     return {
         "summary": {
             "total_spend": round(total_platform_spend, 2),
@@ -939,6 +986,12 @@ def get_ad_spend_performance(
             "date_preset": preset_val,
             "date_label": date_label,
             "attribution_mode": attr_mode,
+            "platform_total_donors": all_platform_donors_count,
+            "platform_total_gross": round(all_platform_gross_sum, 2),
+            "attributed_donors": all_attributed_donors_count,
+            "attributed_gross": round(all_attributed_gross_sum, 2),
+            "organic_donors": all_organic_donors_count,
+            "organic_gross": all_organic_gross,
         },
         "daily_breakdown": daily_breakdown,
         "campaign_summaries": list(campaign_totals.values()),
@@ -968,7 +1021,7 @@ def export_ad_spend_csv(
         date_preset=_param_str(date_preset, "7d") or "7d",
         date_from=_param_str(date_from, "") or None,
         date_to=_param_str(date_to, "") or None,
-        timezone=_param_str(timezone, "UTC") or "UTC",
+        timezone=_param_str(timezone, _DEFAULT_PLATFORM_TZ) or _DEFAULT_PLATFORM_TZ,
         reporting_currency=_param_str(reporting_currency, "USD") or "USD",
         channel=_param_str(channel, "all") or "all",
         attribution_mode=_param_str(attribution_mode, "attributed") or "attributed",
@@ -990,7 +1043,9 @@ def export_ad_spend_csv(
     writer.writerow(["Overall ROAS", f"{report['summary']['roas']}x"])
     writer.writerow(["Average CPA", f"{report['summary']['cpa']:.2f} {currency}"])
     writer.writerow(["Total Donors", report["summary"]["total_donors"]])
+    writer.writerow(["Platform Total Donors", f"{report['summary'].get('platform_total_donors', report['summary']['total_donors'])} ({report['summary'].get('attributed_donors', 0)} Ad Attributed, {report['summary'].get('organic_donors', 0)} Organic)"])
     writer.writerow([])
+
 
     # Table columns
     writer.writerow([
