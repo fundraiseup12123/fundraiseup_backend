@@ -98,6 +98,9 @@ def get_campaign_donations(
         "device",
         "crypto_amount",
         "crypto_currency",
+        "status",
+        "payment_method",
+        "payment_processor",
     )
     fetch_limit = max(200, offset + limit + 1)
 
@@ -163,9 +166,19 @@ def get_campaign_donations(
             },
         ) or []
 
+    # Exclude pending Binance payments from public feed
+    rows = [
+        r for r in rows
+        if not (
+            (r.get("payment_method") == "binance_pay" or r.get("payment_processor") == "binance")
+            and r.get("status") != "succeeded"
+        )
+    ]
+
     page = rows[offset : offset + limit]
     has_more = len(rows) > offset + limit
     return {"donations": page, "has_more": has_more}
+
 
 
 @router.get("/resolve-host")

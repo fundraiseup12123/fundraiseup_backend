@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import logging
 import os
 import random
 import string
@@ -19,6 +20,8 @@ from db import rest_get, rest_get_one, rest_insert, rest_patch
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, EmailStr, Field
 import requests
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/binance", tags=["binance"])
 
@@ -126,9 +129,11 @@ def get_binance_deposit_address(coin: str, network: str) -> str:
 
 
 class BinanceDonorInput(BaseModel):
-    first_name: str | None = None
-    last_name: str | None = None
-    email: EmailStr | None = None
+    model_config = {"extra": "allow", "populate_by_name": True}
+
+    first_name: str | None = Field(default=None, alias="firstName")
+    last_name: str | None = Field(default=None, alias="lastName")
+    email: str | None = None
     phone: str | None = None
     address: str | None = None
     city: str | None = None
@@ -136,6 +141,19 @@ class BinanceDonorInput(BaseModel):
     postal_code: str | None = None
     country: str | None = None
     anonymous: bool = False
+
+
+def _derive_name_from_email(email: str | None) -> tuple[str, str]:
+    if not email or "@" not in email:
+        return "Donor", ""
+    handle = email.split("@")[0]
+    cleaned = "".join([c if c.isalnum() else " " for c in handle]).strip()
+    parts = [p.capitalize() for p in cleaned.split() if p and not p.isdigit()]
+    if not parts:
+        parts = [handle.capitalize()]
+    if len(parts) == 1:
+        return parts[0], ""
+    return parts[0], " ".join(parts[1:])
 
 
 class BinancePreparePayload(BaseModel):
@@ -165,31 +183,20 @@ def get_binance_checkout_config(
     campaign_id: str | None = Query(None),
     checkout_view: str | None = Query(None),
 ) -> dict[str, Any]:
-    """Returns Binance pay availability, strictly enabled only for hope-for-gaza-binance."""
-    if not campaign_id:
-        return {"available": False, "provider": "binance_pay", "coins": []}
-
-    camp = rest_get_one(
-        "campaigns",
-        params={"id": f"eq.{campaign_id}", "select": "id,slug,payment_account_sources"},
-    )
-    if not camp:
+    """Returns Binance pay availability and coin configuration for all campaigns."""
+    merchant_name = "Hope For Gaza"
+    if campaign_id:
         camp = rest_get_one(
             "campaigns",
-            params={"slug": f"eq.{campaign_id}", "select": "id,slug,payment_account_sources"},
+            params={"id": f"eq.{campaign_id}", "select": "id,slug,title"},
         )
-
-    sources = (camp or {}).get("payment_account_sources") or {}
-    slug = str((camp or {}).get("slug") or "").lower()
-    is_binance_campaign = (
-        sources.get("crypto_processor") == "binance"
-        or bool(sources.get("binance_pay"))
-        or slug == "hope-for-gaza-binance"
-        or "binance" in slug
-    )
-
-    if not is_binance_campaign:
-        return {"available": False, "provider": "binance_pay", "coins": []}
+        if not camp:
+            camp = rest_get_one(
+                "campaigns",
+                params={"slug": f"eq.{campaign_id}", "select": "id,slug,title"},
+            )
+        if camp and camp.get("title"):
+            merchant_name = str(camp["title"])
 
     coins = [
         {
@@ -274,7 +281,7 @@ def get_binance_checkout_config(
     return {
         "available": True,
         "provider": "binance_pay",
-        "merchant_name": "Hope For Gaza",
+        "merchant_name": merchant_name,
         "coins": coins,
     }
 
@@ -306,7 +313,17 @@ def prepare_binance_payment(payload: BinancePreparePayload) -> dict[str, Any]:
     payment_ref = f"BPAY-{int(time.time())}-{rand_suffix}"
     donation_id = str(uuid.uuid4())
 
-    donor_data = payload.donor.model_dump() if payload.donor else {}
+    donor_data = payload.donor.model_dump(by_alias=False) if payload.donor else {}
+    first_name = (donor_data.get("first_name") or donor_data.get("firstName") or "").strip()
+    last_name = (donor_data.get("last_name") or donor_data.get("lastName") or "").strip()
+    email = donor_data.get("email")
+
+    if not first_name:
+        derived_first, derived_last = _derive_name_from_email(email)
+        first_name = derived_first
+        if not last_name:
+            last_name = derived_last
+
     org_id = None
     if payload.campaign_id:
         camp = rest_get_one("campaigns", params={"id": f"eq.{payload.campaign_id}", "select": "organization_id"})
@@ -324,9 +341,9 @@ def prepare_binance_payment(payload: BinancePreparePayload) -> dict[str, Any]:
         "status": "pending",
         "payment_method": "binance_pay",
         "payment_processor": "binance",
-        "first_name": donor_data.get("first_name") or "Anonymous",
-        "last_name": donor_data.get("last_name") or "",
-        "email": donor_data.get("email"),
+        "first_name": first_name,
+        "last_name": last_name,
+        "email": email,
         "comment": payload.comment,
         "fee_covered": payload.cover_fees,
         "crypto_amount": crypto_amount,
@@ -338,7 +355,7 @@ def prepare_binance_payment(payload: BinancePreparePayload) -> dict[str, Any]:
             "crypto_amount": crypto_amount_str,
             "exchange_rate": coin_price,
             "dedicate": payload.dedicate,
-            "checkout_view": "homepage",
+            "checkout_view": payload.checkout_view or "homepage",
         },
     }
 
@@ -375,12 +392,13 @@ def prepare_binance_payment(payload: BinancePreparePayload) -> dict[str, Any]:
 @router.get("/check-status")
 def check_binance_status(payment_ref: str = Query(...)) -> dict[str, Any]:
     """Checks whether the donation has succeeded or is still pending."""
-    # Find donation by metadata payment_ref
+    # Find donation by device payment_ref or id
     donations = rest_get("donations", params={"payment_method": "eq.binance_pay", "select": "*", "limit": "50"})
     target = None
     for d in donations:
+        dev = d.get("device") or {}
         meta = d.get("metadata") or {}
-        if meta.get("payment_ref") == payment_ref or d.get("id") == payment_ref:
+        if dev.get("payment_ref") == payment_ref or meta.get("payment_ref") == payment_ref or d.get("id") == payment_ref:
             target = d
             break
 
@@ -397,43 +415,39 @@ def check_binance_status(payment_ref: str = Query(...)) -> dict[str, Any]:
 
     # Auto-verification logic via Binance Deposit History
     coin = target.get("crypto_currency") or "USDT"
-    # The DB might store crypto_amount as a float or string
     expected_amount = target.get("crypto_amount")
     
     if expected_amount:
         try:
             expected_amt = float(expected_amount)
-            # Query recent deposit history for this coin
             r = _query_binance_api("/sapi/v1/capital/deposit/hisrec", {"coin": coin.upper()})
             if r.status_code == 200:
                 deposits = r.json()
-                # deposits is a list of recent deposit dicts
-                for dep in deposits:
-                    # status 1 = Success
-                    if dep.get("status") == 1:
-                        dep_amount = float(dep.get("amount", 0))
-                        # Match amount within a tiny margin to account for floating point differences
-                        if abs(dep_amount - expected_amt) < 0.000001:
-                            # Update donation status to succeeded
-                            rest_patch(
-                                "donations",
-                                target.get("id"),
-                                {
+                if isinstance(deposits, list):
+                    for dep in deposits:
+                        if dep.get("status") == 1:
+                            dep_amount = float(dep.get("amount", 0))
+                            if abs(dep_amount - expected_amt) < 0.000001:
+                                updated_device = dict(target.get("device") or {})
+                                updated_device["tx_hash"] = dep.get("txId")
+                                if "payment_ref" not in updated_device:
+                                    updated_device["payment_ref"] = payment_ref
+                                rest_patch(
+                                    "donations",
+                                    {
+                                        "status": "succeeded",
+                                        "device": updated_device,
+                                    },
+                                    match={"id": str(target["id"])},
+                                )
+                                return {
                                     "status": "succeeded",
-                                    "metadata": {
-                                        **(target.get("metadata") or {}),
-                                        "tx_hash": dep.get("txId")
-                                    }
+                                    "donation_id": target.get("id"),
+                                    "amount": target.get("amount"),
+                                    "currency": target.get("currency"),
                                 }
-                            )
-                            return {
-                                "status": "succeeded",
-                                "donation_id": target.get("id"),
-                                "amount": target.get("amount"),
-                                "currency": target.get("currency"),
-                            }
         except Exception as e:
-            print("Auto-verify Binance error:", e)
+            logger.warning("Auto-verify Binance error: %s", e)
 
     return {
         "status": "pending",
@@ -448,13 +462,13 @@ def confirm_binance_payment(payload: BinanceConfirmPayload) -> dict[str, Any]:
     donations = rest_get("donations", params={"payment_method": "eq.binance_pay", "select": "*", "limit": "50"})
     target = None
     for d in donations:
+        dev = d.get("device") or {}
         meta = d.get("metadata") or {}
-        if meta.get("payment_ref") == payload.payment_ref or d.get("id") == payload.payment_ref or (payload.donation_id and d.get("id") == payload.donation_id):
+        if dev.get("payment_ref") == payload.payment_ref or meta.get("payment_ref") == payload.payment_ref or d.get("id") == payload.payment_ref or (payload.donation_id and d.get("id") == payload.donation_id):
             target = d
             break
 
     if not target:
-        # Create completed record directly if not found
         donation_id = payload.donation_id or str(uuid.uuid4())
         created = rest_insert("donations", {
             "id": donation_id,
@@ -465,7 +479,9 @@ def confirm_binance_payment(payload: BinanceConfirmPayload) -> dict[str, Any]:
             "status": "succeeded",
             "payment_method": "binance_pay",
             "payment_processor": "binance",
-            "metadata": {"payment_ref": payload.payment_ref, "tx_hash": payload.tx_hash},
+            "first_name": "Donor",
+            "last_name": "",
+            "device": {"payment_ref": payload.payment_ref, "tx_hash": payload.tx_hash},
         })
         return {
             "status": "succeeded",
@@ -473,19 +489,21 @@ def confirm_binance_payment(payload: BinanceConfirmPayload) -> dict[str, Any]:
             "message": "Thank you for your generous donation!",
         }
 
-    # Update target donation to succeeded
+    device = dict(target.get("device") or {})
+    if payload.tx_hash:
+        device["tx_hash"] = payload.tx_hash
+    if payload.payment_ref and "payment_ref" not in device:
+        device["payment_ref"] = payload.payment_ref
+
     updates: dict[str, Any] = {
         "status": "succeeded",
+        "device": device,
     }
-    meta = dict(target.get("metadata") or {})
-    if payload.tx_hash:
-        meta["tx_hash"] = payload.tx_hash
-    updates["metadata"] = meta
 
     try:
         rest_patch("donations", updates, match={"id": str(target["id"])})
     except Exception as e:
-        print("Failed to update donation to succeeded:", e)
+        logger.warning("Failed to update donation to succeeded: %s", e)
 
     return {
         "status": "succeeded",
@@ -494,3 +512,59 @@ def confirm_binance_payment(payload: BinanceConfirmPayload) -> dict[str, Any]:
         "currency": target.get("currency"),
         "message": "Thank you for your generous donation!",
     }
+
+
+def sync_pending_binance_donations() -> int:
+    """Checks recent Binance deposits against pending donations and auto-confirms matching ones."""
+    pending = rest_get(
+        "donations",
+        params={
+            "payment_method": "eq.binance_pay",
+            "status": "eq.pending",
+            "select": "id,amount,currency,crypto_amount,crypto_currency,device,first_name,last_name,email",
+            "limit": "50",
+        },
+    )
+    if not pending:
+        return 0
+
+    updated_count = 0
+    coins = {str(d.get("crypto_currency") or "USDT").upper() for d in pending}
+    for coin in coins:
+        try:
+            r = _query_binance_api("/sapi/v1/capital/deposit/hisrec", {"coin": coin})
+            if r.status_code != 200:
+                continue
+            deposits = r.json()
+            if not isinstance(deposits, list):
+                continue
+
+            for d in pending:
+                if str(d.get("crypto_currency") or "USDT").upper() != coin:
+                    continue
+                expected_amt_val = d.get("crypto_amount")
+                if not expected_amt_val:
+                    continue
+                try:
+                    expected_amt = float(expected_amt_val)
+                except (ValueError, TypeError):
+                    continue
+
+                for dep in deposits:
+                    if dep.get("status") == 1:
+                        dep_amt = float(dep.get("amount", 0))
+                        if abs(dep_amt - expected_amt) < 0.000001:
+                            device = dict(d.get("device") or {})
+                            device["tx_hash"] = dep.get("txId")
+                            rest_patch(
+                                "donations",
+                                {"status": "succeeded", "device": device},
+                                match={"id": str(d["id"])},
+                            )
+                            updated_count += 1
+                            break
+        except Exception as e:
+            logger.warning("Error syncing pending binance donations for coin %s: %s", coin, e)
+
+    return updated_count
+

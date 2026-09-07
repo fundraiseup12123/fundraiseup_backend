@@ -462,33 +462,13 @@ def nowpayments_checkout_config(
     campaign_id: str | None = Query(None),
     checkout_view: Literal["homepage", "popup", "landing"] = Query("homepage"),
 ) -> dict[str, object]:
-    if campaign_id:
-        cid_lower = str(campaign_id).lower()
-        if "binance" in cid_lower or cid_lower == "hope-for-gaza-binance":
-            return {
-                "available": False,
-                "merchant_connected": False,
-                "api_configured": False,
-            }
-        camp = rest_get_one("campaigns", params={"id": f"eq.{campaign_id}", "select": "slug,payment_account_sources"})
-        if not camp:
-            camp = rest_get_one("campaigns", params={"slug": f"eq.{campaign_id}", "select": "slug,payment_account_sources"})
-        if camp:
-            slug = str(camp.get("slug") or "").lower()
-            sources = camp.get("payment_account_sources") or {}
-            if slug == "hope-for-gaza-binance" or "binance" in slug or sources.get("crypto_processor") == "binance":
-                return {
-                    "available": False,
-                    "merchant_connected": False,
-                    "api_configured": False,
-                }
-
-    account = resolve_nowpayments_account_for_checkout(campaign_id, checkout_view)
+    """NOWPayments disabled across all campaigns in favor of Binance Pay."""
     return {
-        "available": bool(account),
-        "merchant_connected": bool(account),
-        "api_configured": bool(account),
+        "available": False,
+        "merchant_connected": False,
+        "api_configured": False,
     }
+
 
 
 @router.post("/prepare-redirect")

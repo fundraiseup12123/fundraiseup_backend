@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Annotated, Any
@@ -12,6 +13,8 @@ from auth import AuthUser, require_super_admin
 from currency import convert_to_reporting
 from db import rest_get, rest_get_one
 from routers import admin_data as ad
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/super", tags=["platform-data"])
 
@@ -111,6 +114,12 @@ def platform_list_donations(
     timezone: str | None = Query(None),
     q: str | None = Query(None),
 ) -> dict[str, Any]:
+    try:
+        from routers.binance_pay import sync_pending_binance_donations
+        sync_pending_binance_donations()
+    except Exception as e:
+        logger.debug("Binance pending sync error: %s", e)
+
     reporting_currency = (reporting_currency or "USD").strip().upper() or "USD"
     tz_name = ad._org_zone(timezone or _DEFAULT_PLATFORM_TZ).key
     org_names = _org_name_map()
@@ -118,12 +127,12 @@ def platform_list_donations(
     amount_sort = sort in {"asc", "desc"}
     sort_desc = sort == "desc"
 
-    allowed_methods = {"card", "paypal", "apple_pay", "google_pay", "nowpayments"}
+    allowed_methods = {"card", "paypal", "apple_pay", "google_pay", "nowpayments", "binance_pay", "binance"}
     method_filter = (payment_method or "").strip().lower()
     if method_filter not in allowed_methods:
         method_filter = ""
 
-    allowed_processors = {"stripe", "paypal", "authorizenet_paypal", "nowpayments"}
+    allowed_processors = {"stripe", "paypal", "authorizenet_paypal", "nowpayments", "binance"}
     processor_filter = (payment_processor or "").strip().lower()
     if processor_filter not in allowed_processors:
         processor_filter = ""
@@ -197,6 +206,15 @@ def platform_list_donations(
                 for r in rows
                 if ad.donation_matches_processor_filter(r, processor_filter)
             ]
+
+    # Never show pending Binance payments in donations tab — only successful ones
+    rows = [
+        r for r in rows
+        if not (
+            (r.get("payment_method") == "binance_pay" or r.get("payment_processor") == "binance")
+            and r.get("status") != "succeeded"
+        )
+    ]
 
     if q and q.strip():
         search_q = q.strip().lower()

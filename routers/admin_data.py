@@ -67,6 +67,12 @@ def admin_list_donations(
     q: str | None = Query(None),
 ) -> dict[str, Any]:
     require_org_access(org_id, user, min_role="member")
+    try:
+        from routers.binance_pay import sync_pending_binance_donations
+        sync_pending_binance_donations()
+    except Exception as e:
+        logger.debug("Binance pending sync error: %s", e)
+
     org = rest_get_one(
         "organizations",
         params={"id": f"eq.{org_id}", "select": "reporting_currency,timezone"},
@@ -80,11 +86,11 @@ def admin_list_donations(
         "payment_processor,honoree_name,created_at,campaign_id,platform_fee,processing_fee,payout_amount,"
         "base_amount,fee_covered,organization_id,crypto_amount,crypto_currency"
     )
-    allowed_methods = {"card", "paypal", "apple_pay", "google_pay", "nowpayments"}
+    allowed_methods = {"card", "paypal", "apple_pay", "google_pay", "nowpayments", "binance_pay", "binance"}
     method_filter = (payment_method or "").strip().lower()
     if method_filter not in allowed_methods:
         method_filter = ""
-    allowed_processors = {"stripe", "paypal", "authorizenet_paypal", "nowpayments"}
+    allowed_processors = {"stripe", "paypal", "authorizenet_paypal", "nowpayments", "binance"}
     processor_filter = (payment_processor or "").strip().lower()
     if processor_filter not in allowed_processors:
         processor_filter = ""
@@ -174,6 +180,15 @@ def admin_list_donations(
                     if row_id and row_id not in seen:
                         rows.append(row)
                         seen.add(row_id)
+
+    # Never show pending Binance payments in donations tab — only successful ones
+    rows = [
+        r for r in rows
+        if not (
+            (r.get("payment_method") == "binance_pay" or r.get("payment_processor") == "binance")
+            and r.get("status") != "succeeded"
+        )
+    ]
 
     if q and q.strip():
         search_q = q.strip().lower()
@@ -1804,6 +1819,16 @@ def export_donations_csv(
         campaign_id=campaign_id,
         select=select_cols,
     )
+
+    # Exclude pending Binance payments from CSV export
+    rows = [
+        r for r in rows
+        if not (
+            (r.get("payment_method") == "binance_pay" or r.get("payment_processor") == "binance")
+            and r.get("status") != "succeeded"
+        )
+    ]
+
     campaign_name_by_id = {str(c.get("id")): str(c.get("name") or "") for c in campaigns if c.get("id")}
 
     def csv_cell(value: Any) -> str:
