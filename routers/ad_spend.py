@@ -678,7 +678,7 @@ def _match_donation_to_campaign(
 
     Matches by:
     1. Exact or substring match on utm_campaign (case-insensitive)
-    2. Fallback to channel/source match if specified
+    2. Fallback to channel/source match ONLY if no specific utm_campaign is defined on the campaign
     """
     utm = donation.get("utm")
     if not isinstance(utm, dict):
@@ -691,23 +691,31 @@ def _match_donation_to_campaign(
     don_campaign = str(utm.get("campaign") or utm.get("utm_campaign") or "").strip().lower()
     don_source = str(utm.get("source") or utm.get("utm_source") or "").strip().lower()
 
-    # 1. Match by campaign name tag
-    if camp_utm and don_campaign:
-        if camp_utm == don_campaign or camp_utm in don_campaign or don_campaign in camp_utm:
-            return True
+    # 1. If campaign specifies a utm_campaign, it MUST match the donation's campaign tag
+    if camp_utm:
+        if not don_campaign:
+            return False
+        return camp_utm == don_campaign or camp_utm in don_campaign or don_campaign in camp_utm
 
-    # 2. Match by source
+    # 2. For broad channel/source catch-all campaigns (no utm_campaign tag):
+    channel_sources = {
+        "meta": ("facebook", "fb", "meta", "instagram", "ig"),
+        "google": ("google", "adwords", "gads", "youtube"),
+        "tiktok": ("tiktok", "tt"),
+    }
+
+    # If channel is specified, source MUST match that channel
+    if camp_channel in channel_sources:
+        valid_sources = channel_sources[camp_channel]
+        if don_source in valid_sources:
+            return True
+        if camp_src and camp_src in valid_sources and (camp_src == don_source or camp_src in don_source):
+            return True
+        return False
+
+    # Fallback to source match
     if camp_src and don_source and (camp_src == don_source or camp_src in don_source):
         return True
-
-    # 3. Channel heuristic match
-    if not camp_utm:
-        if camp_channel == "meta" and don_source in ("facebook", "fb", "meta", "instagram", "ig"):
-            return True
-        if camp_channel == "google" and don_source in ("google", "adwords", "gads", "youtube"):
-            return True
-        if camp_channel == "tiktok" and don_source in ("tiktok", "tt"):
-            return True
 
     return False
 
@@ -853,7 +861,11 @@ def get_ad_spend_performance(
             day_all_gross += convert_to_reporting(amt, curr, rep_curr)
         all_platform_gross_sum += day_all_gross
 
-        for camp in filtered_campaigns:
+        # Sort campaigns so specific campaigns (with utm_campaign) are processed before generic catch-alls
+        sorted_campaigns = sorted(filtered_campaigns, key=lambda c: 0 if c.get("utm_campaign") else 1)
+        claimed_donation_ids: set[str] = set()
+
+        for camp in sorted_campaigns:
             camp_id = str(camp["id"])
             eff_budget_rec = _find_effective_budget_on_date(all_budgets, camp_id, day_str)
             raw_daily_budget = float(eff_budget_rec.get("daily_budget") or 0.0) if eff_budget_rec else 0.0
@@ -864,18 +876,22 @@ def get_ad_spend_performance(
             day_spend += budget_in_rep
             campaign_totals[camp_id]["spend"] += budget_in_rep
 
-            # Find matching donations for this campaign
+            # Find matching donations for this campaign (deduplicated across campaigns)
             camp_gross = 0.0
             camp_donors = 0
             for don in day_donations:
+                don_id = str(don.get("id"))
+                if don_id in claimed_donation_ids:
+                    continue
                 if _match_donation_to_campaign(don, camp):
                     amt = float(don.get("amount") or 0.0)
                     curr = str(don.get("currency") or rep_curr).upper()
                     converted_amt = convert_to_reporting(amt, curr, rep_curr)
                     camp_gross += converted_amt
                     camp_donors += 1
-                    day_attributed_donors_set.add(str(don.get("id")))
-                    all_attributed_donors_set.add(str(don.get("id")))
+                    claimed_donation_ids.add(don_id)
+                    day_attributed_donors_set.add(don_id)
+                    all_attributed_donors_set.add(don_id)
 
             camp_net = round(camp_gross - budget_in_rep, 2)
             camp_roas = round(camp_gross / budget_in_rep, 2) if budget_in_rep > 0 else (round(camp_gross, 2) if camp_gross > 0 else 0.0)
@@ -897,7 +913,15 @@ def get_ad_spend_performance(
                 "is_organic": False,
             })
 
-        day_attributed_gross = sum(d["gross"] for d in day_campaign_details)
+        # Calculate day_attributed_gross directly from the unique attributed donations on that day
+        day_attributed_gross = round(
+            sum(
+                convert_to_reporting(float(don.get("amount") or 0.0), str(don.get("currency") or rep_curr).upper(), rep_curr)
+                for don in day_donations
+                if str(don.get("id")) in day_attributed_donors_set
+            ),
+            2,
+        )
         day_attributed_donors_count = len(day_attributed_donors_set)
         all_attributed_gross_sum += day_attributed_gross
 
