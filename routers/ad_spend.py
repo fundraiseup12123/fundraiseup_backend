@@ -815,7 +815,7 @@ def get_ad_spend_performance(
         except Exception:
             continue
 
-    # 4. Compute daily breakdown and per-campaign stats
+    # 4. Compute daily breakdown and per-campaign stats (Direct Campaign Expense Model)
     daily_breakdown: list[dict[str, Any]] = []
     campaign_totals: dict[str, dict[str, Any]] = {
         str(c["id"]): {
@@ -823,34 +823,23 @@ def get_ad_spend_performance(
             "name": c.get("name"),
             "channel": c.get("channel"),
             "status": c.get("status"),
-            "utm_campaign": c.get("utm_campaign"),
             "spend": 0.0,
-            "gross": 0.0,
-            "net": 0.0,
-            "donors": 0,
-            "roas": 0.0,
-            "cpa": 0.0,
+            "daily_budget": 0.0,
         }
         for c in filtered_campaigns
     }
 
     total_platform_spend = 0.0
     total_platform_gross = 0.0
-    total_platform_donors = 0
-
-    all_platform_gross_sum = 0.0
-    all_platform_donors_set = set()
-    all_attributed_donors_set = set()
-    all_attributed_gross_sum = 0.0
+    all_platform_donors_set: set[str] = set()
 
     for day_str in calendar_days:
         day_donations = donations_by_day.get(day_str, [])
         day_spend = 0.0
-        day_attributed_donors_set = set()
         day_campaign_details: list[dict[str, Any]] = []
 
-        # All platform donations for this day
-        day_all_donor_ids = set()
+        # All platform donations for this day (Gross Raised)
+        day_all_donor_ids: set[str] = set()
         day_all_gross = 0.0
         for don in day_donations:
             don_id = str(don.get("id"))
@@ -859,163 +848,87 @@ def get_ad_spend_performance(
             amt = float(don.get("amount") or 0.0)
             curr = str(don.get("currency") or rep_curr).upper()
             day_all_gross += convert_to_reporting(amt, curr, rep_curr)
-        all_platform_gross_sum += day_all_gross
 
-        # Sort campaigns so specific campaigns (with utm_campaign) are processed before generic catch-alls
-        sorted_campaigns = sorted(filtered_campaigns, key=lambda c: 0 if c.get("utm_campaign") else 1)
-        claimed_donation_ids: set[str] = set()
+        day_gross = round(day_all_gross, 2)
+        day_donors_count = len(day_all_donor_ids)
 
-        for camp in sorted_campaigns:
+        for camp in filtered_campaigns:
             camp_id = str(camp["id"])
             eff_budget_rec = _find_effective_budget_on_date(all_budgets, camp_id, day_str)
             raw_daily_budget = float(eff_budget_rec.get("daily_budget") or 0.0) if eff_budget_rec else 0.0
             budget_curr = str(eff_budget_rec.get("currency") or "USD") if eff_budget_rec else "USD"
 
-            # Convert budget to reporting currency
+            # Convert campaign daily budget/expense to reporting currency
             budget_in_rep = convert_to_reporting(raw_daily_budget, budget_curr, rep_curr)
             day_spend += budget_in_rep
             campaign_totals[camp_id]["spend"] += budget_in_rep
-
-            # Find matching donations for this campaign (deduplicated across campaigns)
-            camp_gross = 0.0
-            camp_donors = 0
-            for don in day_donations:
-                don_id = str(don.get("id"))
-                if don_id in claimed_donation_ids:
-                    continue
-                if _match_donation_to_campaign(don, camp):
-                    amt = float(don.get("amount") or 0.0)
-                    curr = str(don.get("currency") or rep_curr).upper()
-                    converted_amt = convert_to_reporting(amt, curr, rep_curr)
-                    camp_gross += converted_amt
-                    camp_donors += 1
-                    claimed_donation_ids.add(don_id)
-                    day_attributed_donors_set.add(don_id)
-                    all_attributed_donors_set.add(don_id)
-
-            camp_net = round(camp_gross - budget_in_rep, 2)
-            camp_roas = round(camp_gross / budget_in_rep, 2) if budget_in_rep > 0 else (round(camp_gross, 2) if camp_gross > 0 else 0.0)
-            camp_cpa = round(budget_in_rep / camp_donors, 2) if camp_donors > 0 else 0.0
-
-            campaign_totals[camp_id]["gross"] += camp_gross
-            campaign_totals[camp_id]["donors"] += camp_donors
+            campaign_totals[camp_id]["daily_budget"] = budget_in_rep
 
             day_campaign_details.append({
                 "campaign_id": camp_id,
                 "campaign_name": camp.get("name"),
                 "channel": camp.get("channel"),
                 "daily_budget": budget_in_rep,
-                "gross": round(camp_gross, 2),
-                "net": camp_net,
-                "donors": camp_donors,
-                "roas": camp_roas,
-                "cpa": camp_cpa,
                 "is_organic": False,
             })
 
-        # Calculate day_attributed_gross directly from the unique attributed donations on that day
-        day_attributed_gross = round(
-            sum(
-                convert_to_reporting(float(don.get("amount") or 0.0), str(don.get("currency") or rep_curr).upper(), rep_curr)
-                for don in day_donations
-                if str(don.get("id")) in day_attributed_donors_set
-            ),
-            2,
-        )
-        day_attributed_donors_count = len(day_attributed_donors_set)
-        all_attributed_gross_sum += day_attributed_gross
-
-        day_organic_donor_ids = day_all_donor_ids - day_attributed_donors_set
-        day_organic_donors_count = len(day_organic_donor_ids)
-        day_organic_gross = max(0.0, round(day_all_gross - day_attributed_gross, 2))
-
-        # Always add organic / direct line if there are organic donations on this day
-        if day_organic_donors_count > 0 or day_organic_gross > 0:
-            day_campaign_details.append({
-                "campaign_id": "organic",
-                "campaign_name": "Organic / Direct Traffic (No Ad UTM)",
-                "channel": "organic",
-                "daily_budget": 0.0,
-                "gross": day_organic_gross,
-                "net": day_organic_gross,
-                "donors": day_organic_donors_count,
-                "roas": 0.0,
-                "cpa": 0.0,
-                "is_organic": True,
-            })
-
-        if attr_mode == "blended":
-            day_gross = round(day_all_gross, 2)
-            day_donors_count = len(day_all_donor_ids)
-        else:
-            day_gross = round(day_attributed_gross, 2)
-            day_donors_count = day_attributed_donors_count
-
+        day_spend = round(day_spend, 2)
         day_net = round(day_gross - day_spend, 2)
         day_roas = round(day_gross / day_spend, 2) if day_spend > 0 else (round(day_gross, 2) if day_gross > 0 else 0.0)
         day_cpa = round(day_spend / day_donors_count, 2) if day_donors_count > 0 else 0.0
 
         total_platform_spend += day_spend
         total_platform_gross += day_gross
-        total_platform_donors += day_donors_count
 
         daily_breakdown.append({
             "date": day_str,
-            "spend": round(day_spend, 2),
-            "gross": round(day_gross, 2),
+            "spend": day_spend,
+            "gross": day_gross,
             "net": day_net,
             "donors": day_donors_count,
             "roas": day_roas,
             "cpa": day_cpa,
             "campaigns_active": len([c for c in filtered_campaigns if str(c.get("status")) == "active"]),
             "details": day_campaign_details,
-            "platform_total_donors": len(day_all_donor_ids),
-            "platform_total_gross": round(day_all_gross, 2),
-            "attributed_donors": day_attributed_donors_count,
-            "attributed_gross": round(day_attributed_gross, 2),
-            "organic_donors": day_organic_donors_count,
-            "organic_gross": day_organic_gross,
+            "platform_total_donors": day_donors_count,
+            "platform_total_gross": day_gross,
+            "attributed_donors": day_donors_count,
+            "attributed_gross": day_gross,
+            "organic_donors": 0,
+            "organic_gross": 0.0,
         })
 
     # Finalize campaign totals
     for ct in campaign_totals.values():
         c_spend = ct["spend"]
-        c_gross = ct["gross"]
-        c_donors = ct["donors"]
         ct["spend"] = round(c_spend, 2)
-        ct["gross"] = round(c_gross, 2)
-        ct["net"] = round(c_gross - c_spend, 2)
-        ct["roas"] = round(c_gross / c_spend, 2) if c_spend > 0 else 0.0
-        ct["cpa"] = round(c_spend / c_donors, 2) if c_donors > 0 else 0.0
 
+    total_platform_gross = round(total_platform_gross, 2)
+    total_platform_spend = round(total_platform_spend, 2)
     total_platform_net = round(total_platform_gross - total_platform_spend, 2)
+    total_donors_count = len(all_platform_donors_set)
     overall_roas = round(total_platform_gross / total_platform_spend, 2) if total_platform_spend > 0 else 0.0
-    overall_cpa = round(total_platform_spend / total_platform_donors, 2) if total_platform_donors > 0 else 0.0
-
-    all_platform_donors_count = len(all_platform_donors_set)
-    all_attributed_donors_count = len(all_attributed_donors_set)
-    all_organic_donors_count = max(0, all_platform_donors_count - all_attributed_donors_count)
-    all_organic_gross = max(0.0, round(all_platform_gross_sum - all_attributed_gross_sum, 2))
+    overall_cpa = round(total_platform_spend / total_donors_count, 2) if total_donors_count > 0 else 0.0
 
     return {
         "summary": {
-            "total_spend": round(total_platform_spend, 2),
-            "total_gross": round(total_platform_gross, 2),
+            "total_spend": total_platform_spend,
+            "total_gross": total_platform_gross,
             "total_net": total_platform_net,
             "roas": overall_roas,
             "cpa": overall_cpa,
-            "total_donors": total_platform_donors,
+            "total_donors": total_donors_count,
             "active_campaigns_count": len([c for c in filtered_campaigns if str(c.get("status")) == "active"]),
             "reporting_currency": rep_curr,
             "date_preset": preset_val,
             "date_label": date_label,
-            "attribution_mode": attr_mode,
-            "platform_total_donors": all_platform_donors_count,
-            "platform_total_gross": round(all_platform_gross_sum, 2),
-            "attributed_donors": all_attributed_donors_count,
-            "attributed_gross": round(all_attributed_gross_sum, 2),
-            "organic_donors": all_organic_donors_count,
-            "organic_gross": all_organic_gross,
+            "attribution_mode": "expense_deduction",
+            "platform_total_donors": total_donors_count,
+            "platform_total_gross": total_platform_gross,
+            "attributed_donors": total_donors_count,
+            "attributed_gross": total_platform_gross,
+            "organic_donors": 0,
+            "organic_gross": 0.0,
         },
         "daily_breakdown": daily_breakdown,
         "campaign_summaries": list(campaign_totals.values()),
@@ -1059,58 +972,39 @@ def export_ad_spend_csv(
     # Header section
     writer.writerow(["Ad Spend & ROI Performance Report"])
     writer.writerow(["Period", report["summary"]["date_label"]])
-    writer.writerow(["Attribution Mode", report["summary"]["attribution_mode"].capitalize()])
     writer.writerow(["Reporting Currency", currency])
-    writer.writerow(["Total Spend", f"{report['summary']['total_spend']:.2f} {currency}"])
-    writer.writerow(["Total Gross Raised", f"{report['summary']['total_gross']:.2f} {currency}"])
+    writer.writerow(["Total Ad Expense", f"{report['summary']['total_spend']:.2f} {currency}"])
+    writer.writerow(["Total Donations Raised", f"{report['summary']['total_gross']:.2f} {currency}"])
     writer.writerow(["Net Remaining", f"{report['summary']['total_net']:.2f} {currency}"])
     writer.writerow(["Overall ROAS", f"{report['summary']['roas']}x"])
     writer.writerow(["Average CPA", f"{report['summary']['cpa']:.2f} {currency}"])
     writer.writerow(["Total Donors", report["summary"]["total_donors"]])
-    writer.writerow(["Platform Total Donors", f"{report['summary'].get('platform_total_donors', report['summary']['total_donors'])} ({report['summary'].get('attributed_donors', 0)} Ad Attributed, {report['summary'].get('organic_donors', 0)} Organic)"])
     writer.writerow([])
-
 
     # Table columns
     writer.writerow([
         "Date",
-        "Campaign Name",
-        "Channel",
-        f"Daily Spend ({currency})",
-        f"Gross Raised ({currency})",
+        f"Daily Ad Expense ({currency})",
+        f"Donations Raised ({currency})",
         f"Net Remaining ({currency})",
-        "Donors",
+        "Total Donors",
         "ROAS",
         f"CPA ({currency})",
+        "Active Campaigns",
     ])
 
     for row in report.get("daily_breakdown", []):
-        details = row.get("details", [])
-        if details:
-            for d in details:
-                writer.writerow([
-                    row["date"],
-                    d["campaign_name"],
-                    d["channel"].upper(),
-                    f"{d['daily_budget']:.2f}",
-                    f"{d['gross']:.2f}",
-                    f"{d['net']:.2f}",
-                    d["donors"],
-                    f"{d['roas']}x",
-                    f"{d['cpa']:.2f}",
-                ])
-        else:
-            writer.writerow([
-                row["date"],
-                "All Campaigns (Blended)",
-                "BLENDED",
-                f"{row['spend']:.2f}",
-                f"{row['gross']:.2f}",
-                f"{row['net']:.2f}",
-                row["donors"],
-                f"{row['roas']}x",
-                f"{row['cpa']:.2f}",
-            ])
+        camp_names = ", ".join(d.get("campaign_name", "") for d in row.get("details", []) if not d.get("is_organic")) or "None"
+        writer.writerow([
+            row["date"],
+            f"{row['spend']:.2f}",
+            f"{row['gross']:.2f}",
+            f"{row['net']:.2f}",
+            row["donors"],
+            f"{row['roas']}x",
+            f"{row['cpa']:.2f}",
+            camp_names,
+        ])
 
     csv_data = output.getvalue()
     today_str = datetime.now().strftime("%Y%m%d")
