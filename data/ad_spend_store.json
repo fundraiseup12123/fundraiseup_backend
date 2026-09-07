@@ -1,0 +1,69 @@
+{
+  "campaigns": [
+    {
+      "id": "c1010101-0000-4000-8000-000000000001",
+      "name": "Meta Ads - Gaza Emergency Relief",
+      "channel": "meta",
+      "utm_campaign": "gaza_meta_ads",
+      "utm_source": "facebook",
+      "campaign_id": null,
+      "status": "active",
+      "notes": "Main Meta prospecting & retargeting campaign",
+      "created_at": "2026-08-01T00:00:00+00:00",
+      "updated_at": "2026-08-01T00:00:00+00:00"
+    },
+    {
+      "id": "c1010101-0000-4000-8000-000000000002",
+      "name": "Google Search - Urgent Food & Medical",
+      "channel": "google",
+      "utm_campaign": "google_search_gaza",
+      "utm_source": "google",
+      "campaign_id": null,
+      "status": "active",
+      "notes": "High-intent search keywords",
+      "created_at": "2026-08-01T00:00:00+00:00",
+      "updated_at": "2026-08-01T00:00:00+00:00"
+    },
+    {
+      "id": "c1010101-0000-4000-8000-000000000003",
+      "name": "TikTok Ads - Viral Video Relief",
+      "channel": "tiktok",
+      "utm_campaign": "tiktok_relief",
+      "utm_source": "tiktok",
+      "campaign_id": null,
+      "status": "active",
+      "notes": "Short video engagement ads",
+      "created_at": "2026-08-15T00:00:00+00:00",
+      "updated_at": "2026-08-15T00:00:00+00:00"
+    }
+  ],
+  "budgets": [
+    {
+      "id": "b1010101-0000-4000-8000-000000000001",
+      "ad_campaign_id": "c1010101-0000-4000-8000-000000000001",
+      "daily_budget": 50.0,
+      "currency": "USD",
+      "start_date": "2026-08-01",
+      "end_date": null,
+      "created_at": "2026-08-01T00:00:00+00:00"
+    },
+    {
+      "id": "b1010101-0000-4000-8000-000000000002",
+      "ad_campaign_id": "c1010101-0000-4000-8000-000000000002",
+      "daily_budget": 40.0,
+      "currency": "USD",
+      "start_date": "2026-08-01",
+      "end_date": null,
+      "created_at": "2026-08-01T00:00:00+00:00"
+    },
+    {
+      "id": "b1010101-0000-4000-8000-000000000003",
+      "ad_campaign_id": "c1010101-0000-4000-8000-000000000003",
+      "daily_budget": 30.0,
+      "currency": "USD",
+      "start_date": "2026-08-15",
+      "end_date": null,
+      "created_at": "2026-08-15T00:00:00+00:00"
+    }
+  ]
+}
