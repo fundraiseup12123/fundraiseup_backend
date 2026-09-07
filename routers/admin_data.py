@@ -1381,23 +1381,27 @@ def _donation_country_label(row: dict[str, Any]) -> str:
 
 def _donation_device_label(row: dict[str, Any]) -> str:
     device = row.get("device")
-    if not isinstance(device, dict):
-        return "Unknown"
-    raw = device.get("type") or device.get("Type") or ""
-    label = str(raw).strip().lower()
-    if label in ("mobile", "phone"):
-        return "Mobile"
-    if label in ("tablet", "ipad"):
-        return "Tablet"
-    if label in ("desktop", "computer", "pc"):
-        return "Desktop"
+    if isinstance(device, dict):
+        raw = device.get("type") or device.get("Type") or ""
+        label = str(raw).strip().lower()
+        if label in ("mobile", "phone"):
+            return "Mobile"
+        if label in ("tablet", "ipad"):
+            return "Tablet"
+        if label in ("desktop", "computer", "pc"):
+            return "Desktop"
 
-    # Fallback to OS if type was omitted
-    os_name = str(device.get("os") or device.get("OS") or "").strip().lower()
-    if os_name in ("ios", "android"):
+        # Fallback to OS if type was omitted
+        os_name = str(device.get("os") or device.get("OS") or "").strip().lower()
+        if os_name in ("ios", "android"):
+            return "Mobile"
+        if os_name in ("windows", "macos", "mac os x", "linux", "chrome os"):
+            return "Desktop"
+
+    # Wallet methods are natively executed on mobile devices
+    method = str(row.get("payment_method") or "").strip().lower()
+    if method in ("apple_pay", "google_pay"):
         return "Mobile"
-    if os_name in ("windows", "macos", "mac os x", "linux", "chrome os"):
-        return "Desktop"
 
     return "Unknown"
 

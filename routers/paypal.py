@@ -243,6 +243,7 @@ class CompletePayPalByRefRequest(BaseModel):
     payment_method: str | None = None
     paypal_txn_id: str | None = None
     subscription_id: str | None = None
+    device: PayPalDevice | None = None
 
 
 class EnsurePayPalPlanRequest(BaseModel):
@@ -489,6 +490,17 @@ def _record_paypal_donation(
 
     if country_code:
         device["country"] = country_code
+
+    if not device.get("type"):
+        pm = str(getattr(payload, "payment_method", "") or "").strip().lower()
+        if pm == "apple_pay":
+            device.setdefault("os", "iOS")
+            device.setdefault("browser", "Safari")
+            device.setdefault("type", "Mobile")
+        elif pm == "google_pay":
+            device.setdefault("os", "Android")
+            device.setdefault("browser", "Chrome")
+            device.setdefault("type", "Mobile")
 
     checkout_view = getattr(payload, "checkout_view", None)
     device["checkout_view"] = checkout_view if checkout_view in ("homepage", "popup", "landing") else "homepage"
@@ -984,6 +996,8 @@ def paypal_complete_by_ref(payload: CompletePayPalByRefRequest) -> dict[str, obj
         or pending.get("subscription_id")
         or None
     )
+    if payload.device and not data.get("device"):
+        data["device"] = payload.device.model_dump(mode="json", exclude_none=True)
     complete = CompletePayPalRedirectRequest.model_validate(data)
     result = paypal_complete_redirect(complete)
     _, total_display = _resolve_total(
