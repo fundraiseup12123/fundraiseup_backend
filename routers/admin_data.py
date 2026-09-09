@@ -190,6 +190,12 @@ def admin_list_donations(
         )
     ]
 
+    if status == "failed":
+        from failed_donations_service import filter_and_deduplicate_failed_donations
+        rows = filter_and_deduplicate_failed_donations(
+            rows, organization_id=org_id, campaign_id=campaign_id
+        )
+
     if q and q.strip():
         search_q = q.strip().lower()
         clean_q = re.sub(r"[^a-z0-9]", "", search_q)

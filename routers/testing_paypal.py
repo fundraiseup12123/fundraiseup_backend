@@ -155,7 +155,10 @@ def capture_order(body: CaptureOrderRequest) -> dict[str, Any]:
     try:
         result = capture_testing_order(body.order_id)
     except RuntimeError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=400,
+            detail="Insufficient balance or error processing payment. Please try another payment method.",
+        ) from exc
 
     status_value = str(result.get("status") or "").upper()
     capture_id = result.get("capture_id")
@@ -164,7 +167,7 @@ def capture_order(body: CaptureOrderRequest) -> dict[str, Any]:
     if not verified:
         raise HTTPException(
             status_code=400,
-            detail=f"Capture not successful (status={status_value or 'unknown'})",
+            detail="Insufficient balance or error processing payment. Please try another payment method.",
         )
 
     return {

@@ -942,9 +942,15 @@ def paypal_complete_redirect(payload: CompletePayPalRedirectRequest) -> CaptureP
                     client_secret=str(account.get("client_secret") or ""),
                 )
             except RuntimeError:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
+                raise HTTPException(
+                    status_code=400,
+                    detail="Insufficient balance or error processing payment. Please try another payment method.",
+                ) from exc
         if str(capture.get("status") or "").upper() != "COMPLETED":
-            raise HTTPException(status_code=400, detail="PayPal payment was not completed")
+            raise HTTPException(
+                status_code=400,
+                detail="Insufficient balance or error processing payment. Please try another payment method.",
+            )
     else:
         raise HTTPException(
             status_code=400,
@@ -1269,12 +1275,17 @@ def paypal_capture_order(payload: CapturePayPalOrderRequest) -> CapturePayPalOrd
         except Exception:
             import logging
 
-            logging.getLogger(__name__).exception("Unable to record failed PayPal donation")
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=400,
+            detail="Insufficient balance or error processing payment. Please try another payment method.",
+        ) from exc
 
     status = str(capture.get("status") or "").upper()
     if status != "COMPLETED":
-        raise HTTPException(status_code=400, detail="PayPal payment was not completed")
+        raise HTTPException(
+            status_code=400,
+            detail="Insufficient balance or error processing payment. Please try another payment method.",
+        )
 
     display_currency = payload.currency.upper()
     base_amount, total_display = _resolve_total(payload.amount, payload.currency.lower(), payload.cover_fees)
