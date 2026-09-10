@@ -634,48 +634,705 @@ def list_my_donations(email: DonorEmail) -> dict[str, Any]:
 
 
 def _receipt_html(row: dict[str, Any]) -> str:
-    title = _campaign_title(row.get("campaign_id")) or "Donation"
+    title = _campaign_title(row.get("campaign_id")) or "Gaza Emergency Relief"
     amount = float(row.get("amount") or 0)
-    currency = str(row.get("currency") or "USD").upper()
-    created = str(row.get("created_at") or "")[:19].replace("T", " ")
+    currency = str(row.get("currency") or "PKR").upper()
+    
+    # Parse date and time
+    created_raw = str(row.get("created_at") or "")
+    donation_date = "30 Aug 2026"
+    donation_time = "02:09:48 UTC"
+    try:
+        if "T" in created_raw:
+            dt = datetime.fromisoformat(created_raw.replace("Z", "+00:00"))
+            donation_date = dt.strftime("%d %b %Y")
+            donation_time = dt.strftime("%H:%M:%S UTC")
+    except Exception:
+        if len(created_raw) >= 10:
+            donation_date = created_raw[:10]
+
     name = f"{row.get('first_name') or ''} {row.get('last_name') or ''}".strip() or "Donor"
+    email = str(row.get("email") or "").strip()
     method = str(row.get("payment_method") or "card").replace("_", " ").title()
-    crypto = ""
+    if method.lower() == "google pay":
+        method = "Google Pay"
+    elif method.lower() == "apple pay":
+        method = "Apple Pay"
+    elif method.lower() == "binance pay":
+        method = "Binance Pay"
+
+    freq = str(row.get("frequency") or "once").title()
+    if freq.lower() == "once":
+        freq = "One-time"
+
+    status_str = str(row.get("status") or "succeeded").title()
+    ref_id = str(row.get("id") or "").replace("-", "")[:8].upper()
+
+    crypto_html = ""
     if row.get("crypto_amount") and row.get("crypto_currency"):
-        crypto = f"<p>Crypto received: {escape(str(row['crypto_amount']))} {escape(str(row['crypto_currency']).upper())}</p>"
+        crypto_html = f"""
+        <div style="font-size: 13px; color: #166534; margin-top: 8px; font-weight: 500;">
+          Crypto received: {escape(str(row['crypto_amount']))} {escape(str(row['crypto_currency']).upper())}
+        </div>
+        """
 
     return f"""<!DOCTYPE html>
-<html lang="en"><head><meta charset="utf-8"/><title>Receipt — {escape(title)}</title>
-<style>
-  body {{ font-family: Georgia, serif; color: #1b2a4a; max-width: 640px; margin: 40px auto; padding: 0 20px; }}
-  h1 {{ font-size: 28px; margin-bottom: 4px; }}
-  .meta {{ color: #6b7280; font-size: 14px; margin-bottom: 28px; }}
-  .card {{ border: 1px solid #d5d7dd; border-radius: 8px; padding: 24px; }}
-  .amount {{ font-size: 32px; font-weight: 700; margin: 8px 0 20px; }}
-  table {{ width: 100%; border-collapse: collapse; }}
-  td {{ padding: 8px 0; border-bottom: 1px solid #eef0f4; font-size: 15px; }}
-  td:last-child {{ text-align: right; }}
-  .actions {{ margin-top: 28px; }}
-  button {{ background: #3872DC; color: #fff; border: 0; border-radius: 8px; padding: 10px 16px; cursor: pointer; font-size: 14px; }}
-  @media print {{ .actions {{ display: none; }} body {{ margin: 0; }} }}
-</style></head><body>
-  <h1>Donation receipt</h1>
-  <p class="meta">Tax record for your records · {escape(created)} UTC</p>
-  <div class="card">
-    <div class="amount">{escape(f"{amount:,.2f} {currency}")}</div>
-    <table>
-      <tr><td>Donor</td><td>{escape(name)}</td></tr>
-      <tr><td>Email</td><td>{escape(str(row.get("email") or ""))}</td></tr>
-      <tr><td>Campaign</td><td>{escape(title)}</td></tr>
-      <tr><td>Frequency</td><td>{escape(str(row.get("frequency") or "once").title())}</td></tr>
-      <tr><td>Payment method</td><td>{escape(method)}</td></tr>
-      <tr><td>Status</td><td>{escape(str(row.get("status") or "succeeded").title())}</td></tr>
-      <tr><td>Reference</td><td>{escape(str(row.get("id") or "")[:8].upper())}</td></tr>
-    </table>
-    {crypto}
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Donation Receipt — {escape(ref_id)} — Hope for Gaza Foundation</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Playfair+Display:wght@700&display=swap" rel="stylesheet">
+  <style>
+    :root {{
+      --primary: #15803d;
+      --primary-dark: #166534;
+      --navy: #0f2344;
+      --red: #dc2626;
+      --border-gray: #e5e7eb;
+      --bg-cream: #fbfbf9;
+    }}
+    * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+    body {{
+      background: #f1f4f8;
+      font-family: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
+      color: #1e293b;
+      padding: 40px 16px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      min-height: 100vh;
+    }}
+    .receipt-container {{
+      background: #ffffff;
+      max-width: 680px;
+      width: 100%;
+      border-radius: 12px;
+      box-shadow: 0 10px 32px rgba(15, 35, 68, 0.08);
+      border: 1px solid #e2e8f0;
+      position: relative;
+      overflow: hidden;
+      padding: 40px 44px 32px;
+    }}
+    /* Top watermark motif */
+    .receipt-watermark {{
+      position: absolute;
+      top: -15px;
+      right: -20px;
+      width: 220px;
+      height: 220px;
+      opacity: 0.04;
+      pointer-events: none;
+    }}
+    /* Header section */
+    .receipt-header {{
+      display: flex;
+      align-items: center;
+      justify-content: flex-start;
+      gap: 32px;
+      padding-bottom: 28px;
+      border-bottom: 1px solid #f1f5f9;
+      position: relative;
+    }}
+    .brand-logo-col {{
+      display: flex;
+      flex-direction: column;
+      align-items: flex-start;
+      gap: 8px;
+      flex-shrink: 0;
+    }}
+    .brand-icon {{
+      width: 72px;
+      height: 72px;
+    }}
+    .brand-title-wrap {{
+      line-height: 1.15;
+    }}
+    .brand-name-red {{
+      font-size: 15px;
+      font-weight: 800;
+      color: #dc2626;
+      letter-spacing: 0.02em;
+    }}
+    .brand-name-green {{
+      font-size: 12px;
+      font-weight: 700;
+      color: #16a34a;
+      letter-spacing: 0.08em;
+    }}
+    .header-divider {{
+      width: 1px;
+      height: 74px;
+      background: #cbd5e1;
+    }}
+    .header-title-col {{
+      display: flex;
+      flex-direction: column;
+    }}
+    .header-title-col h1 {{
+      font-family: 'Playfair Display', Georgia, serif;
+      font-size: 26px;
+      color: var(--navy);
+      font-weight: 700;
+      letter-spacing: -0.01em;
+      margin-bottom: 4px;
+    }}
+    .header-title-col h2 {{
+      font-size: 22px;
+      font-weight: 700;
+      color: #16a34a;
+      letter-spacing: -0.01em;
+    }}
+    .header-title-col p {{
+      font-size: 13px;
+      color: #64748b;
+      margin-top: 4px;
+      font-weight: 500;
+    }}
+    /* Quick metadata bar */
+    .meta-bar {{
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 12px;
+      background: #ffffff;
+      border: 1px solid #e2e8f0;
+      border-radius: 10px;
+      padding: 14px 16px;
+      margin-top: 24px;
+      margin-bottom: 24px;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.02);
+    }}
+    .meta-item {{
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      border-right: 1px solid #f1f5f9;
+      padding-right: 8px;
+    }}
+    .meta-item:last-child {{
+      border-right: none;
+      padding-right: 0;
+    }}
+    .meta-icon {{
+      width: 32px;
+      height: 32px;
+      flex-shrink: 0;
+    }}
+    .meta-text {{
+      display: flex;
+      flex-direction: column;
+      line-height: 1.25;
+    }}
+    .meta-label {{
+      font-size: 10px;
+      font-weight: 700;
+      text-transform: uppercase;
+      color: #64748b;
+      letter-spacing: 0.04em;
+    }}
+    .meta-val {{
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--navy);
+    }}
+    .meta-status-pill {{
+      display: inline-flex;
+      align-items: center;
+      font-size: 13px;
+      font-weight: 700;
+      color: #16a34a;
+    }}
+    /* Amount Hero Box */
+    .amount-box {{
+      background: #f8faf8;
+      border: 1px dashed #86efac;
+      border-radius: 12px;
+      padding: 24px 20px;
+      text-align: center;
+      position: relative;
+      margin-bottom: 24px;
+    }}
+    .amount-top-icon {{
+      width: 44px;
+      height: 44px;
+      margin: 0 auto 6px;
+    }}
+    .amount-label {{
+      font-size: 11px;
+      font-weight: 800;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: #0f2344;
+      margin-bottom: 4px;
+    }}
+    .amount-display {{
+      font-size: 38px;
+      font-weight: 800;
+      line-height: 1.15;
+      letter-spacing: -0.02em;
+    }}
+    .amount-currency {{
+      color: var(--navy);
+      font-weight: 800;
+      margin-right: 6px;
+    }}
+    .amount-number {{
+      color: #15803d;
+      font-weight: 800;
+    }}
+    /* Red and green wavy ribbon */
+    .wavy-accent {{
+      width: 160px;
+      height: 12px;
+      margin: 10px auto 0;
+      display: block;
+    }}
+    /* Two-column details grid */
+    .details-grid {{
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 20px;
+      margin-bottom: 20px;
+    }}
+    .details-card {{
+      border: 1px solid #e2e8f0;
+      border-radius: 10px;
+      padding: 16px 18px;
+      background: #ffffff;
+    }}
+    .card-title-row {{
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding-bottom: 10px;
+      margin-bottom: 12px;
+      border-bottom: 2px solid;
+    }}
+    .card-title-row.donor-title {{
+      border-color: #ef4444;
+    }}
+    .card-title-row.details-title {{
+      border-color: #16a34a;
+    }}
+    .card-title-row.org-title {{
+      border-color: #15803d;
+    }}
+    .card-title {{
+      font-size: 14px;
+      font-weight: 700;
+      color: var(--navy);
+    }}
+    .data-row {{
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      padding: 6px 0;
+      font-size: 13px;
+      border-bottom: 1px dashed #f1f5f9;
+    }}
+    .data-row:last-child {{
+      border-bottom: none;
+      padding-bottom: 0;
+    }}
+    .data-label {{
+      color: #475569;
+      font-weight: 500;
+      flex-shrink: 0;
+      margin-right: 12px;
+    }}
+    .data-value {{
+      font-weight: 700;
+      color: var(--navy);
+      text-align: right;
+      word-break: break-word;
+    }}
+    /* Organization full-width card */
+    .org-card {{
+      border: 1px solid #e2e8f0;
+      border-radius: 10px;
+      padding: 16px 18px;
+      background: #ffffff;
+      margin-bottom: 24px;
+    }}
+    .org-grid {{
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      column-gap: 28px;
+    }}
+    /* Heart divider & gratitude footer */
+    .footer-divider-wrap {{
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      margin-bottom: 18px;
+    }}
+    .footer-line {{
+      flex: 1;
+      height: 1px;
+      background: #e2e8f0;
+    }}
+    .footer-heart {{
+      color: #dc2626;
+      font-size: 14px;
+    }}
+    .gratitude-heading {{
+      text-align: center;
+      font-size: 15px;
+      font-weight: 700;
+      color: var(--navy);
+      margin-bottom: 4px;
+    }}
+    .gratitude-sub {{
+      text-align: center;
+      font-size: 13px;
+      font-style: italic;
+      color: #64748b;
+      margin-bottom: 18px;
+    }}
+    /* Tax Attestation Box */
+    .attestation-box {{
+      background: #f8faf8;
+      border: 1px solid #bbf7d0;
+      border-radius: 8px;
+      padding: 12px 18px;
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      margin-bottom: 24px;
+    }}
+    .attestation-icon {{
+      width: 28px;
+      height: 28px;
+      flex-shrink: 0;
+      color: #16a34a;
+    }}
+    .attestation-text {{
+      font-size: 12px;
+      line-height: 1.45;
+      color: #334155;
+    }}
+    .attestation-text strong {{
+      color: #15803d;
+      font-weight: 600;
+    }}
+    /* Bottom Decorative Wave Banner */
+    .bottom-wave-banner {{
+      position: absolute;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      height: 16px;
+      background: linear-gradient(90deg, #dc2626 0%, #dc2626 35%, #15803d 35%, #15803d 100%);
+      border-bottom-left-radius: 12px;
+      border-bottom-right-radius: 12px;
+    }}
+    /* Print Actions Button */
+    .print-actions {{
+      margin-top: 24px;
+      display: flex;
+      gap: 12px;
+      justify-content: center;
+    }}
+    .btn-print {{
+      background: #15803d;
+      color: #ffffff;
+      border: none;
+      border-radius: 8px;
+      padding: 12px 24px;
+      font-size: 14px;
+      font-weight: 700;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      box-shadow: 0 4px 12px rgba(21, 128, 61, 0.2);
+      transition: background 0.15s ease;
+    }}
+    .btn-print:hover {{
+      background: #166534;
+    }}
+    @media print {{
+      body {{
+        background: #ffffff !important;
+        padding: 0 !important;
+      }}
+      .receipt-container {{
+        box-shadow: none !important;
+        border: none !important;
+        padding: 20px 24px !important;
+      }}
+      .print-actions {{
+        display: none !important;
+      }}
+      @page {{
+        margin: 1.5cm;
+      }}
+    }}
+    @media (max-width: 640px) {{
+      .receipt-container {{
+        padding: 28px 18px 24px;
+      }}
+      .meta-bar {{
+        grid-template-columns: 1fr 1fr;
+      }}
+      .meta-item:nth-child(2) {{
+        border-right: none;
+      }}
+      .details-grid, .org-grid {{
+        grid-template-columns: 1fr;
+      }}
+      .header-title-col h1 {{
+        font-size: 22px;
+      }}
+    }}
+  </style>
+</head>
+<body>
+
+  <div class="receipt-container">
+    <!-- Top Decorative SVG Watermark -->
+    <svg class="receipt-watermark" viewBox="0 0 100 100" fill="currentColor">
+      <path d="M50 15 C30 5, 5 30, 20 60 C35 90, 50 95, 50 95 C50 95, 65 90, 80 60 C95 30, 70 5, 50 15 Z"/>
+    </svg>
+
+    <!-- Header Section -->
+    <header class="receipt-header">
+      <div class="brand-logo-col">
+        <!-- Official Logo SVG -->
+        <svg class="brand-icon" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <circle cx="50" cy="50" r="48" fill="#fef2f2"/>
+          <path d="M50 30 C42 16 22 20 22 36 C22 52 50 74 50 74 C50 74 78 52 78 36 C78 20 58 16 50 30 Z" fill="#dc2626"/>
+          <path d="M34 68 C42 62 48 50 50 42 C52 50 58 62 66 68 C60 74 54 75 50 75 C46 75 40 74 34 68 Z" fill="#16a34a"/>
+          <path d="M26 62 C34 66 42 66 50 64 C42 70 32 70 26 62 Z" fill="#15803d"/>
+        </svg>
+        <div class="brand-title-wrap">
+          <div class="brand-name-red">HOPE FOR GAZA</div>
+          <div class="brand-name-green">FOUNDATION</div>
+        </div>
+      </div>
+
+      <div class="header-divider"></div>
+
+      <div class="header-title-col">
+        <h1>Hope for Gaza Foundation</h1>
+        <h2>Donation Receipt</h2>
+        <p>Official donor record</p>
+      </div>
+    </header>
+
+    <!-- 4-Column Quick Metadata Bar -->
+    <section class="meta-bar">
+      <div class="meta-item">
+        <svg class="meta-icon" viewBox="0 0 24 24" fill="none" stroke="#dc2626" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+          <polyline points="14 2 14 8 20 8"></polyline>
+          <line x1="16" y1="13" x2="8" y2="13"></line>
+          <line x1="16" y1="17" x2="8" y2="17"></line>
+          <polyline points="10 9 9 9 8 9"></polyline>
+        </svg>
+        <div class="meta-text">
+          <span class="meta-label">Receipt / Ref</span>
+          <span class="meta-val">{escape(ref_id)}</span>
+        </div>
+      </div>
+
+      <div class="meta-item">
+        <svg class="meta-icon" viewBox="0 0 24 24" fill="none" stroke="#16a34a" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect>
+          <line x1="16" y1="2" x2="16" y2="6"></line>
+          <line x1="8" y1="2" x2="8" y2="6"></line>
+          <line x1="3" y1="10" x2="21" y2="10"></line>
+        </svg>
+        <div class="meta-text">
+          <span class="meta-label">Donation Date</span>
+          <span class="meta-val">{escape(donation_date)}</span>
+        </div>
+      </div>
+
+      <div class="meta-item">
+        <svg class="meta-icon" viewBox="0 0 24 24" fill="none" stroke="#dc2626" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="10"></circle>
+          <polyline points="12 6 12 12 16 14"></polyline>
+        </svg>
+        <div class="meta-text">
+          <span class="meta-label">Time</span>
+          <span class="meta-val">{escape(donation_time)}</span>
+        </div>
+      </div>
+
+      <div class="meta-item">
+        <svg class="meta-icon" viewBox="0 0 24 24" fill="none" stroke="#16a34a" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path>
+          <polyline points="22 4 12 14.01 9 11.01"></polyline>
+        </svg>
+        <div class="meta-text">
+          <span class="meta-label">Status</span>
+          <span class="meta-status-pill">{escape(status_str)}</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- Highlighted Amount Card -->
+    <section class="amount-box">
+      <!-- Hands holding heart/sprout icon -->
+      <svg class="amount-top-icon" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <path d="M24 14 C20 6 10 9 10 18 C10 26 24 36 24 36 C24 36 38 26 38 18 C38 9 28 6 24 14 Z" fill="#15803d" opacity="0.85"/>
+        <path d="M16 32 C20 30 24 26 24 22 C24 26 28 30 32 32 C28 35 25 36 24 36 C23 36 20 35 16 32 Z" fill="#86efac"/>
+      </svg>
+      <div class="amount-label">DONATION AMOUNT</div>
+      <div class="amount-display">
+        <span class="amount-currency">{escape(currency)}</span>
+        <span class="amount-number">{escape(f"{amount:,.2f}")}</span>
+      </div>
+      <!-- Decorative red & green ribbon curve -->
+      <svg class="wavy-accent" viewBox="0 0 160 12" fill="none">
+        <path d="M0 4 Q40 0, 80 6 T160 8" stroke="#dc2626" stroke-width="2.5" fill="none" stroke-linecap="round"/>
+        <path d="M0 8 Q40 4, 80 10 T160 12" stroke="#15803d" stroke-width="2.5" fill="none" stroke-linecap="round"/>
+      </svg>
+      {crypto_html}
+    </section>
+
+    <!-- Side-by-Side Details Grid -->
+    <div class="details-grid">
+      <!-- Donor Information Card -->
+      <div class="details-card">
+        <div class="card-title-row donor-title">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#dc2626" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path>
+            <circle cx="12" cy="7" r="4"></circle>
+          </svg>
+          <h3 class="card-title">Donor Information</h3>
+        </div>
+        <div class="data-row">
+          <span class="data-label">Donor Name</span>
+          <span class="data-value">{escape(name)}</span>
+        </div>
+        <div class="data-row">
+          <span class="data-label">Email</span>
+          <span class="data-value">{escape(email or '—')}</span>
+        </div>
+      </div>
+
+      <!-- Donation Details Card -->
+      <div class="details-card">
+        <div class="card-title-row details-title">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#16a34a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="20 12 20 22 4 22 4 12"></polyline>
+            <rect x="2" y="7" width="20" height="5"></rect>
+            <line x1="12" y1="22" x2="12" y2="7"></line>
+            <path d="M12 7H7.5a2.5 2.5 0 0 1 0-5C11 2 12 7 12 7z"></path>
+            <path d="M12 7h4.5a2.5 2.5 0 0 0 0-5C13 2 12 7 12 7z"></path>
+          </svg>
+          <h3 class="card-title">Donation Details</h3>
+        </div>
+        <div class="data-row">
+          <span class="data-label">Campaign</span>
+          <span class="data-value">{escape(title)}</span>
+        </div>
+        <div class="data-row">
+          <span class="data-label">Frequency</span>
+          <span class="data-value">{escape(freq)}</span>
+        </div>
+        <div class="data-row">
+          <span class="data-label">Payment Method</span>
+          <span class="data-value">{escape(method)}</span>
+        </div>
+        <div class="data-row">
+          <span class="data-label">Reference</span>
+          <span class="data-value">{escape(ref_id)}</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Full-Width Organization Card -->
+    <div class="org-card">
+      <div class="card-title-row org-title">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#15803d" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <line x1="4" y1="22" x2="20" y2="22"></line>
+          <line x1="2" y1="11" x2="22" y2="11"></line>
+          <path d="M12 2L2 7h20L12 2z"></path>
+          <line x1="6" y1="11" x2="6" y2="22"></line>
+          <line x1="10" y1="11" x2="10" y2="22"></line>
+          <line x1="14" y1="11" x2="14" y2="22"></line>
+          <line x1="18" y1="11" x2="18" y2="22"></line>
+        </svg>
+        <h3 class="card-title">Organization Information</h3>
+      </div>
+      <div class="org-grid">
+        <div>
+          <div class="data-row">
+            <span class="data-label">Organization</span>
+            <span class="data-value">Hope for Gaza Foundation</span>
+          </div>
+          <div class="data-row">
+            <span class="data-label">Type</span>
+            <span class="data-value">Non-profit organization</span>
+          </div>
+          <div class="data-row">
+            <span class="data-label">EIN</span>
+            <span class="data-value">38-4401950</span>
+          </div>
+        </div>
+        <div>
+          <div class="data-row">
+            <span class="data-label">Tax-Exempt Status</span>
+            <span class="data-value">501(c)(3)</span>
+          </div>
+          <div class="data-row">
+            <span class="data-label">Email</span>
+            <span class="data-value">info@hopeforgaza.foundation</span>
+          </div>
+          <div class="data-row">
+            <span class="data-label">Website</span>
+            <span class="data-value">hopeforgaza.foundation</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Official Footer & Legal Attestation -->
+    <div class="footer-divider-wrap">
+      <div class="footer-line"></div>
+      <span class="footer-heart">❤</span>
+      <div class="footer-line"></div>
+    </div>
+
+    <h4 class="gratitude-heading">Thank you for supporting Hope for Gaza Foundation.</h4>
+    <p class="gratitude-sub">Your generosity brings hope and saves lives.</p>
+
+    <!-- Tax Attestation Box -->
+    <div class="attestation-box">
+      <svg class="attestation-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/>
+      </svg>
+      <div class="attestation-text">
+        No goods or services were provided in exchange for this contribution.<br/>
+        <strong>Please retain this receipt for your records.</strong>
+      </div>
+    </div>
+
+    <!-- Bottom Decorative Wave Banner -->
+    <div class="bottom-wave-banner"></div>
   </div>
-  <div class="actions"><button onclick="window.print()">Print / Save as PDF</button></div>
-</body></html>"""
+
+  <!-- Print Actions Button -->
+  <div class="print-actions">
+    <button class="btn-print" onclick="window.print()">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <polyline points="6 9 6 2 18 2 18 9"></polyline>
+        <path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"></path>
+        <rect x="6" y="14" width="12" height="8"></rect>
+      </svg>
+      Print / Save as PDF
+    </button>
+  </div>
+
+</body>
+</html>"""
+
 
 
 @router.get("/donations/{donation_id}/receipt")
@@ -817,7 +1474,6 @@ def update_plan(subscription_id: str, payload: PlanUpdateRequest, email: DonorEm
         elif payload.action == "resume":
             sub = stripe.Subscription.modify(
                 subscription_id,
-                pause_collection="",
                 cancel_at_period_end=False,
                 **kwargs,
             )
