@@ -261,7 +261,10 @@ def get_campaign_directory_data(
         oid = str(o.get("id") or "")
         org_campaigns = campaigns_by_org.get(oid, [])
         total_campaigns_count += len(org_campaigns)
-        active_count = sum(1 for cp in org_campaigns if cp.get("status") == "active")
+        active_count = sum(
+            1 for cp in org_campaigns
+            if str(cp.get("status") or "").lower() in ("live", "active")
+        )
         total_active_campaigns_count += active_count
 
         org_list.append({
