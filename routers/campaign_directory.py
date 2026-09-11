@@ -378,18 +378,16 @@ def delete_campaign_note(
             existing = rest_get("campaign_notes", params={"id": f"eq.{note_id}", "limit": "1"})
             if existing and existing[0].get("author_email", "").lower() != user.email.lower():
                 raise HTTPException(status_code=403, detail="You can only delete your own notes.")
-        rest_delete("campaign_notes", params={"id": f"eq.{note_id}"})
-        return {"deleted": True, "note_id": note_id}
+        rest_delete("campaign_notes", match={"id": note_id})
 
+    # Also clean up from local store if present
     local_notes = _read_local_notes()
     idx = next((i for i, n in enumerate(local_notes) if str(n.get("id")) == note_id), None)
-    if idx is None:
-        raise HTTPException(status_code=404, detail="Note not found")
+    if idx is not None:
+        note = local_notes[idx]
+        if user.role != "super_admin" and str(note.get("author_email", "")).lower() != user.email.lower():
+            raise HTTPException(status_code=403, detail="You can only delete your own notes.")
+        local_notes.pop(idx)
+        _write_local_notes(local_notes)
 
-    note = local_notes[idx]
-    if user.role != "super_admin" and str(note.get("author_email", "")).lower() != user.email.lower():
-        raise HTTPException(status_code=403, detail="You can only delete your own notes.")
-
-    local_notes.pop(idx)
-    _write_local_notes(local_notes)
     return {"deleted": True, "note_id": note_id}
