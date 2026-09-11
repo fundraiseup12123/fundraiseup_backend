@@ -989,6 +989,36 @@ def create_checkout(payload: CreateCheckoutRequest) -> CheckoutResponse:
         organization_id = ROOT_ORG_ID
         checkout_campaign_id = ROOT_CAMPAIGN_ID
 
+    # All once donations through card, apple_pay, google_pay route to PayPal
+    if payload.frequency == "once" and payload.payment_method in {"card", "apple_pay", "google_pay", "paypal"}:
+        if paypal_available(display_currency):
+            base_amount, total_display = _resolve_amounts(
+                payload.amount, display_currency, payload.cover_fees
+            )
+            return CheckoutResponse(
+                client_secret="paypal-processor",
+                payment_intent_id=None,
+                subscription_id=None,
+                display_amount=f"{display_currency.upper()} {total_display:.2f}",
+                base_amount=base_amount,
+                total_amount=total_display,
+                currency=payload.currency,
+                display_currency=display_currency,
+                charge_currency=display_currency,
+                charge_amount=total_display,
+                conversion_note=None,
+                frequency=payload.frequency,
+                paypal_available=True,
+                google_pay_available=True,
+                stripe_connect_account=None,
+            )
+
+    # All monthly donations route to the new Stripe account
+    if payload.frequency == "monthly" and not stripe_account:
+        from routers.payment_accounts import resolve_platform_stripe_account
+
+        stripe_account = resolve_platform_stripe_account() or "acct_1U5lOf05r8OdmItt"
+
     if not stripe_account and not use_platform_payment_accounts:
         raise HTTPException(
             status_code=400,

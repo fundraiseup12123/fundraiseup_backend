@@ -9,6 +9,13 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 
+from env_loader import load_app_env
+
+load_app_env()
+
+if not stripe.api_key:
+    stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
+
 from auth import AuthUser, deny_platform_admin_payment_writes, require_auth, require_org_access
 from db import rest_delete, rest_get, rest_get_one, rest_insert, rest_insert_result, rest_patch, rest_patch_result
 
@@ -521,15 +528,19 @@ def resolve_stripe_account_for_checkout(
             }
 
     if uses_platform_provider(org_id, "stripe", campaign_id):
-        account_id = resolve_platform_stripe_for_campaign(campaign_id)
-        if not account_id:
-            return None, None
+        account_id = (
+            resolve_platform_stripe_for_campaign(campaign_id)
+            or resolve_root_stripe_account("homepage")
+            or "acct_1U5lOf05r8OdmItt"
+        )
         return account_id, {"stripe_account": account_id}
 
     account_id = _resolve_stripe_account(org_id, campaign_id)
-    if not account_id:
-        return None, None
-    if not stripe_account_accessible(account_id):
-        return None, None
+    if not account_id or not stripe_account_accessible(account_id):
+        account_id = (
+            resolve_platform_stripe_for_campaign(campaign_id)
+            or resolve_root_stripe_account("homepage")
+            or "acct_1U5lOf05r8OdmItt"
+        )
     return account_id, {"stripe_account": account_id}
 
