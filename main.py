@@ -1669,9 +1669,11 @@ from routers.conversion_events import router as conversion_events_router
 from routers.donor_broadcast import router as donor_broadcast_router
 from routers.binance_pay import router as binance_pay_router
 from routers.ad_spend import router as ad_spend_router
+from routers.campaign_directory import router as campaign_directory_router
 
 app.include_router(super_admin_router)
 app.include_router(platform_data_router)
+app.include_router(campaign_directory_router)
 app.include_router(ad_spend_router)
 app.include_router(payment_accounts_router)
 app.include_router(organizations_router)
