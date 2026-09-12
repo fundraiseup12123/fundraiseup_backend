@@ -791,6 +791,7 @@ def get_ad_spend_performance(
     # 2. Query donations within the date range
     params: dict[str, str] = {
         "select": "id,amount,currency,created_at,campaign_id,utm,status,payment_method,payment_processor",
+        "status": "in.(succeeded,completed,paid)",
         "order": "created_at.asc",
         "limit": "50000",
     }
@@ -802,7 +803,10 @@ def get_ad_spend_performance(
         params["created_at"] = f"lte.{resolved_to}"
 
     raw_donations = rest_get("donations", params=params) or []
-    countable_donations = ad._insights_countable(raw_donations)
+    countable_donations = [
+        r for r in ad._insights_countable(raw_donations)
+        if str(r.get("status") or "").lower() in ("succeeded", "completed", "paid")
+    ]
 
     # 3. Determine all calendar days in range
     now_tz = datetime.now(tz)

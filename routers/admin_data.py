@@ -497,7 +497,7 @@ def _merge_orphan_donations(
             return rows
         orphan_params["campaign_id"] = f"in.({','.join(matching)})"
     if status:
-        orphan_params["status"] = f"eq.{status}"
+        orphan_params["status"] = status if ("." in status or "(" in status) else f"eq.{status}"
     if frequency and frequency in {"once", "monthly"}:
         orphan_params["frequency"] = f"eq.{frequency}"
     if date_from and date_to:
@@ -719,6 +719,7 @@ def _admin_org_donation_rows(
     campaign_id: str | None = None,
     designation: str | None = None,
     frequency: str | None = None,
+    status: str | None = None,
     date_from: str | None = None,
     date_to: str | None = None,
     limit: int = 100000,
@@ -739,6 +740,9 @@ def _admin_org_donation_rows(
             return []
         params["campaign_id"] = f"in.({','.join(matching)})"
 
+    if status:
+        params["status"] = status if ("." in status or "(" in status) else f"eq.{status}"
+
     if frequency and frequency in {"once", "monthly"}:
         params["frequency"] = f"eq.{frequency}"
 
@@ -756,7 +760,7 @@ def _admin_org_donation_rows(
         campaigns,
         campaign_id=campaign_id,
         designation=designation,
-        status=None,
+        status=status,
         frequency=frequency,
         date_from=date_from,
         date_to=date_to,
@@ -1063,14 +1067,19 @@ def admin_utm_report(
 
     rows = _admin_org_donation_rows(
         org_id,
-        select="amount,currency,created_at,campaign_id,utm,status",
+        select="id,amount,currency,created_at,campaign_id,utm,status,payment_method,payment_processor",
         campaigns=campaigns,
         campaign_id=campaign_id,
+        status="in.(succeeded,completed,paid)",
         date_from=resolved_from,
         date_to=resolved_to,
         limit=10000,
     )
-    rows = _insights_countable(rows)
+    # Strictly filter for only successful donations (exclude failed, canceled, refunded, pending, etc.)
+    rows = [
+        r for r in rows
+        if str(r.get("status") or "").lower() in ("succeeded", "completed", "paid")
+    ]
 
     counts: dict[str, int] = {}
     amounts: dict[str, float] = {}

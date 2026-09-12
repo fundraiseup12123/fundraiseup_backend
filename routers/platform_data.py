@@ -731,7 +731,8 @@ def platform_utm_report(
     )
 
     params: dict[str, str] = {
-        "select": "amount,currency,created_at,campaign_id,utm,status,organization_id",
+        "select": "id,amount,currency,created_at,campaign_id,utm,status,organization_id,payment_method,payment_processor",
+        "status": "in.(succeeded,completed,paid)",
         "order": "created_at.desc",
         "limit": "10000",
     }
@@ -754,14 +755,18 @@ def platform_utm_report(
             campaigns,
             campaign_id=campaign_id,
             designation=None,
-            status=None,
+            status="in.(succeeded,completed,paid)",
             frequency=None,
             date_from=resolved_from,
             date_to=resolved_to,
-            select="amount,currency,created_at,campaign_id,utm,status,organization_id",
+            select="id,amount,currency,created_at,campaign_id,utm,status,organization_id,payment_method,payment_processor",
         )
 
-    rows = ad._insights_countable(rows)
+    # Strictly filter for only successful donations (exclude failed, canceled, refunded, pending, etc.)
+    rows = [
+        r for r in rows
+        if str(r.get("status") or "").lower() in ("succeeded", "completed", "paid")
+    ]
 
     counts: dict[str, int] = {}
     amounts: dict[str, float] = {}
