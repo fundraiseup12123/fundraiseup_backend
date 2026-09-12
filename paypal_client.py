@@ -503,6 +503,8 @@ def create_paypal_order(
     payee_email: str | None = None,
     client_id: str | None = None,
     client_secret: str | None = None,
+    vault: bool = False,
+    payment_source_type: str | None = None,
 ) -> dict[str, object]:
     charge_currency, charge_amount = convert_for_paypal(total_display, display_currency)
     amount_value = f"{charge_amount:.2f}"
@@ -519,7 +521,7 @@ def create_paypal_order(
     if payee_email:
         purchase_unit["payee"] = {"email_address": payee_email}
 
-    payload = {
+    payload: dict[str, Any] = {
         "intent": "CAPTURE",
         "purchase_units": [purchase_unit],
         "application_context": {
@@ -532,6 +534,18 @@ def create_paypal_order(
             "cancel_url": cancel_url,
         },
     }
+    if vault:
+        src = (payment_source_type or "card").lower()
+        if src in ("card", "apple_pay", "google_pay"):
+            payload["payment_source"] = {
+                src: {
+                    "attributes": {
+                        "vault": {
+                            "store_in_vault": "ON_SUCCESS"
+                        }
+                    }
+                }
+            }
 
     token = _paypal_access_token(client_id=client_id, client_secret=client_secret)
     response = _http.post(
@@ -632,6 +646,97 @@ def get_paypal_order(
         raise RuntimeError("Unable to verify PayPal order")
     body = response.json()
     return body if isinstance(body, dict) else {}
+
+
+def extract_vault_token_from_order(order_data: dict[str, Any] | None) -> str | None:
+    if not order_data or not isinstance(order_data, dict):
+        return None
+    ps = order_data.get("payment_source") or {}
+    for src in ("card", "apple_pay", "google_pay", "token"):
+        sub = ps.get(src) or {}
+        attrs = sub.get("attributes") or {}
+        vault = attrs.get("vault") or {}
+        v_id = vault.get("id") or sub.get("id")
+        if v_id and str(v_id).strip():
+            return str(v_id).strip()
+    return None
+
+
+def charge_paypal_vault_token(
+    *,
+    vault_token: str,
+    amount: float,
+    currency: str,
+    description: str = "Monthly Recurring Donation",
+    custom_id: str | None = None,
+    client_id: str | None = None,
+    client_secret: str | None = None,
+) -> dict[str, object]:
+    charge_currency, charge_amount = convert_for_paypal(amount, currency)
+    amount_value = f"{charge_amount:.2f}"
+
+    purchase_unit: dict[str, object] = {
+        "amount": {
+            "currency_code": charge_currency,
+            "value": amount_value,
+        },
+        "description": description[:127],
+    }
+    if custom_id:
+        purchase_unit["custom_id"] = custom_id[:127]
+
+    payload: dict[str, Any] = {
+        "intent": "CAPTURE",
+        "purchase_units": [purchase_unit],
+        "payment_source": {
+            "token": {
+                "id": vault_token,
+                "type": "PAYMENT_METHOD_TOKEN",
+            },
+            "card": {
+                "stored_credential": {
+                    "payment_initiator": "MERCHANT",
+                    "payment_type": "RECURRING",
+                    "usage": "SUBSEQUENT",
+                }
+            },
+        },
+    }
+
+    token = _paypal_access_token(client_id=client_id, client_secret=client_secret)
+    api_base = paypal_api_base_for(client_id, client_secret)
+    response = _http.post(
+        f"{api_base}/v2/checkout/orders",
+        json=payload,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        },
+    )
+    if response.status_code >= 400:
+        detail = response.text
+        try:
+            detail = response.json().get("message", detail)
+        except Exception:
+            pass
+        raise RuntimeError(detail or "Unable to charge PayPal vault token")
+
+    body = response.json()
+    order_id = body.get("id")
+    order_status = str(body.get("status") or "").upper()
+
+    if order_status in {"APPROVED", "CREATED"} and order_id:
+        capture_resp = _http.post(
+            f"{api_base}/v2/checkout/orders/{order_id}/capture",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+            },
+        )
+        if capture_resp.status_code < 400:
+            body = capture_resp.json()
+
+    return body
 
 
 _product_lock = threading.Lock()

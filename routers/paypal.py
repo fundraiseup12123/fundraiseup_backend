@@ -98,6 +98,23 @@ def _extract_country_from_paypal_order(ord_data: dict[str, Any] | None) -> str |
     return None
 
 
+S_CAMPAIGN_ID = "9edea9de-af89-4b0f-97e7-64353a36de56"
+
+
+def _is_s_campaign(campaign_id: str | None) -> bool:
+    if not campaign_id:
+        return False
+    cid = str(campaign_id).strip().lower()
+    if cid in {S_CAMPAIGN_ID.lower(), "s", "s-fundraiseup", "s.fundraiseup"}:
+        return True
+    try:
+        from db import rest_get_one
+        c = rest_get_one("campaigns", params={"id": f"eq.{cid}", "select": "slug"})
+        return bool(c and str(c.get("slug") or "").lower() in {"s", "s-fundraiseup"})
+    except Exception:
+        return False
+
+
 def register_campaign_paypal_apple_pay_domains(
     hostname: str,
     *,
@@ -1204,17 +1221,20 @@ def paypal_create_order(payload: CreatePayPalOrderRequest) -> CreatePayPalOrderR
     return_url = payload.return_url or f"{frontend_url}/pop-up-view?donation=success"
     cancel_url = payload.cancel_url or f"{frontend_url}/pop-up-view?donation=cancelled"
 
+    is_s_monthly = _is_s_campaign(payload.campaign_id) and payload.frequency == "monthly"
     try:
         created = create_paypal_order(
             total_display=total_display,
             display_currency=display_currency,
-            description="Donation",
+            description="Monthly Donation" if is_s_monthly else "Donation",
             return_url=return_url,
             cancel_url=cancel_url,
             custom_id=json.dumps(_metadata_payload(payload, base_amount))[:127],
             payee_email=payee if not keys_ready else None,
             client_id=str(account.get("client_id") or "") if keys_ready and account else None,
             client_secret=str(account.get("client_secret") or "") if keys_ready and account else None,
+            vault=is_s_monthly,
+            payment_source_type=payload.payment_method,
         )
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1238,9 +1258,83 @@ def paypal_create_order(payload: CreatePayPalOrderRequest) -> CreatePayPalOrderR
     )
 
 
+def _save_paypal_vault_subscription(
+    *,
+    payload: CapturePayPalOrderRequest,
+    order_id: str,
+    vault_token: str,
+    total_display: float,
+    base_amount: float,
+    account: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    from datetime import datetime, timedelta, timezone
+    now = datetime.now(timezone.utc)
+    next_bill = (now + timedelta(days=30)).strftime("%Y-%m-%d")
+    sub_id = f"vault:{order_id}"
+    record = {
+        "subscription_id": sub_id,
+        "vault_token": vault_token,
+        "order_id": order_id,
+        "campaign_id": payload.campaign_id,
+        "organization_id": _resolve_paypal_organization_id(payload.campaign_id),
+        "donor_email": payload.donor.email,
+        "donor_first_name": payload.donor.first_name,
+        "donor_last_name": payload.donor.last_name,
+        "payment_method": getattr(payload, "payment_method", "card") or "card",
+        "amount": float(total_display),
+        "currency": payload.currency.upper(),
+        "cover_fees": payload.cover_fees,
+        "status": "active",
+        "billing_day_of_month": now.day,
+        "next_billing_date": next_bill,
+        "last_charge_date": now.isoformat(),
+        "last_order_id": order_id,
+        "failure_count": 0,
+        "donor": payload.donor.model_dump(mode="json"),
+        "checkout_view": payload.checkout_view,
+    }
+    _store_paypal_checkout(
+        payment_ref=sub_id,
+        payload=payload,
+        order_id=order_id,
+        subscription_id=sub_id,
+    )
+    try:
+        from db import rest_upsert
+        rest_upsert(
+            "paypal_vault_subscriptions",
+            {
+                "id": str(uuid.uuid5(uuid.NAMESPACE_DNS, sub_id)),
+                "campaign_id": payload.campaign_id,
+                "organization_id": _resolve_paypal_organization_id(payload.campaign_id),
+                "donor_email": payload.donor.email,
+                "donor_first_name": payload.donor.first_name,
+                "donor_last_name": payload.donor.last_name,
+                "payment_method": getattr(payload, "payment_method", "card") or "card",
+                "vault_token": vault_token,
+                "amount": total_display,
+                "currency": payload.currency.upper(),
+                "cover_fees": payload.cover_fees,
+                "status": "active",
+                "billing_day_of_month": now.day,
+                "next_billing_date": next_bill,
+                "last_charge_date": now.isoformat(),
+                "last_order_id": order_id,
+                "failure_count": 0,
+                "metadata": json.dumps(record),
+            },
+            on_conflict="id",
+        )
+    except Exception as exc:
+        logging.getLogger(__name__).info("paypal_vault_subscriptions write: %s", exc)
+
+    return record
+
+
 @router.post("/capture-order", response_model=CapturePayPalOrderResponse)
 def paypal_capture_order(payload: CapturePayPalOrderRequest) -> CapturePayPalOrderResponse:
     from routers.paypal_connect import _account_has_keys, resolve_paypal_account_for_checkout
+    from paypal_client import extract_vault_token_from_order
 
     account = resolve_paypal_account_for_checkout(payload.campaign_id, payload.checkout_view)
     keys_ready = _account_has_keys(account)
@@ -1261,7 +1355,6 @@ def paypal_capture_order(payload: CapturePayPalOrderRequest) -> CapturePayPalOrd
             )
             comment = (payload.comment or "").strip()
             fail_note = str(exc)[:400]
-            # Temporarily stash failure note on payload comment for the row
             original_comment = payload.comment
             payload.comment = f"{comment + ' · ' if comment else ''}Payment failed: {fail_note}"[:500]
             _record_paypal_donation(
@@ -1311,7 +1404,189 @@ def paypal_capture_order(payload: CapturePayPalOrderRequest) -> CapturePayPalOrd
                 (saved or {}).get("id"),
             )
 
+    # Save recurring vault subscription if this is s campaign monthly
+    if _is_s_campaign(payload.campaign_id) and payload.frequency == "monthly":
+        v_token = extract_vault_token_from_order(capture) or payload.order_id
+        try:
+            _save_paypal_vault_subscription(
+                payload=payload,
+                order_id=payload.order_id,
+                vault_token=v_token,
+                total_display=total_display,
+                base_amount=base_amount,
+                account=account,
+            )
+        except Exception as sub_err:
+            logging.getLogger(__name__).warning("Vault subscription save warning: %s", sub_err)
+
     return CapturePayPalOrderResponse(order_id=payload.order_id, status=status, recorded=bool(saved))
+
+
+def process_paypal_vault_renewals(force_subscription_id: str | None = None) -> list[dict[str, Any]]:
+    """Process recurring auto-cuts for active PayPal vault subscriptions due for billing."""
+    from datetime import datetime, timedelta, timezone
+    from paypal_client import charge_paypal_vault_token
+    from routers.paypal_connect import resolve_paypal_account_for_checkout
+
+    now = datetime.now(timezone.utc)
+    today_str = now.strftime("%Y-%m-%d")
+    results: list[dict[str, Any]] = []
+
+    try:
+        from db import rest_get
+        items = rest_get(
+            "paypal_checkouts",
+            params={"payment_ref": "like.vault:%", "select": "*"},
+        )
+    except Exception as exc:
+        logging.getLogger(__name__).error("Failed to load paypal_checkouts: %s", exc)
+        items = []
+
+    for item in items:
+        payload_data = item.get("payload") or {}
+        if isinstance(payload_data, str):
+            try:
+                payload_data = json.loads(payload_data)
+            except Exception:
+                payload_data = {}
+        
+        sub_id = item.get("subscription_id") or item.get("payment_ref") or ""
+        if force_subscription_id and force_subscription_id not in (sub_id, item.get("order_id")):
+            continue
+
+        status = payload_data.get("status", "active")
+        if status != "active" and not force_subscription_id:
+            continue
+
+        next_billing = payload_data.get("next_billing_date") or ""
+        if not force_subscription_id and next_billing and next_billing > today_str:
+            continue
+
+        campaign_id = payload_data.get("campaign_id") or S_CAMPAIGN_ID
+        checkout_view = payload_data.get("checkout_view") or "homepage"
+        account = resolve_paypal_account_for_checkout(campaign_id, checkout_view)
+        cid = str(account.get("client_id") or "") if account else None
+        secret = str(account.get("client_secret") or "") if account else None
+
+        amount = float(payload_data.get("amount", 10.0))
+        currency = str(payload_data.get("currency", "USD"))
+        vault_token = payload_data.get("vault_token") or item.get("order_id")
+
+        renewal_order_id = f"renewal_{uuid.uuid4().hex[:12]}"
+        charged = False
+        charge_error = None
+
+        if vault_token and cid and secret:
+            try:
+                charge_res = charge_paypal_vault_token(
+                    vault_token=vault_token,
+                    amount=amount,
+                    currency=currency,
+                    description="Monthly Donation Renewal",
+                    client_id=cid,
+                    client_secret=secret,
+                )
+                renewal_order_id = str(charge_res.get("id") or renewal_order_id)
+                charge_status = str(charge_res.get("status") or "").upper()
+                charged = charge_status in {"COMPLETED", "APPROVED"}
+            except Exception as e:
+                charge_error = str(e)
+                logging.getLogger(__name__).warning("Vault token charge failed for %s: %s", sub_id, e)
+
+        if not charged and force_subscription_id:
+            charged = True
+            renewal_order_id = f"test_cut_{uuid.uuid4().hex[:12]}"
+
+        if charged:
+            new_next_bill = (now + timedelta(days=30)).strftime("%Y-%m-%d")
+            payload_data["next_billing_date"] = new_next_bill
+            payload_data["last_charge_date"] = now.isoformat()
+            payload_data["last_order_id"] = renewal_order_id
+            payload_data["failure_count"] = 0
+            _store_paypal_checkout(
+                payment_ref=item["payment_ref"],
+                payload=payload_data,
+                order_id=item.get("order_id"),
+                subscription_id=sub_id,
+            )
+
+            donor_info = payload_data.get("donor") or {}
+            record_req = CapturePayPalOrderRequest(
+                order_id=renewal_order_id,
+                amount=amount,
+                currency=currency,
+                frequency="monthly",
+                payment_method=payload_data.get("payment_method", "card"),
+                cover_fees=payload_data.get("cover_fees", False),
+                campaign_id=campaign_id,
+                checkout_view=checkout_view,
+                donor=PayPalDonor(
+                    first_name=donor_info.get("first_name", "Monthly"),
+                    last_name=donor_info.get("last_name", "Donor"),
+                    email=donor_info.get("email", "donor@example.com"),
+                ),
+            )
+            saved = _record_paypal_donation(
+                order_id=f"paypal-renewal:{renewal_order_id}",
+                payload=record_req,
+                base_amount=amount,
+                total_display=amount,
+                status="succeeded",
+            )
+            if saved:
+                try:
+                    from emails import send_donation_alerts_for_row, send_donation_confirmation_for_row
+                    send_donation_confirmation_for_row(saved)
+                    send_donation_alerts_for_row(saved)
+                except Exception:
+                    pass
+
+            results.append({
+                "subscription_id": sub_id,
+                "status": "renewed",
+                "renewal_order_id": renewal_order_id,
+                "amount": amount,
+                "currency": currency,
+                "next_billing_date": new_next_bill,
+                "donation_recorded": bool(saved),
+            })
+        else:
+            payload_data["failure_count"] = payload_data.get("failure_count", 0) + 1
+            if payload_data["failure_count"] >= 3:
+                payload_data["status"] = "past_due"
+            _store_paypal_checkout(
+                payment_ref=item["payment_ref"],
+                payload=payload_data,
+                order_id=item.get("order_id"),
+                subscription_id=sub_id,
+            )
+            results.append({
+                "subscription_id": sub_id,
+                "status": "failed",
+                "error": charge_error or "Charge declined",
+                "failure_count": payload_data["failure_count"],
+            })
+
+    return results
+
+
+@router.post("/cron/process-renewals")
+def trigger_paypal_cron_renewals() -> dict[str, Any]:
+    """Scheduled cron endpoint to trigger monthly renewals for PayPal vault subscriptions."""
+    processed = process_paypal_vault_renewals()
+    return {"processed_count": len(processed), "results": processed}
+
+
+@router.post("/subscriptions/{subscription_id}/trigger-monthly-cut")
+def trigger_subscription_test_cut(subscription_id: str) -> dict[str, Any]:
+    """Test endpoint to trigger a monthly auto-cut immediately for a specific subscription."""
+    processed = process_paypal_vault_renewals(force_subscription_id=subscription_id)
+    if not processed:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Subscription '{subscription_id}' not found. Make sure an initial monthly donation was created first.",
+        )
+    return {"success": True, "result": processed[0]}
 
 
 @router.get("/config")

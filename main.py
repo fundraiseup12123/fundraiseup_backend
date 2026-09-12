@@ -44,6 +44,18 @@ app = FastAPI(title="Sudan Donation API", version="1.0.0")
 def health() -> dict[str, str]:
     return {"status": "ok"}
 
+
+@app.on_event("startup")
+def startup_event() -> None:
+    from paypal_scheduler import start_paypal_scheduler
+    start_paypal_scheduler()
+
+
+@app.on_event("shutdown")
+def shutdown_event() -> None:
+    from paypal_scheduler import stop_paypal_scheduler
+    stop_paypal_scheduler()
+
 cors_origins = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
