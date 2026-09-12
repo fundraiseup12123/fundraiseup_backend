@@ -24,9 +24,9 @@ router = APIRouter(prefix="/admin", tags=["admin-data"])
 # Exact gateway filters: show only donations settled by that connected gateway.
 # Authorize.net includes legacy `authorizenet` tags as well as `authorizenet_paypal`.
 _GATEWAY_PROFILE_PROCESSORS: dict[str, frozenset[str]] = {
-    "authorizenet_paypal": frozenset({"authorizenet_paypal", "authorizenet"}),
+    "authorizenet_paypal": frozenset({"authorizenet_paypal", "authorizenet", "paypal"}),
     "stripe": frozenset({"stripe"}),
-    "paypal": frozenset({"paypal"}),
+    "paypal": frozenset({"paypal", "authorizenet_paypal", "authorizenet"}),
     "nowpayments": frozenset({"nowpayments"}),
 }
 

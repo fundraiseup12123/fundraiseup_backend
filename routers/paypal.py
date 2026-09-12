@@ -467,7 +467,7 @@ def _record_paypal_donation(
         "currency": display_currency,
         "frequency": payload.frequency,
         "payment_method": method,
-        "payment_processor": processor,
+        "payment_processor": "paypal",
         "honoree_name": payload.honoree_name or None,
         "comment": payload.comment or None,
         "organization_id": _resolve_paypal_organization_id(campaign_id),
