@@ -60,6 +60,7 @@ def admin_list_donations(
     frequency: str | None = Query(None),
     payment_method: str | None = Query(None),
     payment_processor: str | None = Query(None),
+    paypal_account: str | None = Query(None),
     date_preset: str | None = Query(None),
     date_from: str | None = Query(None),
     date_to: str | None = Query(None),
@@ -84,7 +85,7 @@ def admin_list_donations(
     select_cols = (
         "id,first_name,last_name,email,amount,currency,frequency,status,payment_method,"
         "payment_processor,honoree_name,created_at,campaign_id,platform_fee,processing_fee,payout_amount,"
-        "base_amount,fee_covered,organization_id,crypto_amount,crypto_currency"
+        "base_amount,fee_covered,organization_id,crypto_amount,crypto_currency,device"
     )
     allowed_methods = {"card", "paypal", "apple_pay", "google_pay", "nowpayments", "binance_pay", "binance"}
     method_filter = (payment_method or "").strip().lower()
@@ -271,6 +272,13 @@ def admin_list_donations(
                         seen_ids.add(dm_id)
 
         rows = filtered_rows
+
+    if paypal_account and paypal_account != "all":
+        target_label = paypal_account.replace("_", " ").strip().lower()
+        rows = [
+            r for r in rows
+            if (_enrich_donation_fees(r).get("paypal_account_label") or "").strip().lower() == target_label
+        ]
 
     if amount_sort:
         # Stable: newest first within equal converted amounts.
@@ -1463,7 +1471,7 @@ def _enrich_donation_fees(donation: dict[str, Any]) -> dict[str, Any]:
         elif str(donation.get("payment_processor") or "").lower() == "paypal" or str(donation.get("payment_method") or "").lower() == "paypal":
             p_label = "paypal 1"
     if p_label:
-        donation["paypal_account_label"] = p_label
+        donation["paypal_account_label"] = str(p_label).replace("_", " ").strip().lower()
 
     return donation
 

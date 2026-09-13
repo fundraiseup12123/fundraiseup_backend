@@ -23,7 +23,7 @@ _DEFAULT_PLATFORM_TZ = "America/Los_Angeles"
 _DONATION_SELECT = (
     "id,first_name,last_name,email,amount,currency,frequency,status,payment_method,"
     "payment_processor,honoree_name,created_at,campaign_id,platform_fee,processing_fee,payout_amount,"
-    "base_amount,fee_covered,organization_id,crypto_amount,crypto_currency"
+    "base_amount,fee_covered,organization_id,crypto_amount,crypto_currency,device"
 )
 _INSIGHTS_SELECT = (
     "amount,currency,frequency,created_at,campaign_id,payment_method,"
@@ -106,6 +106,7 @@ def platform_list_donations(
     frequency: str | None = Query(None),
     payment_method: str | None = Query(None),
     payment_processor: str | None = Query(None),
+    paypal_account: str | None = Query(None),
     date_preset: str | None = Query(None),
     date_from: str | None = Query(None),
     date_to: str | None = Query(None),
@@ -297,6 +298,13 @@ def platform_list_donations(
                         seen_ids.add(dm_id)
 
         rows = filtered_rows
+
+    if paypal_account and paypal_account != "all":
+        target_label = paypal_account.replace("_", " ").strip().lower()
+        rows = [
+            r for r in rows
+            if (ad._enrich_donation_fees(r).get("paypal_account_label") or "").strip().lower() == target_label
+        ]
 
     rows.sort(key=lambda r: str(r.get("created_at") or ""), reverse=True)
     if amount_sort:
