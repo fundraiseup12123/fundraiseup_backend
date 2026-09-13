@@ -499,7 +499,7 @@ def resolve_paypal_account_label(account: dict[str, Any] | None, campaign_id: st
     if campaign_id:
         c_str = str(campaign_id).strip().lower()
         if c_str in HOPE_FOR_GAZA_CAMPAIGN_IDS or "gaza" in c_str:
-            return "Paypal--S"
+            return "Paypal Main"
         if c_str in EMPTY_PLATES_CAMPAIGN_IDS or "empty-plates" in c_str:
             return "Paypal Main"
     return "Paypal Main"
@@ -533,20 +533,20 @@ def resolve_paypal_account_for_checkout(
 
     view = normalize_payment_view(checkout_view)
 
-    # 1. Hope for Gaza Landing View -> strictly PayPal 2
+    # 1. Landing View -> Paypal Main (Platform Default)
     if view == "landing":
-        acct2 = usable(get_paypal_account_by_id(PAYPAL_2_ID))
-        if acct2:
-            return acct2
+        acct1 = usable(get_paypal_account_by_id(PAYPAL_1_ID))
+        if acct1:
+            return acct1
         return usable(resolve_root_paypal_account("landing"))
 
     # 2. Check campaign explicit ID or slug
     if campaign_id and campaign_id != ROOT_CAMPAIGN_ID:
         cid_str = str(campaign_id).strip()
         if cid_str in HOPE_FOR_GAZA_CAMPAIGN_IDS:
-            acct2 = usable(get_paypal_account_by_id(PAYPAL_2_ID))
-            if acct2:
-                return acct2
+            acct1 = usable(get_paypal_account_by_id(PAYPAL_1_ID))
+            if acct1:
+                return acct1
 
         if cid_str in EMPTY_PLATES_CAMPAIGN_IDS:
             acct1 = usable(get_paypal_account_by_id(PAYPAL_1_ID))
@@ -560,9 +560,9 @@ def resolve_paypal_account_for_checkout(
         if campaign:
             slug = (campaign.get("slug") or "").lower()
             if slug in HOPE_FOR_GAZA_SLUGS or "hope-for-gaza" in slug:
-                acct2 = usable(get_paypal_account_by_id(PAYPAL_2_ID))
-                if acct2:
-                    return acct2
+                acct1 = usable(get_paypal_account_by_id(PAYPAL_1_ID))
+                if acct1:
+                    return acct1
 
             if slug in EMPTY_PLATES_SLUGS or "empty-plates" in slug:
                 acct1 = usable(get_paypal_account_by_id(PAYPAL_1_ID))
@@ -572,9 +572,9 @@ def resolve_paypal_account_for_checkout(
             assigned_id = campaign.get("paypal_account_id")
             if assigned_id:
                 if str(assigned_id) == PAYPAL_2_ID:
-                    acct2 = usable(get_paypal_account_by_id(PAYPAL_2_ID))
-                    if acct2:
-                        return acct2
+                    acct1 = usable(get_paypal_account_by_id(PAYPAL_1_ID))
+                    if acct1:
+                        return acct1
                 elif str(assigned_id) == PAYPAL_3_ID:
                     acct3 = usable(get_paypal_account_by_id(PAYPAL_3_ID))
                     if acct3:

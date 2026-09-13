@@ -22,14 +22,15 @@ To keep campaign funds organized and separated, the platform operates with three
 
 | Account Name | Previous Label | Role & Purpose | Connected Campaigns |
 | :--- | :--- | :--- | :--- |
-| **Paypal Main** | PayPal 1 | **Platform Default** | General campaigns and **Empty Plates** (currently active). |
-| **Paypal--S** | PayPal 2 | **Hope for Gaza Dedicated** | Exclusively handles donations for **Hope for Gaza Foundation**. |
-| **Paypal--Z** | PayPal 3 | **Secondary Dedicated** | Standby dedicated PayPal account (can be assigned anytime). |
+| **Paypal Main** | PayPal 1 | **Platform Primary** | Receives donations for all campaigns (including **Hope for Gaza** and **Empty Plates**). |
+| **Paypal--S** | PayPal 2 | **Secondary Dedicated** | Dedicated PayPal account (standby, available for instant reassignment). |
+| **Paypal--Z** | PayPal 3 | **Secondary Dedicated** | Dedicated PayPal account (standby, available for instant reassignment). |
 
 ### Current Routing Setup
-- **Empty Plates Campaign:** Configured to deposit into **Paypal Main** for now.
-- **Hope for Gaza Campaign:** Automatically deposits into **Paypal--S**.
+- **Hope for Gaza Campaigns:** Moved to and actively depositing into **Paypal Main**.
+- **Empty Plates Campaign:** Actively depositing into **Paypal Main**.
 - **All other campaigns:** Deposit into **Paypal Main**.
+- **Paypal--S & Paypal--Z:** Maintained as standby accounts. Historical donations received on PayPal 2 continue to be clearly labeled as **Paypal--S**.
 - You can reassign any campaign to any account at any time using the **PayPal Accounts** tab in Platform Admin.
 
 ---
