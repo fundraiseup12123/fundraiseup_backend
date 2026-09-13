@@ -274,11 +274,17 @@ def admin_list_donations(
         rows = filtered_rows
 
     if paypal_account and paypal_account != "all":
-        target_label = paypal_account.replace("_", " ").strip().lower()
-        rows = [
-            r for r in rows
-            if (_enrich_donation_fees(r).get("paypal_account_label") or "").strip().lower() == target_label
-        ]
+        norm_target = re.sub(r"[^a-z0-9]", "", paypal_account.lower())
+        def _match_paypal(r: dict[str, Any]) -> bool:
+            lbl = re.sub(r"[^a-z0-9]", "", str(_enrich_donation_fees(r).get("paypal_account_label") or "").lower())
+            if norm_target in ("paypalmain", "paypal1", "main", "1"):
+                return lbl in ("paypalmain", "paypal1", "main", "1")
+            if norm_target in ("paypals", "paypal2", "s", "2"):
+                return lbl in ("paypals", "paypal2", "s", "2")
+            if norm_target in ("paypalz", "paypal3", "z", "3"):
+                return lbl in ("paypalz", "paypal3", "z", "3")
+            return lbl == norm_target
+        rows = [r for r in rows if _match_paypal(r)]
 
     if amount_sort:
         # Stable: newest first within equal converted amounts.
@@ -1465,13 +1471,19 @@ def _enrich_donation_fees(donation: dict[str, Any]) -> dict[str, Any]:
     if not p_label:
         cid = str(donation.get("campaign_id") or "").strip().lower()
         if cid in ("63fe73c9-d98a-42aa-baaa-65e3d26f8bf0", "170a4559-d31f-4a0b-bce8-ca7d9f850cef", "a162c3f7-8b7b-4e12-91e6-8559273edfe8", "10bcdf3d-d838-473e-a748-de8fb0bd3c9b"):
-            p_label = "paypal 2"
+            p_label = "Paypal--S"
         elif cid == "36fc2608-b53c-4423-8c01-636963a6d5e4":
-            p_label = "paypal 3"
+            p_label = "Paypal--Z"
         elif str(donation.get("payment_processor") or "").lower() == "paypal" or str(donation.get("payment_method") or "").lower() == "paypal":
-            p_label = "paypal 1"
+            p_label = "Paypal Main"
     if p_label:
-        donation["paypal_account_label"] = str(p_label).replace("_", " ").strip().lower()
+        norm = re.sub(r"[^a-z0-9]", "", str(p_label).lower())
+        if norm in ("paypal2", "paypals", "s", "2"):
+            donation["paypal_account_label"] = "Paypal--S"
+        elif norm in ("paypal3", "paypalz", "z", "3"):
+            donation["paypal_account_label"] = "Paypal--Z"
+        else:
+            donation["paypal_account_label"] = "Paypal Main"
 
     return donation
 

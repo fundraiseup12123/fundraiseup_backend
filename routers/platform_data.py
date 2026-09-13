@@ -300,11 +300,17 @@ def platform_list_donations(
         rows = filtered_rows
 
     if paypal_account and paypal_account != "all":
-        target_label = paypal_account.replace("_", " ").strip().lower()
-        rows = [
-            r for r in rows
-            if (ad._enrich_donation_fees(r).get("paypal_account_label") or "").strip().lower() == target_label
-        ]
+        norm_target = re.sub(r"[^a-z0-9]", "", paypal_account.lower())
+        def _match_paypal(r: dict[str, Any]) -> bool:
+            lbl = re.sub(r"[^a-z0-9]", "", str(ad._enrich_donation_fees(r).get("paypal_account_label") or "").lower())
+            if norm_target in ("paypalmain", "paypal1", "main", "1"):
+                return lbl in ("paypalmain", "paypal1", "main", "1")
+            if norm_target in ("paypals", "paypal2", "s", "2"):
+                return lbl in ("paypals", "paypal2", "s", "2")
+            if norm_target in ("paypalz", "paypal3", "z", "3"):
+                return lbl in ("paypalz", "paypal3", "z", "3")
+            return lbl == norm_target
+        rows = [r for r in rows if _match_paypal(r)]
 
     rows.sort(key=lambda r: str(r.get("created_at") or ""), reverse=True)
     if amount_sort:

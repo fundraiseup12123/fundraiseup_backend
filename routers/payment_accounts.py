@@ -1611,8 +1611,8 @@ def list_super_admin_paypal_accounts(
         {
             "id": PAYPAL_1_ID,
             "key": "paypal_1",
-            "label": "paypal 1",
-            "name": "PayPal 1",
+            "label": "Paypal Main",
+            "name": "Paypal Main",
             "tag": "Platform Default",
             "description": "Default platform PayPal account for general campaigns and standard checkout.",
             "is_default": True,
@@ -1623,8 +1623,8 @@ def list_super_admin_paypal_accounts(
         {
             "id": PAYPAL_2_ID,
             "key": "paypal_2",
-            "label": "paypal 2",
-            "name": "PayPal 2",
+            "label": "Paypal--S",
+            "name": "Paypal--S",
             "tag": "Hope for Gaza Dedicated",
             "description": "Dedicated PayPal account for Hope for Gaza foundation & campaigns.",
             "is_default": False,
@@ -1635,8 +1635,8 @@ def list_super_admin_paypal_accounts(
         {
             "id": PAYPAL_3_ID,
             "key": "paypal_3",
-            "label": "paypal 3",
-            "name": "PayPal 3",
+            "label": "Paypal--Z",
+            "name": "Paypal--Z",
             "tag": "Empty Plates Dedicated",
             "description": "Dedicated PayPal account for Empty Plates Crying Children campaign.",
             "is_default": False,
@@ -1663,7 +1663,7 @@ def list_super_admin_paypal_accounts(
         elif assigned_id == PAYPAL_1_ID:
             target_acc_id = PAYPAL_1_ID
 
-        label = "paypal 1" if target_acc_id == PAYPAL_1_ID else ("paypal 2" if target_acc_id == PAYPAL_2_ID else "paypal 3")
+        label = "Paypal Main" if target_acc_id == PAYPAL_1_ID else ("Paypal--S" if target_acc_id == PAYPAL_2_ID else "Paypal--Z")
 
         c_summary = {
             "id": cid,
@@ -1695,16 +1695,16 @@ def assign_super_admin_paypal_account(
 
     target_raw = payload.paypal_account.strip().lower()
     target_id = PAYPAL_1_ID
-    label = "paypal 1"
-    if target_raw in ("paypal 2", "paypal_2", "2", PAYPAL_2_ID):
+    label = "Paypal Main"
+    if target_raw in ("paypal--s", "paypals", "paypal 2", "paypal_2", "2", PAYPAL_2_ID):
         target_id = PAYPAL_2_ID
-        label = "paypal 2"
-    elif target_raw in ("paypal 3", "paypal_3", "3", PAYPAL_3_ID):
+        label = "Paypal--S"
+    elif target_raw in ("paypal--z", "paypalz", "paypal 3", "paypal_3", "3", PAYPAL_3_ID):
         target_id = PAYPAL_3_ID
-        label = "paypal 3"
-    elif target_raw in ("paypal 1", "paypal_1", "1", PAYPAL_1_ID):
+        label = "Paypal--Z"
+    elif target_raw in ("paypal main", "paypalmain", "main", "paypal 1", "paypal_1", "1", PAYPAL_1_ID):
         target_id = PAYPAL_1_ID
-        label = "paypal 1"
+        label = "Paypal Main"
 
     rest_patch(
         "campaigns",

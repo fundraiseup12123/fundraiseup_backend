@@ -491,18 +491,18 @@ def resolve_paypal_account_label(account: dict[str, Any] | None, campaign_id: st
         cid = str(account.get("client_id") or "").strip()
         aid = str(account.get("id") or "").strip()
         if aid == PAYPAL_2_ID or "BAAjbw57" in cid:
-            return "paypal 2"
+            return "Paypal--S"
         if aid == PAYPAL_3_ID or "BAAlPHx0" in cid:
-            return "paypal 3"
+            return "Paypal--Z"
         if aid == PAYPAL_1_ID or "BAAA8bwI" in cid:
-            return "paypal 1"
+            return "Paypal Main"
     if campaign_id:
         c_str = str(campaign_id).strip().lower()
         if c_str in HOPE_FOR_GAZA_CAMPAIGN_IDS or "gaza" in c_str:
-            return "paypal 2"
+            return "Paypal--S"
         if c_str in EMPTY_PLATES_CAMPAIGN_IDS or "empty-plates" in c_str:
-            return "paypal 3"
-    return "paypal 1"
+            return "Paypal--Z"
+    return "Paypal Main"
 
 
 def resolve_paypal_account_for_checkout(
