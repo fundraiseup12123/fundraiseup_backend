@@ -1561,3 +1561,215 @@ def disconnect_root_nowpayments(
     }
     _save_accounts(accounts)
     return {"removed": True}
+
+
+# ---------------------------------------------------------------------------
+# Super Admin Dedicated PayPal Accounts Management (/super/paypal-accounts)
+# ---------------------------------------------------------------------------
+
+paypal_admin_router = APIRouter(prefix="/super/paypal-accounts", tags=["paypal-accounts"])
+
+
+class AssignPayPalCampaignPayload(BaseModel):
+    campaign_id: str
+    paypal_account: str
+
+
+class UpdatePayPalKeysPayload(BaseModel):
+    account_key: str
+    client_id: str = Field(min_length=8, max_length=256)
+    client_secret: str = Field(min_length=8, max_length=512)
+
+
+class TestPayPalPayload(BaseModel):
+    account_id: str
+
+
+@paypal_admin_router.get("")
+def list_super_admin_paypal_accounts(
+    user: Annotated[AuthUser, Depends(require_super_admin)],
+) -> dict[str, Any]:
+    from routers.paypal_connect import (
+        PAYPAL_1_ID,
+        PAYPAL_2_ID,
+        PAYPAL_3_ID,
+        HOPE_FOR_GAZA_CAMPAIGN_IDS,
+        HOPE_FOR_GAZA_SLUGS,
+        EMPTY_PLATES_CAMPAIGN_IDS,
+        EMPTY_PLATES_SLUGS,
+    )
+
+    campaigns = rest_get(
+        "campaigns",
+        params={"select": "id,name,slug,status,paypal_account_id,payment_processor,organization_id", "order": "name.asc"},
+    )
+
+    acc_rows = rest_get("paypal_accounts", params={"select": "*"})
+    acc_map = {r["id"]: r for r in acc_rows}
+
+    accounts_meta = [
+        {
+            "id": PAYPAL_1_ID,
+            "key": "paypal_1",
+            "label": "paypal 1",
+            "name": "PayPal 1",
+            "tag": "Platform Default",
+            "description": "Default platform PayPal account for general campaigns and standard checkout.",
+            "is_default": True,
+            "client_id": acc_map.get(PAYPAL_1_ID, {}).get("client_id") or "BAAA8bwILhcDsq135RPPtPqSfC2AGgOS_tzDL67GWUiVoLvPcYicHqL5zPu5shugEYBXI11ShqSHSgBidM",
+            "client_id_hint": acc_map.get(PAYPAL_1_ID, {}).get("client_id_hint") or "BAAA...BidM",
+            "connection_status": acc_map.get(PAYPAL_1_ID, {}).get("connection_status") or "active",
+        },
+        {
+            "id": PAYPAL_2_ID,
+            "key": "paypal_2",
+            "label": "paypal 2",
+            "name": "PayPal 2",
+            "tag": "Hope for Gaza Dedicated",
+            "description": "Dedicated PayPal account for Hope for Gaza foundation & campaigns.",
+            "is_default": False,
+            "client_id": acc_map.get(PAYPAL_2_ID, {}).get("client_id") or "BAAjbw57AiS3kpcSXMIBSx8yyrmLT4kd2prCVBamV_Ucwe89ltKfX-kjUAW7fV86SuPVt1kuBfcjPj9YAU",
+            "client_id_hint": acc_map.get(PAYPAL_2_ID, {}).get("client_id_hint") or "BAAj...9YAU",
+            "connection_status": acc_map.get(PAYPAL_2_ID, {}).get("connection_status") or "active",
+        },
+        {
+            "id": PAYPAL_3_ID,
+            "key": "paypal_3",
+            "label": "paypal 3",
+            "name": "PayPal 3",
+            "tag": "Empty Plates Dedicated",
+            "description": "Dedicated PayPal account for Empty Plates Crying Children campaign.",
+            "is_default": False,
+            "client_id": acc_map.get(PAYPAL_3_ID, {}).get("client_id") or "BAAlPHx0vcaZ1MreemrKq-dq87g5nhL6yCoD6opHrPkHrx1_f7vdewyUt9UV8ydWpPXrQRwrPmtNaHfZws",
+            "client_id_hint": acc_map.get(PAYPAL_3_ID, {}).get("client_id_hint") or "BAAl...fZws",
+            "connection_status": acc_map.get(PAYPAL_3_ID, {}).get("connection_status") or "active",
+        },
+    ]
+
+    for acc in accounts_meta:
+        acc["campaigns"] = []
+
+    enriched_campaigns = []
+    for c in campaigns:
+        cid = c["id"]
+        slug = (c.get("slug") or "").lower()
+        assigned_id = c.get("paypal_account_id")
+
+        target_acc_id = PAYPAL_1_ID
+        if assigned_id == PAYPAL_2_ID or cid in HOPE_FOR_GAZA_CAMPAIGN_IDS or slug in HOPE_FOR_GAZA_SLUGS or "hope-for-gaza" in slug:
+            target_acc_id = PAYPAL_2_ID
+        elif assigned_id == PAYPAL_3_ID or cid in EMPTY_PLATES_CAMPAIGN_IDS or slug in EMPTY_PLATES_SLUGS or "empty-plates" in slug:
+            target_acc_id = PAYPAL_3_ID
+        elif assigned_id == PAYPAL_1_ID:
+            target_acc_id = PAYPAL_1_ID
+
+        label = "paypal 1" if target_acc_id == PAYPAL_1_ID else ("paypal 2" if target_acc_id == PAYPAL_2_ID else "paypal 3")
+
+        c_summary = {
+            "id": cid,
+            "name": c.get("name") or "Unnamed",
+            "slug": c.get("slug") or "",
+            "status": c.get("status") or "draft",
+            "paypal_account_id": target_acc_id,
+            "paypal_account_label": label,
+        }
+        enriched_campaigns.append(c_summary)
+
+        for acc in accounts_meta:
+            if acc["id"] == target_acc_id:
+                acc["campaigns"].append(c_summary)
+                break
+
+    return {
+        "accounts": accounts_meta,
+        "all_campaigns": enriched_campaigns,
+    }
+
+
+@paypal_admin_router.post("/assign")
+def assign_super_admin_paypal_account(
+    payload: AssignPayPalCampaignPayload,
+    user: Annotated[AuthUser, Depends(require_super_admin)],
+) -> dict[str, Any]:
+    from routers.paypal_connect import PAYPAL_1_ID, PAYPAL_2_ID, PAYPAL_3_ID
+
+    target_raw = payload.paypal_account.strip().lower()
+    target_id = PAYPAL_1_ID
+    label = "paypal 1"
+    if target_raw in ("paypal 2", "paypal_2", "2", PAYPAL_2_ID):
+        target_id = PAYPAL_2_ID
+        label = "paypal 2"
+    elif target_raw in ("paypal 3", "paypal_3", "3", PAYPAL_3_ID):
+        target_id = PAYPAL_3_ID
+        label = "paypal 3"
+    elif target_raw in ("paypal 1", "paypal_1", "1", PAYPAL_1_ID):
+        target_id = PAYPAL_1_ID
+        label = "paypal 1"
+
+    rest_patch(
+        "campaigns",
+        {"paypal_account_id": target_id, "payment_processor": "paypal"},
+        match={"id": payload.campaign_id},
+    )
+    return {
+        "success": True,
+        "campaign_id": payload.campaign_id,
+        "paypal_account_id": target_id,
+        "paypal_account_label": label,
+    }
+
+
+@paypal_admin_router.post("/keys")
+def update_super_admin_paypal_keys(
+    payload: UpdatePayPalKeysPayload,
+    user: Annotated[AuthUser, Depends(require_super_admin)],
+) -> dict[str, Any]:
+    from paypal_client import client_id_hint
+    from routers.paypal_connect import PAYPAL_1_ID, PAYPAL_2_ID, PAYPAL_3_ID
+
+    target_raw = payload.account_key.strip().lower()
+    target_id = PAYPAL_1_ID
+    if target_raw in ("paypal 2", "paypal_2", "2", PAYPAL_2_ID):
+        target_id = PAYPAL_2_ID
+    elif target_raw in ("paypal 3", "paypal_3", "3", PAYPAL_3_ID):
+        target_id = PAYPAL_3_ID
+
+    cid = payload.client_id.strip()
+    secret = payload.client_secret.strip()
+
+    rest_patch(
+        "paypal_accounts",
+        {
+            "client_id": cid,
+            "client_secret": secret,
+            "client_id_hint": client_id_hint(cid),
+            "connection_status": "active",
+            "attach_mode": "keys",
+        },
+        match={"id": target_id},
+    )
+    return {"success": True, "account_id": target_id, "client_id_hint": client_id_hint(cid)}
+
+
+@paypal_admin_router.post("/test")
+def test_super_admin_paypal_account(
+    payload: TestPayPalPayload,
+    user: Annotated[AuthUser, Depends(require_super_admin)],
+) -> dict[str, Any]:
+    from paypal_client import verify_paypal_credentials, probe_paypal_subscriptions_capability
+    from routers.paypal_connect import get_paypal_account_by_id
+
+    acct = get_paypal_account_by_id(payload.account_id)
+    if not acct or not acct.get("client_id") or not acct.get("client_secret"):
+        raise HTTPException(status_code=400, detail="Account credentials not found")
+
+    cid = str(acct["client_id"]).strip()
+    secret = str(acct["client_secret"]).strip()
+    valid = verify_paypal_credentials(cid, secret)
+    probe = probe_paypal_subscriptions_capability(cid, secret)
+    return {
+        "valid": valid,
+        "subscriptions_ready": bool(probe.get("ok")),
+        "detail": probe.get("detail") or ("Credentials verified successfully" if valid else "Verification failed"),
+    }
+

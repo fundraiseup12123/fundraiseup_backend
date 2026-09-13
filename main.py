@@ -35,7 +35,7 @@ from supabase_client import get_donation_by_payment_intent, insert_donation, lis
 
 stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
 if not stripe.api_key:
-    raise RuntimeError("STRIPE_SECRET_KEY is not set")
+    logging.getLogger(__name__).warning("STRIPE_SECRET_KEY is not set. Stripe card/wallet operations will be unavailable until configured.")
 
 app = FastAPI(title="Sudan Donation API", version="1.0.0")
 
@@ -1001,8 +1001,8 @@ def create_checkout(payload: CreateCheckoutRequest) -> CheckoutResponse:
         organization_id = ROOT_ORG_ID
         checkout_campaign_id = ROOT_CAMPAIGN_ID
 
-    # All once donations through card, apple_pay, google_pay route to PayPal
-    if payload.frequency == "once" and payload.payment_method in {"card", "apple_pay", "google_pay", "paypal"}:
+    # All checkouts (once and monthly) through card, apple_pay, google_pay, paypal route to PayPal
+    if payload.payment_method in {"card", "apple_pay", "google_pay", "paypal"}:
         if paypal_available(display_currency):
             base_amount, total_display = _resolve_amounts(
                 payload.amount, display_currency, payload.cover_fees
@@ -1701,7 +1701,7 @@ from routers.paypal import router as paypal_router
 from routers.paypal_connect import router as paypal_connect_router
 from routers.authorizenet import router as authorizenet_router
 from routers.nowpayments import router as nowpayments_router
-from routers.payment_accounts import router as payment_accounts_router
+from routers.payment_accounts import paypal_admin_router, router as payment_accounts_router
 from routers.emails import router as emails_router
 from routers.uploads import router as uploads_router
 from routers.donor_portal import router as donor_portal_router
@@ -1718,6 +1718,7 @@ app.include_router(platform_data_router)
 app.include_router(campaign_directory_router)
 app.include_router(ad_spend_router)
 app.include_router(payment_accounts_router)
+app.include_router(paypal_admin_router)
 app.include_router(organizations_router)
 app.include_router(public_router)
 app.include_router(stripe_router)

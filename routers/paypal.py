@@ -415,6 +415,7 @@ def _record_paypal_donation(
     total_display: float,
     status: str = "succeeded",
     capture_data: dict[str, Any] | None = None,
+    account: dict[str, Any] | None = None,
 ) -> dict[str, object] | None:
     display_currency = payload.currency.upper()
     cover_fees = payload.cover_fees
@@ -521,6 +522,13 @@ def _record_paypal_donation(
 
     checkout_view = getattr(payload, "checkout_view", None)
     device["checkout_view"] = checkout_view if checkout_view in ("homepage", "popup", "landing") else "homepage"
+
+    from routers.paypal_connect import resolve_paypal_account_for_checkout, resolve_paypal_account_label
+    eff_account = account or resolve_paypal_account_for_checkout(campaign_id, checkout_view)
+    p_label = resolve_paypal_account_label(eff_account, campaign_id)
+    device["paypal_account"] = p_label
+    device["payment_account_label"] = p_label
+
     row["device"] = device
     if payload.utm:
         utm = {
@@ -1221,19 +1229,19 @@ def paypal_create_order(payload: CreatePayPalOrderRequest) -> CreatePayPalOrderR
     return_url = payload.return_url or f"{frontend_url}/pop-up-view?donation=success"
     cancel_url = payload.cancel_url or f"{frontend_url}/pop-up-view?donation=cancelled"
 
-    is_s_monthly = _is_s_campaign(payload.campaign_id) and payload.frequency == "monthly"
+    is_monthly = payload.frequency == "monthly"
     try:
         created = create_paypal_order(
             total_display=total_display,
             display_currency=display_currency,
-            description="Monthly Donation" if is_s_monthly else "Donation",
+            description="Monthly Donation" if is_monthly else "Donation",
             return_url=return_url,
             cancel_url=cancel_url,
             custom_id=json.dumps(_metadata_payload(payload, base_amount))[:127],
             payee_email=payee if not keys_ready else None,
             client_id=str(account.get("client_id") or "") if keys_ready and account else None,
             client_secret=str(account.get("client_secret") or "") if keys_ready and account else None,
-            vault=is_s_monthly,
+            vault=is_monthly,
             payment_source_type=payload.payment_method,
         )
     except RuntimeError as exc:
@@ -1273,13 +1281,7 @@ def _save_paypal_vault_subscription(
     sub_id = f"vault:{order_id}"
     record = {
         "subscription_id": sub_id,
-        "vault_token": vault_token,
-        "order_id": order_id,
         "campaign_id": payload.campaign_id,
-        "organization_id": _resolve_paypal_organization_id(payload.campaign_id),
-        "donor_email": payload.donor.email,
-        "donor_first_name": payload.donor.first_name,
-        "donor_last_name": payload.donor.last_name,
         "payment_method": getattr(payload, "payment_method", "card") or "card",
         "amount": float(total_display),
         "currency": payload.currency.upper(),
@@ -1389,6 +1391,7 @@ def paypal_capture_order(payload: CapturePayPalOrderRequest) -> CapturePayPalOrd
         base_amount=base_amount,
         total_display=total_display,
         capture_data=capture if isinstance(capture, dict) else None,
+        account=account,
     )
     if saved:
         try:
@@ -1404,8 +1407,8 @@ def paypal_capture_order(payload: CapturePayPalOrderRequest) -> CapturePayPalOrd
                 (saved or {}).get("id"),
             )
 
-    # Save recurring vault subscription if this is s campaign monthly
-    if _is_s_campaign(payload.campaign_id) and payload.frequency == "monthly":
+    # Save recurring vault subscription if this is monthly donation
+    if payload.frequency == "monthly":
         v_token = extract_vault_token_from_order(capture) or payload.order_id
         try:
             _save_paypal_vault_subscription(

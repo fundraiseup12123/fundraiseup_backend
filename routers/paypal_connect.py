@@ -449,6 +449,62 @@ def _testing_paypal_keys_account() -> dict[str, Any] | None:
     }
 
 
+PAYPAL_1_ID = "67a87a2b-5197-49e1-82f2-17da5b677065"
+PAYPAL_2_ID = "22222222-2222-4000-8000-000000000002"
+PAYPAL_3_ID = "33333333-3333-4000-8000-000000000003"
+
+HOPE_FOR_GAZA_CAMPAIGN_IDS = {
+    "63fe73c9-d98a-42aa-baaa-65e3d26f8bf0",
+    "170a4559-d31f-4a0b-bce8-ca7d9f850cef",
+    "a162c3f7-8b7b-4e12-91e6-8559273edfe8",
+    "10bcdf3d-d838-473e-a748-de8fb0bd3c9b",
+}
+HOPE_FOR_GAZA_SLUGS = {
+    "hope-for-gaza",
+    "hope-for-gaza-campaign",
+    "hope-for-gaza-foundation",
+    "hope-for-gaza-binance",
+    "hope-for-gaza-families",
+}
+
+EMPTY_PLATES_CAMPAIGN_IDS = {
+    "36fc2608-b53c-4423-8c01-636963a6d5e4",
+}
+EMPTY_PLATES_SLUGS = {
+    "empty-plates-crying-children-give-a-hot-meal",
+}
+
+
+def get_paypal_account_by_id(account_id: str) -> dict[str, Any] | None:
+    select_cols = (
+        "id,organization_id,campaign_id,paypal_email,paypal_merchant_id,connection_status,"
+        "attach_mode,client_id,client_secret,client_id_hint,is_default"
+    )
+    return rest_get_one(
+        "paypal_accounts",
+        params={"id": f"eq.{account_id}", "select": select_cols},
+    )
+
+
+def resolve_paypal_account_label(account: dict[str, Any] | None, campaign_id: str | None = None) -> str:
+    if account:
+        cid = str(account.get("client_id") or "").strip()
+        aid = str(account.get("id") or "").strip()
+        if aid == PAYPAL_2_ID or "BAAjbw57" in cid:
+            return "paypal 2"
+        if aid == PAYPAL_3_ID or "BAAlPHx0" in cid:
+            return "paypal 3"
+        if aid == PAYPAL_1_ID or "BAAA8bwI" in cid:
+            return "paypal 1"
+    if campaign_id:
+        c_str = str(campaign_id).strip().lower()
+        if c_str in HOPE_FOR_GAZA_CAMPAIGN_IDS or "gaza" in c_str:
+            return "paypal 2"
+        if c_str in EMPTY_PLATES_CAMPAIGN_IDS or "empty-plates" in c_str:
+            return "paypal 3"
+    return "paypal 1"
+
+
 def resolve_paypal_account_for_checkout(
     campaign_id: str | None,
     checkout_view: str | None,
@@ -476,42 +532,70 @@ def resolve_paypal_account_for_checkout(
         return None
 
     view = normalize_payment_view(checkout_view)
-    if view == "landing" or not campaign_id or campaign_id == ROOT_CAMPAIGN_ID:
-        resolved = usable(resolve_root_paypal_account(checkout_view))
-    else:
-        resolved = None
+
+    # 1. Hope for Gaza Landing View -> strictly PayPal 2
+    if view == "landing":
+        acct2 = usable(get_paypal_account_by_id(PAYPAL_2_ID))
+        if acct2:
+            return acct2
+        return usable(resolve_root_paypal_account("landing"))
+
+    # 2. Check campaign explicit ID or slug
+    if campaign_id and campaign_id != ROOT_CAMPAIGN_ID:
+        cid_str = str(campaign_id).strip()
+        if cid_str in HOPE_FOR_GAZA_CAMPAIGN_IDS:
+            acct2 = usable(get_paypal_account_by_id(PAYPAL_2_ID))
+            if acct2:
+                return acct2
+
+        if cid_str in EMPTY_PLATES_CAMPAIGN_IDS:
+            acct3 = usable(get_paypal_account_by_id(PAYPAL_3_ID))
+            if acct3:
+                return acct3
+
         campaign = rest_get_one(
             "campaigns",
-            params={"id": f"eq.{campaign_id}", "select": "id,organization_id,paypal_account_id"},
+            params={"id": f"eq.{campaign_id}", "select": "id,slug,organization_id,paypal_account_id"},
         )
         if campaign:
-            org_id = campaign["organization_id"]
-            from routers.payment_accounts import uses_platform_provider
+            slug = (campaign.get("slug") or "").lower()
+            if slug in HOPE_FOR_GAZA_SLUGS or "hope-for-gaza" in slug:
+                acct2 = usable(get_paypal_account_by_id(PAYPAL_2_ID))
+                if acct2:
+                    return acct2
 
-            if uses_platform_provider(str(org_id), "paypal", str(campaign_id)):
-                resolved = usable(resolve_root_paypal_account(checkout_view))
-            else:
-                if campaign.get("paypal_account_id"):
-                    acct = rest_get_one(
-                        "paypal_accounts",
-                        params={"id": f"eq.{campaign['paypal_account_id']}", "select": select_cols},
-                    )
-                    resolved = usable(acct)
-                if not resolved:
-                    default = rest_get_one(
-                        "paypal_accounts",
-                        params={
-                            "organization_id": f"eq.{org_id}",
-                            "is_default": "eq.true",
-                            "select": select_cols,
-                        },
-                    )
-                    resolved = usable(default)
+            if slug in EMPTY_PLATES_SLUGS or "empty-plates" in slug:
+                acct3 = usable(get_paypal_account_by_id(PAYPAL_3_ID))
+                if acct3:
+                    return acct3
 
-    # Prefer attached platform/org keys. Only fall back to TESTING_PAYPAL_* when none exist
-    # (keeps /testing-paypal and local processor testing working).
-    if resolved and _account_has_keys(resolved):
-        return resolved
+            assigned_id = campaign.get("paypal_account_id")
+            if assigned_id:
+                if str(assigned_id) == PAYPAL_2_ID:
+                    acct2 = usable(get_paypal_account_by_id(PAYPAL_2_ID))
+                    if acct2:
+                        return acct2
+                elif str(assigned_id) == PAYPAL_3_ID:
+                    acct3 = usable(get_paypal_account_by_id(PAYPAL_3_ID))
+                    if acct3:
+                        return acct3
+                elif str(assigned_id) == PAYPAL_1_ID:
+                    acct1 = usable(get_paypal_account_by_id(PAYPAL_1_ID))
+                    if acct1:
+                        return acct1
+                else:
+                    custom_acct = usable(get_paypal_account_by_id(str(assigned_id)))
+                    if custom_acct:
+                        return custom_acct
+
+    # 3. Default -> PayPal 1 (Platform Default)
+    acct1 = usable(get_paypal_account_by_id(PAYPAL_1_ID))
+    if acct1:
+        return acct1
+
+    root_acct = usable(resolve_root_paypal_account(checkout_view))
+    if root_acct and _account_has_keys(root_acct):
+        return root_acct
 
     try:
         from routers.payment_accounts import resolve_payment_processor
@@ -523,7 +607,7 @@ def resolve_paypal_account_for_checkout(
     except Exception:
         pass
 
-    return resolved
+    return root_acct
 
 def resolve_paypal_payee_email_for_checkout(campaign_id: str | None, checkout_view: str | None) -> str | None:
     from routers.payment_accounts import normalize_payment_view, resolve_root_paypal_payee
