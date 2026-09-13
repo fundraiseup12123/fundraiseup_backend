@@ -501,7 +501,7 @@ def resolve_paypal_account_label(account: dict[str, Any] | None, campaign_id: st
         if c_str in HOPE_FOR_GAZA_CAMPAIGN_IDS or "gaza" in c_str:
             return "Paypal--S"
         if c_str in EMPTY_PLATES_CAMPAIGN_IDS or "empty-plates" in c_str:
-            return "Paypal--Z"
+            return "Paypal Main"
     return "Paypal Main"
 
 
@@ -549,9 +549,9 @@ def resolve_paypal_account_for_checkout(
                 return acct2
 
         if cid_str in EMPTY_PLATES_CAMPAIGN_IDS:
-            acct3 = usable(get_paypal_account_by_id(PAYPAL_3_ID))
-            if acct3:
-                return acct3
+            acct1 = usable(get_paypal_account_by_id(PAYPAL_1_ID))
+            if acct1:
+                return acct1
 
         campaign = rest_get_one(
             "campaigns",
@@ -565,9 +565,9 @@ def resolve_paypal_account_for_checkout(
                     return acct2
 
             if slug in EMPTY_PLATES_SLUGS or "empty-plates" in slug:
-                acct3 = usable(get_paypal_account_by_id(PAYPAL_3_ID))
-                if acct3:
-                    return acct3
+                acct1 = usable(get_paypal_account_by_id(PAYPAL_1_ID))
+                if acct1:
+                    return acct1
 
             assigned_id = campaign.get("paypal_account_id")
             if assigned_id:

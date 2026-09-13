@@ -1473,7 +1473,7 @@ def _enrich_donation_fees(donation: dict[str, Any]) -> dict[str, Any]:
         if cid in ("63fe73c9-d98a-42aa-baaa-65e3d26f8bf0", "170a4559-d31f-4a0b-bce8-ca7d9f850cef", "a162c3f7-8b7b-4e12-91e6-8559273edfe8", "10bcdf3d-d838-473e-a748-de8fb0bd3c9b"):
             p_label = "Paypal--S"
         elif cid == "36fc2608-b53c-4423-8c01-636963a6d5e4":
-            p_label = "Paypal--Z"
+            p_label = "Paypal Main"
         elif str(donation.get("payment_processor") or "").lower() == "paypal" or str(donation.get("payment_method") or "").lower() == "paypal":
             p_label = "Paypal Main"
     if p_label:

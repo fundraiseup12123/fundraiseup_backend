@@ -1658,9 +1658,9 @@ def list_super_admin_paypal_accounts(
         target_acc_id = PAYPAL_1_ID
         if assigned_id == PAYPAL_2_ID or cid in HOPE_FOR_GAZA_CAMPAIGN_IDS or slug in HOPE_FOR_GAZA_SLUGS or "hope-for-gaza" in slug:
             target_acc_id = PAYPAL_2_ID
-        elif assigned_id == PAYPAL_3_ID or cid in EMPTY_PLATES_CAMPAIGN_IDS or slug in EMPTY_PLATES_SLUGS or "empty-plates" in slug:
+        elif assigned_id == PAYPAL_3_ID and cid not in EMPTY_PLATES_CAMPAIGN_IDS and slug not in EMPTY_PLATES_SLUGS and "empty-plates" not in slug:
             target_acc_id = PAYPAL_3_ID
-        elif assigned_id == PAYPAL_1_ID:
+        elif assigned_id == PAYPAL_1_ID or cid in EMPTY_PLATES_CAMPAIGN_IDS or slug in EMPTY_PLATES_SLUGS or "empty-plates" in slug:
             target_acc_id = PAYPAL_1_ID
 
         label = "Paypal Main" if target_acc_id == PAYPAL_1_ID else ("Paypal--S" if target_acc_id == PAYPAL_2_ID else "Paypal--Z")
