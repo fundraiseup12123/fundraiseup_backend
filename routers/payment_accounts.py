@@ -1593,6 +1593,8 @@ def list_super_admin_paypal_accounts(
         PAYPAL_1_ID,
         PAYPAL_2_ID,
         PAYPAL_3_ID,
+        PAYPAL_4_ID,
+        PAYPAL_4_CLIENT_ID,
         HOPE_FOR_GAZA_CAMPAIGN_IDS,
         HOPE_FOR_GAZA_SLUGS,
         EMPTY_PLATES_CAMPAIGN_IDS,
@@ -1619,6 +1621,18 @@ def list_super_admin_paypal_accounts(
             "client_id": acc_map.get(PAYPAL_1_ID, {}).get("client_id") or "BAAA8bwILhcDsq135RPPtPqSfC2AGgOS_tzDL67GWUiVoLvPcYicHqL5zPu5shugEYBXI11ShqSHSgBidM",
             "client_id_hint": acc_map.get(PAYPAL_1_ID, {}).get("client_id_hint") or "BAAA...BidM",
             "connection_status": acc_map.get(PAYPAL_1_ID, {}).get("connection_status") or "active",
+        },
+        {
+            "id": PAYPAL_4_ID,
+            "key": "paypal_4",
+            "label": "Paypal 4",
+            "name": "Paypal 4",
+            "tag": "All Campaigns Card Dedicated",
+            "description": "Dedicated PayPal account receiving all once and monthly card donations across all campaigns.",
+            "is_default": False,
+            "client_id": acc_map.get(PAYPAL_4_ID, {}).get("client_id") or PAYPAL_4_CLIENT_ID,
+            "client_id_hint": acc_map.get(PAYPAL_4_ID, {}).get("client_id_hint") or "BAAL...zGPA",
+            "connection_status": acc_map.get(PAYPAL_4_ID, {}).get("connection_status") or "active",
         },
         {
             "id": PAYPAL_2_ID,
@@ -1656,14 +1670,20 @@ def list_super_admin_paypal_accounts(
         assigned_id = c.get("paypal_account_id")
 
         target_acc_id = PAYPAL_1_ID
-        if assigned_id == PAYPAL_2_ID and cid not in HOPE_FOR_GAZA_CAMPAIGN_IDS and slug not in HOPE_FOR_GAZA_SLUGS and "hope-for-gaza" not in slug:
+        if assigned_id == PAYPAL_4_ID:
+            target_acc_id = PAYPAL_4_ID
+        elif assigned_id == PAYPAL_2_ID and cid not in HOPE_FOR_GAZA_CAMPAIGN_IDS and slug not in HOPE_FOR_GAZA_SLUGS and "hope-for-gaza" not in slug:
             target_acc_id = PAYPAL_2_ID
         elif assigned_id == PAYPAL_3_ID and cid not in EMPTY_PLATES_CAMPAIGN_IDS and slug not in EMPTY_PLATES_SLUGS and "empty-plates" not in slug:
             target_acc_id = PAYPAL_3_ID
         elif assigned_id == PAYPAL_1_ID or cid in HOPE_FOR_GAZA_CAMPAIGN_IDS or slug in HOPE_FOR_GAZA_SLUGS or "hope-for-gaza" in slug or cid in EMPTY_PLATES_CAMPAIGN_IDS or slug in EMPTY_PLATES_SLUGS or "empty-plates" in slug:
             target_acc_id = PAYPAL_1_ID
 
-        label = "Paypal Main" if target_acc_id == PAYPAL_1_ID else ("Paypal--S" if target_acc_id == PAYPAL_2_ID else "Paypal--Z")
+        label = (
+            "Paypal 4"
+            if target_acc_id == PAYPAL_4_ID
+            else ("Paypal Main" if target_acc_id == PAYPAL_1_ID else ("Paypal--S" if target_acc_id == PAYPAL_2_ID else "Paypal--Z"))
+        )
 
         c_summary = {
             "id": cid,
@@ -1691,12 +1711,15 @@ def assign_super_admin_paypal_account(
     payload: AssignPayPalCampaignPayload,
     user: Annotated[AuthUser, Depends(require_super_admin)],
 ) -> dict[str, Any]:
-    from routers.paypal_connect import PAYPAL_1_ID, PAYPAL_2_ID, PAYPAL_3_ID
+    from routers.paypal_connect import PAYPAL_1_ID, PAYPAL_2_ID, PAYPAL_3_ID, PAYPAL_4_ID
 
     target_raw = payload.paypal_account.strip().lower()
     target_id = PAYPAL_1_ID
     label = "Paypal Main"
-    if target_raw in ("paypal--s", "paypals", "paypal 2", "paypal_2", "2", PAYPAL_2_ID):
+    if target_raw in ("paypal 4", "paypal_4", "4", "paypal4", PAYPAL_4_ID):
+        target_id = PAYPAL_4_ID
+        label = "Paypal 4"
+    elif target_raw in ("paypal--s", "paypals", "paypal 2", "paypal_2", "2", PAYPAL_2_ID):
         target_id = PAYPAL_2_ID
         label = "Paypal--S"
     elif target_raw in ("paypal--z", "paypalz", "paypal 3", "paypal_3", "3", PAYPAL_3_ID):
@@ -1725,11 +1748,13 @@ def update_super_admin_paypal_keys(
     user: Annotated[AuthUser, Depends(require_super_admin)],
 ) -> dict[str, Any]:
     from paypal_client import client_id_hint
-    from routers.paypal_connect import PAYPAL_1_ID, PAYPAL_2_ID, PAYPAL_3_ID
+    from routers.paypal_connect import PAYPAL_1_ID, PAYPAL_2_ID, PAYPAL_3_ID, PAYPAL_4_ID
 
     target_raw = payload.account_key.strip().lower()
     target_id = PAYPAL_1_ID
-    if target_raw in ("paypal 2", "paypal_2", "2", PAYPAL_2_ID):
+    if target_raw in ("paypal 4", "paypal_4", "4", "paypal4", PAYPAL_4_ID):
+        target_id = PAYPAL_4_ID
+    elif target_raw in ("paypal 2", "paypal_2", "2", PAYPAL_2_ID):
         target_id = PAYPAL_2_ID
     elif target_raw in ("paypal 3", "paypal_3", "3", PAYPAL_3_ID):
         target_id = PAYPAL_3_ID

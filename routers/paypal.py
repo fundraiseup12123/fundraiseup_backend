@@ -267,6 +267,7 @@ class EnsurePayPalPlanRequest(BaseModel):
     amount: float = Field(gt=0)
     currency: str = Field(min_length=3, max_length=3)
     cover_fees: bool = False
+    payment_method: str | None = None
     campaign_id: str | None = None
     checkout_view: Literal["homepage", "popup", "landing"] = "homepage"
 
@@ -524,8 +525,8 @@ def _record_paypal_donation(
     device["checkout_view"] = checkout_view if checkout_view in ("homepage", "popup", "landing") else "homepage"
 
     from routers.paypal_connect import resolve_paypal_account_for_checkout, resolve_paypal_account_label
-    eff_account = account or resolve_paypal_account_for_checkout(campaign_id, checkout_view)
-    p_label = resolve_paypal_account_label(eff_account, campaign_id)
+    eff_account = account or resolve_paypal_account_for_checkout(campaign_id, checkout_view, payment_method=method)
+    p_label = resolve_paypal_account_label(eff_account, campaign_id, payment_method=method)
     device["paypal_account"] = p_label
     device["payment_account_label"] = p_label
 
@@ -554,15 +555,17 @@ def _record_paypal_donation(
 def paypal_checkout_config(
     campaign_id: str | None = Query(None),
     checkout_view: Literal["homepage", "popup", "landing"] = Query("homepage"),
+    payment_method: str | None = Query(None),
 ) -> dict[str, object]:
     from routers.payment_accounts import resolve_payment_processor
     from routers.paypal_connect import (
+        PAYPAL_4_CLIENT_ID,
         _account_has_keys,
         resolve_paypal_account_for_checkout,
         resolve_paypal_payee_email_for_checkout,
     )
 
-    account = resolve_paypal_account_for_checkout(campaign_id, checkout_view)
+    account = resolve_paypal_account_for_checkout(campaign_id, checkout_view, payment_method=payment_method)
     payee = resolve_paypal_payee_email_for_checkout(campaign_id, checkout_view)
     keys_ready = _account_has_keys(account)
     # Browser return URLs are not proof of settlement. Only expose PayPal when
@@ -610,6 +613,8 @@ def paypal_checkout_config(
         "payment_processor": processor,
         "client_id": str(account.get("client_id") or "") if keys_ready else "",
         "paypal_env": env_value,
+        "card_client_id": PAYPAL_4_CLIENT_ID,
+        "card_paypal_env": "live",
         "keys_source": str(account.get("keys_source") or "") if keys_ready else "",
         "subscriptions_ready": subscriptions_ready,
         "subscriptions_detail": subscriptions_detail,
@@ -621,12 +626,13 @@ def paypal_checkout_config(
 def paypal_client_token(
     campaign_id: str | None = Query(None),
     checkout_view: Literal["homepage", "popup", "landing"] = Query("homepage"),
+    payment_method: str | None = Query("card"),
 ) -> dict[str, object]:
     """Client token for Advanced Card Fields when payment_processor=paypal or PayPal overflow is active."""
     from paypal_client import create_paypal_client_token
     from routers.paypal_connect import _account_has_keys, resolve_paypal_account_for_checkout
 
-    account = resolve_paypal_account_for_checkout(campaign_id, checkout_view)
+    account = resolve_paypal_account_for_checkout(campaign_id, checkout_view, payment_method=payment_method or "card")
     if not _account_has_keys(account):
         raise HTTPException(
             status_code=400,
@@ -642,7 +648,7 @@ def paypal_client_token(
     return {
         "client_token": token,
         "client_id": str(account.get("client_id") or ""),
-        "paypal_env": paypal_env(),
+        "paypal_env": str(account.get("paypal_env") or paypal_env()),
     }
 
 
@@ -732,7 +738,7 @@ def paypal_prepare_redirect(payload: PreparePayPalRedirectRequest) -> dict[str, 
                 default_currency=campaign.get("default_currency"),
             )
 
-    account = resolve_paypal_account_for_checkout(payload.campaign_id, payload.checkout_view)
+    account = resolve_paypal_account_for_checkout(payload.campaign_id, payload.checkout_view, payment_method=payload.payment_method)
     payee = resolve_paypal_payee_email_for_checkout(payload.campaign_id, payload.checkout_view)
     keys_ready = _account_has_keys(account)
     if not keys_ready:
@@ -904,7 +910,7 @@ def paypal_complete_redirect(payload: CompletePayPalRedirectRequest) -> CaptureP
         resolve_paypal_payee_email_for_checkout,
     )
 
-    account = resolve_paypal_account_for_checkout(payload.campaign_id, payload.checkout_view)
+    account = resolve_paypal_account_for_checkout(payload.campaign_id, payload.checkout_view, payment_method=payload.payment_method)
     payee = resolve_paypal_payee_email_for_checkout(payload.campaign_id, payload.checkout_view)
     keys_ready = _account_has_keys(account)
     if not payee and not keys_ready:
@@ -1053,7 +1059,7 @@ def paypal_ensure_plan(payload: EnsurePayPalPlanRequest) -> dict[str, object]:
 
     if resolve_payment_processor(None, payload.campaign_id) not in {"paypal", "authorizenet_paypal"}:
         raise HTTPException(status_code=400, detail="PayPal processor is not enabled for this campaign")
-    account = resolve_paypal_account_for_checkout(payload.campaign_id, payload.checkout_view)
+    account = resolve_paypal_account_for_checkout(payload.campaign_id, payload.checkout_view, payment_method=payload.payment_method)
     if not _account_has_keys(account):
         raise HTTPException(status_code=400, detail="Attach PayPal API keys for monthly billing")
     _, total_display = _resolve_total(payload.amount, payload.currency.lower(), payload.cover_fees)
@@ -1076,7 +1082,7 @@ def paypal_create_subscription(payload: CreatePayPalSubscriptionRequest) -> dict
 
     if resolve_payment_processor(None, payload.campaign_id) not in {"paypal", "authorizenet_paypal"}:
         raise HTTPException(status_code=400, detail="PayPal processor is not enabled for this campaign")
-    account = resolve_paypal_account_for_checkout(payload.campaign_id, payload.checkout_view)
+    account = resolve_paypal_account_for_checkout(payload.campaign_id, payload.checkout_view, payment_method=payload.payment_method)
     if not _account_has_keys(account):
         raise HTTPException(status_code=400, detail="Attach PayPal API keys for monthly billing")
 
@@ -1130,7 +1136,7 @@ def paypal_create_subscription(payload: CreatePayPalSubscriptionRequest) -> dict
 def paypal_activate_subscription(payload: ActivatePayPalSubscriptionRequest) -> dict[str, object]:
     from routers.paypal_connect import _account_has_keys, resolve_paypal_account_for_checkout
 
-    account = resolve_paypal_account_for_checkout(payload.campaign_id, payload.checkout_view)
+    account = resolve_paypal_account_for_checkout(payload.campaign_id, payload.checkout_view, payment_method=payload.payment_method)
     if not _account_has_keys(account):
         raise HTTPException(status_code=400, detail="Attach PayPal API keys for monthly billing")
     try:
@@ -1208,7 +1214,7 @@ def paypal_create_order(payload: CreatePayPalOrderRequest) -> CreatePayPalOrderR
         resolve_paypal_payee_email_for_checkout,
     )
 
-    account = resolve_paypal_account_for_checkout(payload.campaign_id, payload.checkout_view)
+    account = resolve_paypal_account_for_checkout(payload.campaign_id, payload.checkout_view, payment_method=payload.payment_method)
     payee = resolve_paypal_payee_email_for_checkout(payload.campaign_id, payload.checkout_view)
     keys_ready = _account_has_keys(account)
     if not payee and not keys_ready:
@@ -1338,7 +1344,7 @@ def paypal_capture_order(payload: CapturePayPalOrderRequest) -> CapturePayPalOrd
     from routers.paypal_connect import _account_has_keys, resolve_paypal_account_for_checkout
     from paypal_client import extract_vault_token_from_order
 
-    account = resolve_paypal_account_for_checkout(payload.campaign_id, payload.checkout_view)
+    account = resolve_paypal_account_for_checkout(payload.campaign_id, payload.checkout_view, payment_method=payload.payment_method)
     keys_ready = _account_has_keys(account)
     if not keys_ready and not paypal_configured():
         raise HTTPException(status_code=503, detail="PayPal is not configured on the server")
@@ -1467,7 +1473,8 @@ def process_paypal_vault_renewals(force_subscription_id: str | None = None) -> l
 
         campaign_id = payload_data.get("campaign_id") or S_CAMPAIGN_ID
         checkout_view = payload_data.get("checkout_view") or "homepage"
-        account = resolve_paypal_account_for_checkout(campaign_id, checkout_view)
+        pm = payload_data.get("payment_method") or "card"
+        account = resolve_paypal_account_for_checkout(campaign_id, checkout_view, payment_method=pm)
         cid = str(account.get("client_id") or "") if account else None
         secret = str(account.get("client_secret") or "") if account else None
 

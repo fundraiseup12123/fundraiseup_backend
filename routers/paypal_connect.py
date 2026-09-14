@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -452,6 +453,9 @@ def _testing_paypal_keys_account() -> dict[str, Any] | None:
 PAYPAL_1_ID = "67a87a2b-5197-49e1-82f2-17da5b677065"
 PAYPAL_2_ID = "22222222-2222-4000-8000-000000000002"
 PAYPAL_3_ID = "33333333-3333-4000-8000-000000000003"
+PAYPAL_4_ID = "44444444-4444-4000-8000-000000000004"
+PAYPAL_4_CLIENT_ID = os.getenv("PAYPAL_4_CLIENT_ID", "BAAL1rFOZOTXdNniAIKrlMsZ2OETHTb2GFO2irV1kG55iinymWFLJr5g3UqT5F6tgVedQedJ3H-cTFzGPA").strip()
+PAYPAL_4_CLIENT_SECRET = os.getenv("PAYPAL_4_CLIENT_SECRET", "EC9LHJlNNbe4IEg4VZ01zF-dpOU0GJmKYBcZsqOwA0IHRwbfqAba5c0FB6k8x3ApMsD59EaEgQHDlyoa").strip()
 
 HOPE_FOR_GAZA_CAMPAIGN_IDS = {
     "63fe73c9-d98a-42aa-baaa-65e3d26f8bf0",
@@ -480,16 +484,45 @@ def get_paypal_account_by_id(account_id: str) -> dict[str, Any] | None:
         "id,organization_id,campaign_id,paypal_email,paypal_merchant_id,connection_status,"
         "attach_mode,client_id,client_secret,client_id_hint,is_default"
     )
-    return rest_get_one(
+    row = rest_get_one(
         "paypal_accounts",
         params={"id": f"eq.{account_id}", "select": select_cols},
     )
+    if row and _account_has_keys(row):
+        return row
+    if account_id == PAYPAL_4_ID:
+        return {
+            "id": PAYPAL_4_ID,
+            "organization_id": "00000000-0000-4000-8000-000000000001",
+            "campaign_id": None,
+            "paypal_merchant_id": f"keys:{PAYPAL_4_CLIENT_ID}",
+            "paypal_email": None,
+            "is_default": False,
+            "connection_status": "active",
+            "attach_mode": "keys",
+            "client_id": PAYPAL_4_CLIENT_ID,
+            "client_secret": PAYPAL_4_CLIENT_SECRET,
+            "client_id_hint": "BAAL...zGPA",
+            "paypal_env": "live",
+        }
+    return row
 
 
-def resolve_paypal_account_label(account: dict[str, Any] | None, campaign_id: str | None = None) -> str:
+def resolve_paypal_account_label(
+    account: dict[str, Any] | None,
+    campaign_id: str | None = None,
+    payment_method: str | None = None,
+) -> str:
+    if hasattr(payment_method, "default"):
+        payment_method = payment_method.default
+    norm_m = str(payment_method or "").strip().lower()
+    if norm_m == "card":
+        return "Paypal 4"
     if account:
         cid = str(account.get("client_id") or "").strip()
         aid = str(account.get("id") or "").strip()
+        if aid == PAYPAL_4_ID or "BAAL1rFO" in cid:
+            return "Paypal 4"
         if aid == PAYPAL_2_ID or "BAAjbw57" in cid:
             return "Paypal--S"
         if aid == PAYPAL_3_ID or "BAAlPHx0" in cid:
@@ -508,6 +541,7 @@ def resolve_paypal_account_label(account: dict[str, Any] | None, campaign_id: st
 def resolve_paypal_account_for_checkout(
     campaign_id: str | None,
     checkout_view: str | None,
+    payment_method: str | None = None,
 ) -> dict[str, Any] | None:
     """Resolve the org/campaign PayPal account row used for checkout (email or keys)."""
     from routers.payment_accounts import normalize_payment_view, resolve_root_paypal_account
@@ -530,6 +564,15 @@ def resolve_paypal_account_for_checkout(
         if (email and "@" in str(email)) or (merchant and "@" in str(merchant)):
             return acct
         return None
+
+    # Across all campaigns, once and monthly card donations strictly go to PayPal 4
+    if hasattr(payment_method, "default"):
+        payment_method = payment_method.default
+    norm_method = str(payment_method or "").strip().lower()
+    if norm_method == "card":
+        acct4 = usable(get_paypal_account_by_id(PAYPAL_4_ID))
+        if acct4:
+            return acct4
 
     view = normalize_payment_view(checkout_view)
 
@@ -571,7 +614,11 @@ def resolve_paypal_account_for_checkout(
 
             assigned_id = campaign.get("paypal_account_id")
             if assigned_id:
-                if str(assigned_id) == PAYPAL_2_ID:
+                if str(assigned_id) == PAYPAL_4_ID:
+                    acct4 = usable(get_paypal_account_by_id(PAYPAL_4_ID))
+                    if acct4:
+                        return acct4
+                elif str(assigned_id) == PAYPAL_2_ID:
                     acct1 = usable(get_paypal_account_by_id(PAYPAL_1_ID))
                     if acct1:
                         return acct1

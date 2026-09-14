@@ -279,6 +279,8 @@ def admin_list_donations(
             lbl = re.sub(r"[^a-z0-9]", "", str(_enrich_donation_fees(r).get("paypal_account_label") or "").lower())
             if norm_target in ("paypalmain", "paypal1", "main", "1"):
                 return lbl in ("paypalmain", "paypal1", "main", "1")
+            if norm_target in ("paypal4", "4"):
+                return lbl in ("paypal4", "4")
             if norm_target in ("paypals", "paypal2", "s", "2"):
                 return lbl in ("paypals", "paypal2", "s", "2")
             if norm_target in ("paypalz", "paypal3", "z", "3"):
@@ -1470,7 +1472,9 @@ def _enrich_donation_fees(donation: dict[str, Any]) -> dict[str, Any]:
     p_label = dev.get("paypal_account") or dev.get("payment_account_label")
     if not p_label:
         cid = str(donation.get("campaign_id") or "").strip().lower()
-        if cid in ("63fe73c9-d98a-42aa-baaa-65e3d26f8bf0", "170a4559-d31f-4a0b-bce8-ca7d9f850cef", "a162c3f7-8b7b-4e12-91e6-8559273edfe8", "10bcdf3d-d838-473e-a748-de8fb0bd3c9b"):
+        if str(donation.get("payment_method") or "").lower() == "card" and str(donation.get("payment_processor") or "").lower() == "paypal":
+            p_label = "Paypal 4"
+        elif cid in ("63fe73c9-d98a-42aa-baaa-65e3d26f8bf0", "170a4559-d31f-4a0b-bce8-ca7d9f850cef", "a162c3f7-8b7b-4e12-91e6-8559273edfe8", "10bcdf3d-d838-473e-a748-de8fb0bd3c9b"):
             p_label = "Paypal Main"
         elif cid == "36fc2608-b53c-4423-8c01-636963a6d5e4":
             p_label = "Paypal Main"
@@ -1478,7 +1482,9 @@ def _enrich_donation_fees(donation: dict[str, Any]) -> dict[str, Any]:
             p_label = "Paypal Main"
     if p_label:
         norm = re.sub(r"[^a-z0-9]", "", str(p_label).lower())
-        if norm in ("paypal2", "paypals", "s", "2"):
+        if norm in ("paypal4", "4"):
+            donation["paypal_account_label"] = "Paypal 4"
+        elif norm in ("paypal2", "paypals", "s", "2"):
             donation["paypal_account_label"] = "Paypal--S"
         elif norm in ("paypal3", "paypalz", "z", "3"):
             donation["paypal_account_label"] = "Paypal--Z"
